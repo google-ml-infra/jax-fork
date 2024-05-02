@@ -1,0 +1,70 @@
+name: CUDA Medium CI
+on:
+  # Trigger the workflow on push or pull request,
+  # but only for the main branch
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+permissions:
+  contents: read  # to fetch code
+  actions: write  # to cancel previous workflows
+jobs:
+  build:
+    name: "build with 3.12 py CUDA"
+    runs-on: "arc-linux-x86-g2-96-l4-8gpu"
+    container:
+        image: gcr.io/tensorflow-testing/nosla-cuda12.2-cudnn8.9-ubuntu20.04-manylinux2014-multipython
+    timeout-minutes: 60
+    steps:
+    - name: Cancel previous
+      uses: styfle/cancel-workflow-action@0.12.0
+      with:
+        access_token: ${{ github.token }}
+      if: ${{github.ref != 'refs/heads/main'}}
+    - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # ratchet:actions/checkout@v4
+    - name: Run tests
+      run: |
+        set -x
+        nvidia-smi
+        python3.12 -m pip install -U pip
+        python3.12 -m pip install jaxlib==0.4.21+cuda12.cudnn89 -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+        python3.12 -m pip install -e .
+        python3.12 -m pip install --upgrade \
+          numpy=="1.26.0" scipy=="1.11.2" \
+          wheel pytest-xdist absl-py opt-einsum colorama portpicker \
+          matplotlib 'importlib_metadata>=4.6' hypothesis flatbuffers
+        export LD_LIBRARY_PATH="/usr/local/cuda:/usr/local/nvidia/lib64:/usr/local/cuda/extras/CUPTI/lib64:/usr/local/tensorrt/lib"
+        export NCCL_DEBUG=WARN
+        nvidia-smi
+        export TF_CPP_MIN_LOG_LEVEL=0
+        python3.12 -c "import jax; print(jax.default_backend()); print(jax.devices()); print(len(jax.devices()))"
+        # Runs non-multiaccelerator tests with one GPU apiece.
+        # It appears --run_under needs an absolute path.
+        bazel test \
+          --repo_env=PYTHON_BIN_PATH="$(which python3.12)" \
+          --//jax:build_jaxlib=false \
+          //tests:gpu_tests //tests:backend_independent_tests \
+          --test_env=XLA_PYTHON_CLIENT_ALLOCATOR=platform \
+          --run_under "$(pwd)/build/parallel_accelerator_execute.sh" \
+          --test_output=errors \
+          --jobs=16 \
+          --test_env=JAX_SKIP_SLOW_TESTS=1 \
+          --test_env=JAX_ACCELERATOR_COUNT=2 \
+          --test_env=JAX_TESTS_PER_ACCELERATOR=8 \
+          --test_env=JAX_EXCLUDE_TEST_TARGETS=PmapTest.testSizeOverflow \
+          --test_tag_filters=-multiaccelerator
+        
+        # Runs multiaccelerator tests with all GPUs.
+        bazel test \
+          --repo_env=PYTHON_BIN_PATH="$(which python3.12)" \
+          --//jax:build_jaxlib=false \
+          //tests:gpu_tests \
+          --test_env=XLA_PYTHON_CLIENT_ALLOCATOR=platform \
+          --test_output=errors \
+          --jobs=8 \
+          --test_env=JAX_SKIP_SLOW_TESTS=1 \
+          --test_tag_filters=multiaccelerator
