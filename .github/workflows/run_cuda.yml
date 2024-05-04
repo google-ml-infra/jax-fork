@@ -31,7 +31,7 @@ jobs:
         set -x
         nvidia-smi
         python3.12 -m pip install -U pip
-        python3.12 -m pip install jaxlib==0.4.21+cuda12.cudnn89 -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+        python3.12 -m pip install jaxlib==0.4.23+cuda12.cudnn89 -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
         python3.12 -m pip install -e .
         python3.12 -m pip install --upgrade \
           numpy=="1.26.0" scipy=="1.11.2" \
