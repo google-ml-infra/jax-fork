@@ -97,6 +97,7 @@ jobs:
         echo "JAX_THREEFRY_PARTITIONABLE=$JAX_THREEFRY_PARTITIONABLE"
         echo "JAX_ENABLE_CHECKS=$JAX_ENABLE_CHECKS"
         echo "JAX_SKIP_SLOW_TESTS=$JAX_SKIP_SLOW_TESTS"
+        python -m pip install --upgrade numpy==1.26.0
         python build/build.py 
         
         # Hand it off to next test cases
