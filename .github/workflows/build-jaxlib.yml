@@ -79,7 +79,7 @@ jobs:
         key: ${{ runner.os }}-py${{ matrix.python-version }}-pip-${{ hashFiles('**/setup.py', '**/requirements.txt', '**/test-requirements.txt') }}
     - name: Install dependencies
       run: |
-        pip install -r build/test-requirements.txt
+        python${{ matrix.python-version }} -m pip install -r build/test-requirements.txt
     - name: Build Jaxlib
       env:
         JAX_NUM_GENERATED_CASES: ${{ matrix.num_generated_cases }}
@@ -97,13 +97,12 @@ jobs:
         echo "JAX_THREEFRY_PARTITIONABLE=$JAX_THREEFRY_PARTITIONABLE"
         echo "JAX_ENABLE_CHECKS=$JAX_ENABLE_CHECKS"
         echo "JAX_SKIP_SLOW_TESTS=$JAX_SKIP_SLOW_TESTS"
-        python -m pip install --upgrade numpy==1.26.0
-        python build/build.py 
+        python${{ matrix.python-version }} build/build.py 
         
         # Hand it off to next test cases
-        python -m pip install dist/*.whl
-        python -m pip install -U -e .
+        python${{ matrix.python-version }} -m pip install dist/*.whl
+        python${{ matrix.python-version }} -m pip install -U -e .
         export TF_CPP_MIN_LOG_LEVEL=0
-        python -c "import jax; print(jax.default_backend()); print(jax.devices()); print(len(jax.devices()))"
+        python${{ matrix.python-version }} -c "import jax; print(jax.default_backend()); print(jax.devices()); print(len(jax.devices()))"
         # JAX_NUM_GENERATED_CASES=25 pytest -n auto --tb=short --maxfail=20 tests examples
         JAX_NUM_GENERATED_CASES=5 pytest -n auto --tb=short --maxfail=20 tests examples
