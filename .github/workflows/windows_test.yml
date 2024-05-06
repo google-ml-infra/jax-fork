@@ -1,8 +1,19 @@
 name: Quoct Windows CPU
+
 on:
-  schedule:
-    - cron: "0 12 * * *" # Daily at 12:00 UTC
-  workflow_dispatch: # allows triggering the workflow run manually
+  # Trigger the workflow on push or pull request,
+  # but only for the main branch
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read  # to fetch code
+  actions: write  # to cancel previous workflows
 
 env:
   DISTUTILS_USE_SDK: 1
