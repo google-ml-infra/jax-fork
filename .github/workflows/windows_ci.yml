@@ -10,14 +10,8 @@ env:
 
 jobs:
   win-wheels:
-    strategy:
-      fail-fast: true
-      matrix:
-        os: [win-2019-16core]
-        arch: [AMD64]
-        pyver: ['3.9']
-    name: ${{ matrix.os }} CI build
-    runs-on: ${{ matrix.os }}
+    name: Lib CI build
+    runs-on: arc-windows-x86-n2-64
 
     steps:
       - name: Cancel Previous Runs
@@ -36,7 +30,7 @@ jobs:
 
       - uses: actions/setup-python@82c7e631bb3cdc910f68e0081d67478d79c6982d # ratchet:actions/setup-python@v5
         with:
-          python-version: ${{ matrix.pyver }}
+          python-version: 3.9
           cache: 'pip'
 
       - name: Build wheels
