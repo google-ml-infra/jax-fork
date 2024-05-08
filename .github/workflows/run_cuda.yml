@@ -18,7 +18,7 @@ jobs:
     runs-on: "arc-linux-x86-g2-96-l4-8gpu"
     container:
         image: gcr.io/tensorflow-testing/nosla-cuda12.2-cudnn8.9-ubuntu20.04-manylinux2014-multipython
-    timeout-minutes: 60
+    timeout-minutes: 180
     steps:
     - name: Cancel previous
       uses: styfle/cancel-workflow-action@0.12.0
