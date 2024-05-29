@@ -1,0 +1,80 @@
+# Cloud TPU CI
+#
+# This job currently runs once per day. We use self-hosted TPU runners, so we'd
+# have to add more runners to run on every commit.
+#
+# This job's build matrix runs over several TPU architectures using both the
+# latest released jaxlib on PyPi ("pypi_latest") and the latest nightly
+# jaxlib.("nightly"). It also installs a matching libtpu, either the one pinned
+# to the release for "pypi_latest", or the latest nightly.for "nightly". It
+# always locally installs jax from github head (already checked out by the
+# Github Actions environment).
+
+name: CI - Cloud TPU Presubmit
+on:
+  # Trigger the workflow on push or pull request,
+  # but only for the main branch
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: write  # to cancel previous workflows
+jobs:
+  cloud-tpu-test:
+    strategy:
+      fail-fast: false # don't cancel all jobs on failure
+      matrix:
+        # Yeah we actually just want to rebuild jax but lets start here for testing
+        jaxlib-version: ["nightly"]
+        tpu-chips: ["8"]
+        python-version: ["3.10"]
+    name: "TPU test (jaxlib=${{ matrix.jaxlib-version }}, linux-tpu-v5-${{ matrix.tpu-chips }})"
+    env:
+      LIBTPU_OLDEST_VERSION_DATE: 20230927
+      ENABLE_PJRT_COMPATIBILITY: ${{ matrix.jaxlib-version == 'nightly+oldest_supported_libtpu' }}
+    runs-on: arc-linux-x86-ct5lp-224-8tpu
+    container:
+      image: tensorflow/build:latest-python${{ matrix.python-version }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash -ex {0}
+    steps:
+      # https://opensource.google/documentation/reference/github/services#actions
+      # mandates using a specific commit for non-Google actions. We use
+      # https://github.com/sethvargo/ratchet to pin specific versions.
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # ratchet:actions/checkout@v4
+      - name: Install JAX test requirements
+        run: |
+          pip install -U -r build/test-requirements.txt
+          pip install -U -r build/collect-profile-requirements.txt
+      - name: Install JAX
+        run: |
+          python3 build/build.py # ~10 minutes
+          pip uninstall -y jaxlib
+          pip install dist/*.whl
+          pip install -e .
+          # Note the version it installs! Should be today's date
+          pip install -U --no-index --pre libtpu-nightly -f https://storage.googleapis.com/jax-releases/libtpu_releases.html          
+          python3 -c 'import sys; print("python version:", sys.version)'
+          python3 -c 'import jax; print("jax version:", jax.__version__)'
+          python3 -c 'import jaxlib; print("jaxlib version:", jaxlib.__version__)'
+          # strings $HOME/.local/lib/python3.10/site-packages/libtpu/libtpu.so | grep 'Built on'
+          python3 -c 'import jax; print("libtpu version:",
+            jax.lib.xla_bridge.get_backend().platform_version)'
+      - name: Run tests
+        env:
+          JAX_PLATFORMS: tpu,cpu
+          PY_COLORS: 1
+          NUM_TESTS: ${{ matrix.tpu-chips }}
+        run: |
+          # Run single-accelerator tests in parallel
+          JAX_ENABLE_TPU_XDIST=true python3 -m pytest -n=$NUM_TESTS --tb=short \
+            --maxfail=20 -m "not multiaccelerator" tests examples
+          # Run multi-accelerator across all chips
+          python3 -m pytest --tb=short --maxfail=20 -m "multiaccelerator" tests
