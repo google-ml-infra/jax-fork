@@ -43,10 +43,10 @@ jobs:
           JAX_NUM_GENERATED_CASES: 25
         run: |
           # Run single-accelerator tests in parallel
+          mkdir results
           JAX_ENABLE_TPU_XDIST=true python3 -m pytest -n=$NUM_TESTS --tb=short \
             --junitxml=results/singlejunit.xml --maxfail=20 -m "not multiaccelerator" tests examples
           # Run multi-accelerator across all chips
-          mkdir results
           python3 -m pytest --tb=short --junitxml=results/multijunit.xml \
             --maxfail=20 -m "multiaccelerator" tests
       - name: 'Upload Artifact'
