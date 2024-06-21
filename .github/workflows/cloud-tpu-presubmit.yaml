@@ -36,7 +36,7 @@ jobs:
       - name: Build JAX
         run: |
           pip uninstall -y jaxlib
-          python3 build/build.py 
+          python3 build/build.py --use_clang 
           pip install -e .
           pip install dist/*.whl
           # Note the version it installs! Should be today's date
