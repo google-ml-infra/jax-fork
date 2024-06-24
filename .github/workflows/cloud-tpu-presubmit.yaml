@@ -32,6 +32,11 @@ jobs:
       - name: Install JAX test requirements
         run: |
           pip install -U -r build/test-requirements.txt
+      - name: DEBUG HALT
+        run: |
+          echo "Halting"
+          sleep 180m
+      # TODO: build jax should be done on a step prior or we should just bazel test
       - name: Build JAX
         run: |
           pip uninstall -y jaxlib
