@@ -37,6 +37,7 @@ jobs:
           pip uninstall -y jaxlib
           python3 build/build.py --use_clang 
           pip install -e .
+          ls -la dist/*.whl
           pip install dist/*.whl
           # Note the version it installs! Should be today's date
           pip install -U --no-index --pre libtpu-nightly -f https://storage.googleapis.com/jax-releases/libtpu_releases.html          
