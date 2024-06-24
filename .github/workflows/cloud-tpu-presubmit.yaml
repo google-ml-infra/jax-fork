@@ -42,7 +42,7 @@ jobs:
           # Note the version it installs! Should be today's date
           pip install -U --no-index --pre libtpu-nightly -f https://storage.googleapis.com/jax-releases/libtpu_releases.html 
           # Everything being built in this step downgrades numpy, reupgrade it    
-          pip install numpy >= 2.0.0    
+          pip install "numpy>=2.0.0"
           python3 -c 'import sys; print("python version:", sys.version)'
           python3 -c 'import jax; print("jax version:", jax.__version__)'
           python3 -c 'import jaxlib; print("jaxlib version:", jaxlib.__version__)'
