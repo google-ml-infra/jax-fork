@@ -32,9 +32,20 @@ jobs:
       - name: Install JAX test requirements
         run: |
           pip install -U -r build/test-requirements.txt
-          pip install -U -r build/collect-profile-requirements.txt
       - name: Build JAX
-        run: "pip uninstall -y jaxlib\npython3 build/build.py --use_clang \npip install -e .\npip install dist/*.whl\n# Note the version it installs! Should be today's date\npip install -U --no-index --pre libtpu-nightly -f https://storage.googleapis.com/jax-releases/libtpu_releases.html          \npython3 -c 'import sys; print(\"python version:\", sys.version)'\npython3 -c 'import jax; print(\"jax version:\", jax.__version__)'\npython3 -c 'import jaxlib; print(\"jaxlib version:\", jaxlib.__version__)'\n# strings $HOME/.local/lib/python3.10/site-packages/libtpu/libtpu.so | grep 'Built on'\npython3 -c 'import jax; print(\"libtpu version:\",\n  jax.lib.xla_bridge.get_backend().platform_version)'\n"
+        run: |
+          pip install -U -r build/requirements.txt \
+          pip uninstall -y jaxlib \
+          python3 build/build.py --use_clang \
+          pip install -e . \
+          pip install dist/*.whl \
+          # Note the version it installs! Should be today's date \
+          pip install -U --no-index --pre libtpu-nightly -f https://storage.googleapis.com/jax-releases/libtpu_releases.html \
+          python3 -c 'import sys; print(\"python version:\", sys.version)' \
+          python3 -c 'import jax; print(\"jax version:\", jax.__version__)' \
+          python3 -c 'import jaxlib; print(\"jaxlib version:\", jaxlib.__version__)' \
+          # strings $HOME/.local/lib/python3.10/site-packages/libtpu/libtpu.so | grep 'Built on' \
+          python3 -c 'import jax; print(\"libtpu version:\",\n  jax.lib.xla_bridge.get_backend().platform_version)'\n"
       - name: Run tests
         env:
           JAX_PLATFORMS: tpu,cpu
