@@ -5,7 +5,6 @@ on:
   pull_request:
     branches:
       - main
-    types: [labeled, synchronize]
   workflow_dispatch:
 # Cancel any previous iterations if a new commit is pushed
 concurrency:
@@ -36,3 +35,26 @@ jobs:
           JAX_PLATFORMS: gpu,cpu
         run: |
           python -m pytest -n 8 --tb=short --maxfail=20 tests examples
+  cpu-stress:
+    strategy:
+      matrix:
+        runner: ["arc-linux-x86-n2-64"]
+        instances: ["one"]
+      fail-fast: true
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    container:
+      # TODO: Needs newer, light weight image
+      image: index.docker.io/tensorflow/build@sha256:7fb38f0319bda36393cad7f40670aa22352b44421bb906f5cf34d543acd8e1d2 # ratchet:tensorflow/build:latest-python3.11
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # ratchet:actions/checkout@v4
+      # Install JAX, this should correspond to the code or pytest may be out of sync
+      - name: Install JAX
+        run: |
+          pip install -U --pre jax==jax-0.4.26.dev20240324 -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
+      - name: Test JAX
+        env: 
+          JAX_NUM_GENERATED_CASES: 25
+          JAX_PLATFORMS: cpu
+        run: |
+          python -m pytest -n auto --tb=short --maxfail=20 tests examples
