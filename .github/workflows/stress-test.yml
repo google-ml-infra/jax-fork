@@ -27,7 +27,7 @@ jobs:
       # Install JAX, this should correspond to the code or pytest may be out of sync
       - name: Install JAX
         run: |
-          pip install -U --pre jax[cuda12]==jax-0.4.26.dev20240324 -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
+          pip install -U --pre jax[cuda12]==jax-0.4.31.dev20240625 -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
           nvidia-smi
       - name: Test JAX
         env: 
@@ -51,7 +51,7 @@ jobs:
       # Install JAX, this should correspond to the code or pytest may be out of sync
       - name: Install JAX
         run: |
-          pip install -U --pre jax==jax-0.4.26.dev20240324 -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
+          pip install -U --pre jax==jax-0.4.31.dev20240625 -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
       - name: Test JAX
         env: 
           JAX_NUM_GENERATED_CASES: 25
