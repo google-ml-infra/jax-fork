@@ -14,6 +14,7 @@ jobs:
   cuda-stress:
     strategy:
       matrix:
+        #TODO: need to fix naming here, this pool is only allocating 4 gpus
         runner: ["arc-linux-x86-g2-96-l4-8gpu"]
         instances: ["one"]
     runs-on: ${{ matrix.runner }}
@@ -34,7 +35,7 @@ jobs:
           JAX_NUM_GENERATED_CASES: 25
           JAX_PLATFORMS: gpu
         run: |
-          python -m pytest -n 8 --tb=short --maxfail=20 tests examples
+          python -m pytest -n 4 --tb=short --maxfail=20 tests examples
   cpu-stress:
     strategy:
       matrix:
