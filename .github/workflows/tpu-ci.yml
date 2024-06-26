@@ -10,7 +10,7 @@
 # always locally installs jax from github head (already checked out by the
 # Github Actions environment).
 
-name: CI - Cloud TPU Presubmit
+name: CI - Cloud TPU Presubmit Two
 on:
   # Trigger the workflow on push or pull request,
   # but only for the main branch
