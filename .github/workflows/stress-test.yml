@@ -27,6 +27,7 @@ jobs:
       # Install JAX, this should correspond to the code or pytest may be out of sync
       - name: Install JAX
         run: |
+          pip install -U -r build/test-requirements.txt
           pip install -U --pre jax[cuda12]==0.4.31.dev20240625 -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
           nvidia-smi
       - name: Test JAX
@@ -34,7 +35,6 @@ jobs:
           JAX_NUM_GENERATED_CASES: 25
           JAX_PLATFORMS: gpu,cpu
         run: |
-          pip install -U -r build/test-requirements.txt
           python -m pytest -n 8 --tb=short --maxfail=20 tests examples
   cpu-stress:
     strategy:
@@ -52,11 +52,10 @@ jobs:
       # Install JAX, this should correspond to the code or pytest may be out of sync
       - name: Install JAX
         run: |
+          pip install -U -r build/test-requirements.txt
           pip install -U --pre jax==0.4.31.dev20240625 -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
       - name: Test JAX
         env: 
           JAX_NUM_GENERATED_CASES: 25
-          JAX_PLATFORMS: cpu
         run: |
-          pip install -U -r build/test-requirements.txt
           python -m pytest -n auto --tb=short --maxfail=20 tests examples
