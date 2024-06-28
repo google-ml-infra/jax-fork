@@ -18,8 +18,8 @@ jobs:
     name: "TPU v5e x 8 Presubmit"
     strategy:
       fail-fast: false # don't cancel all jobs on failure
-#      matrix:
-#        instances: ["one", "two"]
+      matrix:
+        instances: ["one", "two"]
     env:
       ENABLE_PJRT_COMPATIBILITY: 1
     # TODO: Needs final runs-on value
