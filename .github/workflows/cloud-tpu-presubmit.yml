@@ -19,7 +19,7 @@ jobs:
     strategy:
       fail-fast: false # don't cancel all jobs on failure
       matrix:
-        instances: ["one", "two"]
+        instances: ["one", "two", "three", "four"]
     env:
       ENABLE_PJRT_COMPATIBILITY: 1
     # TODO: Needs final runs-on value
