@@ -25,10 +25,7 @@ jobs:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # ratchet:actions/checkout@v4
       # Install JAX, this should correspond to the code or pytest may be out of sync
       - name: Wait For Connection
+        env:
+            INTERACTIVE_CI: 1
         run: |
-         
-      - name: Test JAX
-        env: 
-          JAX_NUM_GENERATED_CASES: 25
-        run: |
-          python -m pytest -n auto --tb=short --maxfail=20 tests examples
+          python3 ./build/wait_for_connection.py
