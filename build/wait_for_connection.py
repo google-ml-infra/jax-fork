@@ -5,7 +5,7 @@ import signal
 import threading
 
 last_time = time.time()
-timeout = 600 # 10 minutes for initial connection
+timeout = 3600 # 60 minutes for initial connection
 keep_alive_timeout=900 # 30 minutes for keep-alive if no closed message (allow for reconnects)
 
 
