@@ -26,6 +26,7 @@ jobs:
       # Install JAX, this should correspond to the code or pytest may be out of sync
       - name: Wait For Connection
         env:
-            INTERACTIVE_CI: 1
+            INTERACTIVE_CI: "1"
+            PYTHONUNBUFFERED: "1"
         run: |
           python3 ./build/wait_for_connection.py
