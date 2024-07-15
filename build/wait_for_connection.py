@@ -25,8 +25,8 @@ def wait_for_notification(address):
                     print("Received message")
                     if message == "keep_alive":
                         print("keep alive received")
-                        continue  # Keep-alive received, continue waiting
                         last_time = time.time()
+                        continue  # Keep-alive received, continue waiting
                     elif message == "closed":
                         print("Connection closed by the other process.")
                         return  # Graceful exit
@@ -41,12 +41,13 @@ def wait_for_notification(address):
 def timer():
     while True:
         print("Checking status")
-        if time.time() - last_time < timeout:
-            print("Still within acceptable time")
+        time_elapsed = time.time() - last_time
+        if time_elapsed < timeout:
+            print(f"Time since last keepalive {int(time_elapsed)}s")
         else:
             print("Timeout reached, exiting")
             os.kill(os.getpid(), signal.SIGTERM)
-        time.sleep(30)
+        time.sleep(60)
 
 if __name__ == "__main__":
     address = ('localhost', 12455)  # Address and port to listen on
