@@ -3,9 +3,10 @@ from multiprocessing.connection import Listener
 import time
 import signal
 import threading
+import sys
 
 last_time = time.time()
-timeout = 3600 # 60 minutes for initial connection
+timeout = 600 # 10 minutes for initial connection
 keep_alive_timeout=900 # 30 minutes for keep-alive if no closed message (allow for reconnects)
 
 
@@ -79,3 +80,5 @@ if __name__ == "__main__":
     wait_for_notification(address)  # Wait for connection and get the connection object
 
     print("Exiting connection wait loop.")
+    # Force a flush so we don't miss messages
+    sys.stdout.flush()
