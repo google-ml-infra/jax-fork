@@ -72,6 +72,10 @@ if __name__ == "__main__":
         print("No condition was met to wait for connection. Continuing Job")
         exit(0)
 
+    # Grab and print the data required to connect to this vm
+    host = os.environ.get("HOSTNAME")
+    print(f"Connection host: {host}")
+
     # Thread is running as a daemon so it will quit when the
     # main thread terminates.
     timer_thread = threading.Thread(target=timer, daemon = True)
