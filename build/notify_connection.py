@@ -6,7 +6,7 @@ import subprocess
 from multiprocessing.connection import Client
 
 # Configuration (same as wait_for_connection.py)
-address = ('localhost', 12455)
+address = ('127.0.0.1', 12455)
 keep_alive_interval = 30  # 30 seconds
 
 def timer():

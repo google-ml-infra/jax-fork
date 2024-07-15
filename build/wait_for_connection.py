@@ -47,7 +47,7 @@ def timer():
         time.sleep(30)
 
 if __name__ == "__main__":
-    address = ('localhost', 12455)  # Address and port to listen on
+    address = ('127.0.0.1', 12455)  # Address and port to listen on
     # Check if we should wait for the connection
     wait_for_connection = False
     if os.environ.get("WAIT_ON_ERROR") == "1": 
