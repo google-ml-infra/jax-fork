@@ -19,6 +19,7 @@ def wait_for_notification(address):
                     try:
                         message = conn.recv()
                     except EOFError as e: 
+                        print("EOFError occurred:", e)
                         break
                     print("Received message")
                     if message == "keep_alive":
@@ -47,7 +48,7 @@ def timer():
         time.sleep(30)
 
 if __name__ == "__main__":
-    address = ('127.0.0.1', 12455)  # Address and port to listen on
+    address = ('localhost', 12455)  # Address and port to listen on
     # Check if we should wait for the connection
     wait_for_connection = False
     if os.environ.get("WAIT_ON_ERROR") == "1": 
