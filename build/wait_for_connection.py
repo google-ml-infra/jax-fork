@@ -12,6 +12,7 @@ keep_alive_timeout=900 # 30 minutes for keep-alive if no closed message (allow f
 
 def wait_for_notification(address):
     """Waits for connection notification from the listener."""
+    global last_time
     while True:
         with Listener(address) as listener:
             print("Waiting for connection")
