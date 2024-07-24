@@ -15,9 +15,10 @@
 """Module for Pallas:TPU-specific JAX primitives and functions."""
 from __future__ import annotations
 
+from collections.abc import Callable
 import dataclasses
 import enum
-from typing import Any, Callable
+from typing import Any
 
 import jax
 from jax._src import api_util
@@ -160,16 +161,18 @@ run_scoped_p = jax_core.Primitive('run_scoped')
 run_scoped_p.multiple_results = True
 
 
-def run_scoped(f: Callable[..., None], *types, **kw_types) -> None:
+def run_scoped(f: Callable[..., Any], *types, **kw_types) -> Any:
   flat_types, in_tree = tree_util.tree_flatten((types, kw_types))
-  flat_fun, _ = api_util.flatten_fun(lu.wrap_init(f), in_tree)
+  flat_fun, out_tree_thunk = api_util.flatten_fun(lu.wrap_init(f), in_tree)
   avals = map(lambda t: t.get_aval(), flat_types)
   jaxpr, _, consts, () = pe.trace_to_jaxpr_dynamic(flat_fun, avals)
-  run_scoped_p.bind(*consts, jaxpr=jaxpr)
+  out = run_scoped_p.bind(*consts, jaxpr=jaxpr)
+  return tree_util.tree_unflatten(out_tree_thunk(), out)
 
 
 @run_scoped_p.def_effectful_abstract_eval
 def _run_scoped_abstract_eval(*args, jaxpr):
+  del args
   # jaxpr will have effects for its inputs (Refs that are allocated) and for
   # constvars (closed over Refs). The effects for the allocated Refs are local
   # to the jaxpr and shouldn't propagate out.
@@ -180,7 +183,7 @@ def _run_scoped_abstract_eval(*args, jaxpr):
           and eff.input_index >= len(jaxpr.constvars)
       )
   }
-  return [], nonlocal_effects
+  return [v.aval for v in jaxpr.outvars], nonlocal_effects
 
 
 class DeviceIdType(enum.Enum):
@@ -188,7 +191,9 @@ class DeviceIdType(enum.Enum):
   LOGICAL = "logical"
 
 
-def check_sem_avals(sem_aval, sem_indexers_avals, name):
+def check_sem_avals(sem_aval, sem_indexers_avals, name, allowed_semaphore_types=None):
+  if allowed_semaphore_types is None:
+    allowed_semaphore_types = {tpu_core.semaphore, tpu_core.barrier_semaphore}
   if not isinstance(sem_aval, state.AbstractRef):
     raise ValueError(f"Cannot {name} on a non-semaphore Ref: {sem_aval}")
   sem_shape = sem_aval.shape
@@ -197,11 +202,14 @@ def check_sem_avals(sem_aval, sem_indexers_avals, name):
   if sem_shape:
     raise ValueError(f"Cannot {name} on a non-()-shaped semaphore: {sem_shape}")
   sem_dtype = sem_aval.dtype
-  if not (
-      jnp.issubdtype(sem_dtype, tpu_core.semaphore)
-      or jnp.issubdtype(sem_dtype, tpu_core.barrier_semaphore)
+  if not any(
+      jnp.issubdtype(sem_dtype, sem_type)
+      for sem_type in allowed_semaphore_types
   ):
-    raise ValueError(f"Must {name} a REGULAR or BARRIER semaphore: {sem_dtype}")
+    raise ValueError(
+        f"Must {name} semaphores of the following types:"
+        f" {allowed_semaphore_types}"
+    )
 
 
 semaphore_read_p = jax_core.Primitive("semaphore_read")
@@ -220,7 +228,14 @@ def _semaphore_read_abstract_eval(
     args_tree,
 ):
   sem_aval, sem_indexers_avals = tree_util.tree_unflatten(args_tree, avals)
-  check_sem_avals(sem_aval, sem_indexers_avals, "read")
+  check_sem_avals(
+      sem_aval,
+      sem_indexers_avals,
+      "read",
+      allowed_semaphore_types={
+          tpu_core.dma_semaphore, tpu_core.semaphore, tpu_core.barrier_semaphore
+      },
+  )
   return jax_core.ShapedArray((), jnp.dtype("int32"))
 
 
@@ -402,7 +417,7 @@ class AsyncCopyDescriptor:
 dma_start_p = jax_core.Primitive('dma_start')
 dma_start_p.multiple_results = True
 
-@dma_start_p.def_abstract_eval
+@dma_start_p.def_effectful_abstract_eval
 def _dma_start_abstract_eval(*args, tree, device_id_type):
   (
       src_ref_aval,
@@ -430,7 +445,8 @@ def _dma_start_abstract_eval(*args, tree, device_id_type):
       raise ValueError(
           f"Cannot signal on a non-()-shaped semaphore: {src_sem_shape}"
       )
-  return []
+  n_src_indexers = len(tree_util.tree_leaves(src_indexers_avals))
+  return [], {state.ReadEffect(0), state.WriteEffect(n_src_indexers + 1)}
 
 def _dma_start_pp_eqn(eqn: jax_core.JaxprEqn,
                       context: jax_core.JaxprPpContext,
@@ -477,6 +493,13 @@ def dma_start_discharge_rule(in_avals, out_avals,
       src_sem_indexers,
       device_id,
   ) = tree_util.tree_unflatten(tree, args)
+  (
+      _,
+      src_indexers_avals,
+      _,
+      dst_indexers_avals,
+      *_
+  ) = tree_util.tree_unflatten(tree, in_avals)
   del out_avals, dst_sem, dst_sem_indexers
   is_remote = src_sem is not None and device_id is not None
   if is_remote:
@@ -487,34 +510,11 @@ def dma_start_discharge_rule(in_avals, out_avals,
     assert src_sem_indexers is None
     assert device_id is None
 
-  def _find_slice_start_size(indexer):
-    num_scalar_idxs = 0
-    # TODO(b/329733289): support strided load/store in interpret mode.
-    for s in indexer.indices:
-      if isinstance(s, Slice) and s.stride > 1:
-        raise NotImplementedError("Strides not supported in discharge"
-                                  " rule of dma_start.")
-      if not isinstance(s, Slice):
-        num_scalar_idxs += 1
-    indices = indexer.indices
-    scalar_dims = [not isinstance(s, Slice) and not s.shape for s in indices]
-    slice_starts = [s.start if isinstance(s, Slice) else s for s in indices]
-    slice_sizes = tuple(s.size if isinstance(s, Slice) else 1 for s in indices)
-    return scalar_dims, slice_starts, slice_sizes, num_scalar_idxs
+  num_src_index_vals = len(tree_util.tree_leaves(src_indexers_avals))
+  num_dst_index_vals = len(tree_util.tree_leaves(dst_indexers_avals))
 
-  num_src_index_vals = 0
   if src_indexers:
-    if len(src_indexers) != 1:
-      raise NotImplementedError("Multiple indexers not supported.")
-    idx = src_indexers[0]
-    if all((isinstance(s, Slice) or not s.shape) for s in idx.indices):
-      (_, slice_starts,
-       slice_sizes, num_scalar_idxs) = _find_slice_start_size(idx)
-      num_src_index_vals += num_scalar_idxs
-      updates = jax.lax.dynamic_slice(
-          src_ref, slice_starts, slice_sizes=slice_sizes)
-    else:
-      updates = src_ref[idx.indices]
+    updates = state_discharge.index_array(src_ref, src_indexers)
   else:
     updates = src_ref
 
@@ -541,22 +541,10 @@ def dma_start_discharge_rule(in_avals, out_avals,
     updates = jax.lax.dynamic_index_in_dim(
         global_updates, index, axis=0, keepdims=False)
 
-  num_dst_index_vals = 0
   if dst_indexers:
-    if len(dst_indexers) != 1:
-      raise NotImplementedError("Multiple indexers not supported.")
-    idx = dst_indexers[0]
-    if all((isinstance(s, Slice) or not s.shape) for s in idx.indices):
-      (_, slice_starts, slice_sizes,
-       num_scalar_idxs) = _find_slice_start_size(idx)
-      num_dst_index_vals += num_scalar_idxs
-      if updates.shape != slice_sizes:
-        raise ValueError("DMA src and dst slices must have same shape. "
-                         f"Got src={updates.shape}, dst={slice_sizes}")
-      new_dst = jax.lax.dynamic_update_slice(
-          dst_ref, updates, slice_starts)
-    else:
-      new_dst = dst_ref.at[idx.indices].set(updates)
+    _, new_dst = state_discharge.index_swap_array(
+        dst_ref, dst_indexers, updates
+    )
   else:
     new_dst = updates
 

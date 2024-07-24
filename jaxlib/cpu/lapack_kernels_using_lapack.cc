@@ -26,35 +26,35 @@ namespace ffi = xla::ffi;
 
 extern "C" {
 
-jax::Trsm<float>::FnType strsm_;
-jax::Trsm<double>::FnType dtrsm_;
-jax::Trsm<std::complex<float>>::FnType ctrsm_;
-jax::Trsm<std::complex<double>>::FnType ztrsm_;
+jax::TriMatrixEquationSolver<ffi::DataType::F32>::FnType strsm_;
+jax::TriMatrixEquationSolver<ffi::DataType::F64>::FnType dtrsm_;
+jax::TriMatrixEquationSolver<ffi::DataType::C64>::FnType ctrsm_;
+jax::TriMatrixEquationSolver<ffi::DataType::C128>::FnType ztrsm_;
 
 jax::LuDecomposition<ffi::DataType::F32>::FnType sgetrf_;
 jax::LuDecomposition<ffi::DataType::F64>::FnType dgetrf_;
 jax::LuDecomposition<ffi::DataType::C64>::FnType cgetrf_;
 jax::LuDecomposition<ffi::DataType::C128>::FnType zgetrf_;
 
-jax::Geqrf<float>::FnType sgeqrf_;
-jax::Geqrf<double>::FnType dgeqrf_;
-jax::Geqrf<std::complex<float>>::FnType cgeqrf_;
-jax::Geqrf<std::complex<double>>::FnType zgeqrf_;
+jax::QrFactorization<ffi::DataType::F32>::FnType sgeqrf_;
+jax::QrFactorization<ffi::DataType::F64>::FnType dgeqrf_;
+jax::QrFactorization<ffi::DataType::C64>::FnType cgeqrf_;
+jax::QrFactorization<ffi::DataType::C128>::FnType zgeqrf_;
 
-jax::Orgqr<float>::FnType sorgqr_;
-jax::Orgqr<double>::FnType dorgqr_;
-jax::Orgqr<std::complex<float>>::FnType cungqr_;
-jax::Orgqr<std::complex<double>>::FnType zungqr_;
+jax::OrthogonalQr<ffi::DataType::F32>::FnType sorgqr_;
+jax::OrthogonalQr<ffi::DataType::F64>::FnType dorgqr_;
+jax::OrthogonalQr<ffi::DataType::C64>::FnType cungqr_;
+jax::OrthogonalQr<ffi::DataType::C128>::FnType zungqr_;
 
 jax::CholeskyFactorization<ffi::DataType::F32>::FnType spotrf_;
 jax::CholeskyFactorization<ffi::DataType::F64>::FnType dpotrf_;
 jax::CholeskyFactorization<ffi::DataType::C64>::FnType cpotrf_;
 jax::CholeskyFactorization<ffi::DataType::C128>::FnType zpotrf_;
 
-jax::RealGesdd<float>::FnType sgesdd_;
-jax::RealGesdd<double>::FnType dgesdd_;
-jax::ComplexGesdd<std::complex<float>>::FnType cgesdd_;
-jax::ComplexGesdd<std::complex<double>>::FnType zgesdd_;
+jax::SingularValueDecomposition<ffi::DataType::F32>::FnType sgesdd_;
+jax::SingularValueDecomposition<ffi::DataType::F64>::FnType dgesdd_;
+jax::SingularValueDecompositionComplex<ffi::DataType::C64>::FnType cgesdd_;
+jax::SingularValueDecompositionComplex<ffi::DataType::C128>::FnType zgesdd_;
 
 jax::RealSyevd<float>::FnType ssyevd_;
 jax::RealSyevd<double>::FnType dsyevd_;
@@ -87,6 +87,22 @@ namespace jax {
 
 #define JAX_KERNEL_FNTYPE_MISMATCH_MSG "FFI Kernel FnType mismatch"
 
+static_assert(
+    std::is_same_v<jax::TriMatrixEquationSolver<ffi::DataType::F32>::FnType,
+                   jax::Trsm<float>::FnType>,
+    JAX_KERNEL_FNTYPE_MISMATCH_MSG);
+static_assert(
+    std::is_same_v<jax::TriMatrixEquationSolver<ffi::DataType::F64>::FnType,
+                   jax::Trsm<double>::FnType>,
+    JAX_KERNEL_FNTYPE_MISMATCH_MSG);
+static_assert(
+    std::is_same_v<jax::TriMatrixEquationSolver<ffi::DataType::C64>::FnType,
+                   jax::Trsm<std::complex<float>>::FnType>,
+    JAX_KERNEL_FNTYPE_MISMATCH_MSG);
+static_assert(
+    std::is_same_v<jax::TriMatrixEquationSolver<ffi::DataType::C128>::FnType,
+                   jax::Trsm<std::complex<double>>::FnType>,
+    JAX_KERNEL_FNTYPE_MISMATCH_MSG);
 static_assert(std::is_same_v<jax::LuDecomposition<ffi::DataType::F32>::FnType,
                              jax::Getrf<float>::FnType>,
               JAX_KERNEL_FNTYPE_MISMATCH_MSG);
@@ -98,6 +114,30 @@ static_assert(std::is_same_v<jax::LuDecomposition<ffi::DataType::C64>::FnType,
               JAX_KERNEL_FNTYPE_MISMATCH_MSG);
 static_assert(std::is_same_v<jax::LuDecomposition<ffi::DataType::C128>::FnType,
                              jax::Getrf<std::complex<double>>::FnType>,
+              JAX_KERNEL_FNTYPE_MISMATCH_MSG);
+static_assert(std::is_same_v<jax::QrFactorization<ffi::DataType::F32>::FnType,
+                             jax::Geqrf<float>::FnType>,
+              JAX_KERNEL_FNTYPE_MISMATCH_MSG);
+static_assert(std::is_same_v<jax::QrFactorization<ffi::DataType::F64>::FnType,
+                             jax::Geqrf<double>::FnType>,
+              JAX_KERNEL_FNTYPE_MISMATCH_MSG);
+static_assert(std::is_same_v<jax::QrFactorization<ffi::DataType::C64>::FnType,
+                             jax::Geqrf<std::complex<float>>::FnType>,
+              JAX_KERNEL_FNTYPE_MISMATCH_MSG);
+static_assert(std::is_same_v<jax::QrFactorization<ffi::DataType::C128>::FnType,
+                             jax::Geqrf<std::complex<double>>::FnType>,
+              JAX_KERNEL_FNTYPE_MISMATCH_MSG);
+static_assert(std::is_same_v<jax::OrthogonalQr<ffi::DataType::F32>::FnType,
+                             jax::Orgqr<float>::FnType>,
+              JAX_KERNEL_FNTYPE_MISMATCH_MSG);
+static_assert(std::is_same_v<jax::OrthogonalQr<ffi::DataType::F64>::FnType,
+                             jax::Orgqr<double>::FnType>,
+              JAX_KERNEL_FNTYPE_MISMATCH_MSG);
+static_assert(std::is_same_v<jax::OrthogonalQr<ffi::DataType::C64>::FnType,
+                             jax::Orgqr<std::complex<float>>::FnType>,
+              JAX_KERNEL_FNTYPE_MISMATCH_MSG);
+static_assert(std::is_same_v<jax::OrthogonalQr<ffi::DataType::C128>::FnType,
+                             jax::Orgqr<std::complex<double>>::FnType>,
               JAX_KERNEL_FNTYPE_MISMATCH_MSG);
 static_assert(
     std::is_same_v<jax::CholeskyFactorization<ffi::DataType::F32>::FnType,
@@ -114,6 +154,24 @@ static_assert(
 static_assert(
     std::is_same_v<jax::CholeskyFactorization<ffi::DataType::C128>::FnType,
                    jax::Potrf<std::complex<double>>::FnType>,
+    JAX_KERNEL_FNTYPE_MISMATCH_MSG);
+static_assert(
+    std::is_same_v<jax::SingularValueDecomposition<ffi::DataType::F32>::FnType,
+                   jax::RealGesdd<float>::FnType>,
+    JAX_KERNEL_FNTYPE_MISMATCH_MSG);
+static_assert(
+    std::is_same_v<jax::SingularValueDecomposition<ffi::DataType::F64>::FnType,
+                   jax::RealGesdd<double>::FnType>,
+    JAX_KERNEL_FNTYPE_MISMATCH_MSG);
+static_assert(
+    std::is_same_v<
+        jax::SingularValueDecompositionComplex<ffi::DataType::C64>::FnType,
+        jax::ComplexGesdd<std::complex<float>>::FnType>,
+    JAX_KERNEL_FNTYPE_MISMATCH_MSG);
+static_assert(
+    std::is_same_v<
+        jax::SingularValueDecompositionComplex<ffi::DataType::C128>::FnType,
+        jax::ComplexGesdd<std::complex<double>>::FnType>,
     JAX_KERNEL_FNTYPE_MISMATCH_MSG);
 
 #undef JAX_KERNEL_FNTYPE_MISMATCH_MSG
@@ -176,15 +234,37 @@ static auto init = []() -> int {
 
   // FFI Kernels
 
+  AssignKernelFn<TriMatrixEquationSolver<ffi::DataType::F32>>(strsm_);
+  AssignKernelFn<TriMatrixEquationSolver<ffi::DataType::F64>>(dtrsm_);
+  AssignKernelFn<TriMatrixEquationSolver<ffi::DataType::C64>>(ctrsm_);
+  AssignKernelFn<TriMatrixEquationSolver<ffi::DataType::C128>>(ztrsm_);
+
   AssignKernelFn<LuDecomposition<ffi::DataType::F32>>(sgetrf_);
   AssignKernelFn<LuDecomposition<ffi::DataType::F64>>(dgetrf_);
   AssignKernelFn<LuDecomposition<ffi::DataType::C64>>(cgetrf_);
   AssignKernelFn<LuDecomposition<ffi::DataType::C128>>(zgetrf_);
 
+  AssignKernelFn<QrFactorization<ffi::DataType::F32>>(sgeqrf_);
+  AssignKernelFn<QrFactorization<ffi::DataType::F64>>(dgeqrf_);
+  AssignKernelFn<QrFactorization<ffi::DataType::C64>>(cgeqrf_);
+  AssignKernelFn<QrFactorization<ffi::DataType::C128>>(zgeqrf_);
+
+  AssignKernelFn<OrthogonalQr<ffi::DataType::F32>>(sorgqr_);
+  AssignKernelFn<OrthogonalQr<ffi::DataType::F64>>(dorgqr_);
+  AssignKernelFn<OrthogonalQr<ffi::DataType::C64>>(cungqr_);
+  AssignKernelFn<OrthogonalQr<ffi::DataType::C128>>(zungqr_);
+
   AssignKernelFn<CholeskyFactorization<ffi::DataType::F32>>(spotrf_);
   AssignKernelFn<CholeskyFactorization<ffi::DataType::F64>>(dpotrf_);
   AssignKernelFn<CholeskyFactorization<ffi::DataType::C64>>(cpotrf_);
   AssignKernelFn<CholeskyFactorization<ffi::DataType::C128>>(zpotrf_);
+
+  AssignKernelFn<SingularValueDecomposition<ffi::DataType::F32>>(sgesdd_);
+  AssignKernelFn<SingularValueDecomposition<ffi::DataType::F64>>(dgesdd_);
+  AssignKernelFn<SingularValueDecompositionComplex<ffi::DataType::C64>>(
+      cgesdd_);
+  AssignKernelFn<SingularValueDecompositionComplex<ffi::DataType::C128>>(
+      zgesdd_);
 
   return 0;
 }();

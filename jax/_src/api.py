@@ -23,12 +23,12 @@ arrays.
 from __future__ import annotations
 
 import collections
-from collections.abc import Generator, Hashable, Iterable, Sequence
+from collections.abc import Callable, Generator, Hashable, Iterable, Sequence
 from functools import partial, lru_cache
 import inspect
 import math
 import typing
-from typing import (Any, Callable, Literal, NamedTuple, TypeVar, overload,
+from typing import (Any, Literal, NamedTuple, TypeVar, overload,
                     cast)
 import weakref
 
@@ -40,7 +40,7 @@ from jax._src import stages
 from jax._src.tree_util import (
     tree_map, tree_flatten, tree_unflatten, tree_structure, tree_transpose,
     tree_leaves, Partial, PyTreeDef, all_leaves, keystr, broadcast_prefix,
-    prefix_errors, generate_key_paths)
+    prefix_errors, generate_key_paths, tree_flatten_with_path)
 from jax._src import api_util
 from jax._src import config
 from jax._src import core
@@ -346,6 +346,14 @@ def xla_computation(fun: Callable,
                     donate_argnums: int | Iterable[int] = ()) -> Callable:
   """Creates a function that produces its XLA computation given example args.
 
+  .. warning::
+
+    This function is deprecated as of JAX v0.4.30, and will be removed in a future
+    JAX release. You can replace it with :ref:`ahead-of-time-lowering` APIs; for
+    example, ``jax.xla_computation(fn)(*args)`` can be replaced with
+    ``jax.jit(fn).lower(*args).compiler_ir('hlo')``.
+    See the `JAX 0.4.30 Change log`_ for more examples.
+
   Args:
     fun: Function from which to form XLA computations.
     static_argnums: See the :py:func:`jax.jit` docstring.
@@ -404,7 +412,7 @@ def xla_computation(fun: Callable,
   >>> import jax
   >>>
   >>> def f(x): return jax.numpy.sin(jax.numpy.cos(x))
-  >>> c = jax.xla_computation(f)(3.)
+  >>> c = jax.xla_computation(f)(3.)  # doctest: +SKIP
   >>> print(c.as_hlo_text())  # doctest: +SKIP
   HloModule xla_computation_f.6
   <BLANKLINE>
@@ -423,13 +431,13 @@ def xla_computation(fun: Callable,
 
   >>> import types
   >>> scalar = types.SimpleNamespace(shape=(), dtype=np.dtype(np.float32))
-  >>> c = jax.xla_computation(f)(scalar)
+  >>> c = jax.xla_computation(f)(scalar)  # doctest: +SKIP
 
 
   Here's an example that involves a parallel collective and axis name:
 
   >>> def f(x): return x - jax.lax.psum(x, 'i')
-  >>> c = jax.xla_computation(f, axis_env=[('i', 4)])(2)
+  >>> c = jax.xla_computation(f, axis_env=[('i', 4)])(2)  # doctest: +SKIP
   >>> print(c.as_hlo_text())  # doctest: +SKIP
   HloModule jaxpr_computation.9
   primitive_computation.3 {
@@ -457,7 +465,7 @@ def xla_computation(fun: Callable,
   ...   return rowsum, colsum, allsum
   ...
   >>> axis_env = [('i', 4), ('j', 2)]
-  >>> c = xla_computation(g, axis_env=axis_env)(5.)
+  >>> c = jax.xla_computation(g, axis_env=axis_env)(5.)  # doctest: +SKIP
   >>> print(c.as_hlo_text())  # doctest: +SKIP
   HloModule jaxpr_computation__1.19
   [removed uninteresting text here]
@@ -469,6 +477,8 @@ def xla_computation(fun: Callable,
     all-reduce.17 = f32[] all-reduce(parameter.2), replica_groups={{0,1,2,3,4,5,6,7}}, to_apply=primitive_computation__1.13
     ROOT tuple.18 = (f32[], f32[], f32[]) tuple(all-reduce.7, all-reduce.12, all-reduce.17)
   }
+
+  .. _JAX 0.4.30 Change log: https://jax.readthedocs.io/en/latest/changelog.html#jax-0-4-30-june-18-2024
   """
   if instantiate_const_outputs is not None:
     raise ValueError(
@@ -1211,11 +1221,20 @@ def vmap(fun: F,
     in_axes_flat = flatten_axes("vmap in_axes", in_tree, (in_axes, 0), kws=True)
     axis_size_ = (axis_size if axis_size is not None else
                   _mapped_axis_size(fun, in_tree, args_flat, in_axes_flat, "vmap"))
-    out_flat = batching.batch(
-        flat_fun, axis_name, axis_size_, in_axes_flat,
-        lambda: flatten_axes("vmap out_axes", out_tree(), out_axes),
-        spmd_axis_name=spmd_axis_name
-    ).call_wrapped(*args_flat)
+    try:
+      out_flat = batching.batch(
+          flat_fun, axis_name, axis_size_, in_axes_flat,
+          lambda: flatten_axes("vmap out_axes", out_tree(), out_axes),
+          spmd_axis_name=spmd_axis_name
+      ).call_wrapped(*args_flat)
+    except batching.SpecMatchError as e:
+      out_axes_flat = flatten_axes("vmap out_axes", out_tree(), out_axes)
+      out_axes_full = tree_unflatten(out_tree(), out_axes_flat)
+      pairs, _ = tree_flatten_with_path(out_axes_full, is_leaf=lambda x: x is None)
+
+      path, _ = pairs[e.leaf_idx]
+      raise ValueError(f'at vmap out_axes{keystr(path)}, got axis spec {e.dst} '
+                       f'but output was batched on axis {e.src}') from None
     return tree_unflatten(out_tree(), out_flat)
 
   return cast(F, vmap_f)
@@ -2454,13 +2473,13 @@ def device_put(
   with config.explicit_device_put_scope():
     x_flat, treedef = tree_flatten(x)
     if (device is None or
-         isinstance(device, (xc.Device, Sharding, TransferToMemoryKind))):
+        isinstance(device, (xc.Device, Sharding, TransferToMemoryKind))):
       device_flat = [device] * len(x_flat)
     else:
       device_flat = flatten_axes("device_put device", treedef, device)
 
     if (src is None or
-         isinstance(src, (xc.Device, Sharding, TransferToMemoryKind))):
+        isinstance(src, (xc.Device, Sharding, TransferToMemoryKind))):
       src_flat = [_infer_src_sharding(src, xf) for xf in x_flat]
     else:
       src_flat = flatten_axes("device_put source", treedef, src)

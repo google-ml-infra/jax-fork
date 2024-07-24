@@ -16,12 +16,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 import dataclasses
 import functools
 import math
 import operator
-from typing import Any, Callable, TypeVar
+from typing import Any, Hashable, TypeVar
 
 import jax
 from jax import lax
@@ -29,6 +29,7 @@ from jax import tree_util
 from jax._src import ad_checkpoint
 from jax._src import ad_util
 from jax._src import api_util
+from jax._src import config
 from jax._src import core as jax_core
 from jax._src import custom_derivatives
 from jax._src import linear_util as lu
@@ -111,10 +112,8 @@ class LoweringError(Exception):
 
 
 def _eval_index_map(
-    ctx: ModuleContext, idx, block_mapping: BlockMapping | None
+    ctx: ModuleContext, idx, block_mapping: BlockMapping
 ):
-  if block_mapping is None:
-    return None
   block_indices = lower_jaxpr_to_triton_ir(
       ctx, block_mapping.index_map_jaxpr.jaxpr, None, *idx
   )
@@ -186,13 +185,13 @@ def _process_grid_to_3d_grid(grid_mapping: GridMapping):
 
   # Preserve grid order provided to pallas_call
   for i, s in enumerate(grid_mapping.grid):
-    if i not in grid_mapping.mapped_dims:
+    if i not in grid_mapping.vmapped_dims:
       launch_grid.append(s)
       launch_grid_to_pallas_grid.append(i)
 
   # For mapped dims, iterate from inner to outer. This follows the pallas_call
   # batching rule that prepends the vmapped dimension.
-  for dim in reversed(grid_mapping.mapped_dims):
+  for dim in reversed(grid_mapping.vmapped_dims):
     s = grid_mapping.grid[dim]
     launch_grid.append(s)
     launch_grid_to_pallas_grid.append(dim)
@@ -251,12 +250,15 @@ def _new_ir_context() -> ir.Context:
 
 def lower_jaxpr_to_triton_module(
     jaxpr: jax_core.Jaxpr,
-    in_shapes,
+    in_out_shapes,
     grid_mapping: GridMapping,
     name: str,
     platform: str
 ) -> LoweringResult:
-  jaxpr, _ = pe.dce_jaxpr(jaxpr, [True] * len(jaxpr.outvars), instantiate=True)
+  with grid_mapping.trace_env():
+    jaxpr, _ = pe.dce_jaxpr(
+        jaxpr, [True] * len(jaxpr.outvars), instantiate=True
+    )
   with _new_ir_context(), ir.Location.unknown():
     module = ir.Module.create()
     param_types = [
@@ -283,7 +285,7 @@ def lower_jaxpr_to_triton_module(
       local_program_ids = [
           pid
           for i, pid in enumerate(program_ids)
-          if i not in grid_mapping.mapped_dims
+          if i not in grid_mapping.vmapped_dims
       ]
       ctx = ModuleContext(
           name, grid_mapping, local_program_ids, mlir.TracebackCaches(), platform
@@ -293,7 +295,7 @@ def lower_jaxpr_to_triton_module(
             "Scalar prefetch not supported in Triton lowering."
         )
       for bm in grid_mapping.block_mappings:
-        if bm is not None and not isinstance(bm.indexing_mode, Blocked):
+        if not isinstance(bm.indexing_mode, Blocked):
           raise NotImplementedError(
               "Only Blocked indexing mode is supported in Triton lowering."
           )
@@ -307,10 +309,8 @@ def lower_jaxpr_to_triton_module(
               start_idx,
               block_mapping.block_shape,
           )
-          if block_mapping is not None
-          else None
           for shape_dtype, block_mapping, start_idx in zip(
-              (*in_shapes, *[()] * grid_mapping.num_constant_operands),
+              in_out_shapes,
               grid_mapping.block_mappings,
               start_indices,
           )
@@ -1526,7 +1526,7 @@ def _ir_cast(src: ir.Value, dst_type: ir.Type, *, signed: bool) -> ir.Value:
 
 @register_lowering(lax.convert_element_type_p)
 def _convert_element_type_lowering_rule(
-    ctx: LoweringRuleContext, x, *, new_dtype, weak_type
+    ctx: LoweringRuleContext, x, *, new_dtype, weak_type, sharding
 ):
   [x_aval] = ctx.avals_in
   x = _ensure_ir_value(x, x_aval)
@@ -2236,6 +2236,14 @@ def _remat_lowering_rule(ctx: LoweringRuleContext, *args, jaxpr, **_):
 triton_lowering_rules[ad_util.stop_gradient_p] = lambda _, x: x
 
 
+@register_lowering(lax.axis_index_p)
+def _axis_index_rule(ctx: LoweringRuleContext, *, axis_name: Hashable):
+  grid_names = ctx.context.grid_mapping.grid_names
+  if axis_name in grid_names:
+    # We are querying a named axis corresponding to a grid dimension.
+    return _program_id_lowering_rule(ctx, axis=grid_names.index(axis_name))
+  raise LookupError(f"Axis name {axis_name} not found in grid.")
+
 def _is_read_only(ref_effects) -> bool:
   if len(ref_effects) == 0:
     return True
@@ -2259,9 +2267,10 @@ def _for_lowering_rule(
   del which_linear
   if reverse or unroll != 1:
     raise NotImplementedError
-  lower_bound = _i32_constant(0)
-  upper_bound = _i32_constant(nsteps)
-  step = _i32_constant(1)
+  _i_constant = _i64_constant if config.enable_x64.value else _i32_constant
+  lower_bound = _i_constant(0)
+  upper_bound = _i_constant(nsteps)
+  step = _i_constant(1)
   init_args = map(_ensure_ir_value, args, ctx.avals_in)
   # Partially discharge state from jaxpr for non-pointers
   should_discharge = [
@@ -2542,7 +2551,6 @@ def _cond_lowering_rule(
     index,
     *args,  # *consts, *ops
     branches,  # tuple(jaxprs)
-    linear,
 ):
   block_infos = ctx.block_infos
 
@@ -2572,7 +2580,6 @@ def _cond_lowering_rule(
           _sub(index, _ir_constant(1, index.type)),
           *args,
           branches=branches[1:],
-          linear=linear,
       )
     else:
       outs1 = lower_jaxpr_to_triton_ir(

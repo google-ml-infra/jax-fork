@@ -393,7 +393,7 @@ class JaxprTypeChecks(jtu.JaxTestCase):
     super().setUp()
     lax_control_flow._initial_style_open_jaxpr.cache_clear()
     lax_control_flow._initial_style_jaxpr.cache_clear()
-    lax_control_flow._initial_style_jaxprs_with_common_consts.cache_clear()
+    lax_control_flow.common._pad_jaxpr_constvars.cache_clear()
 
   def test_check_jaxpr_correct(self):
     jaxpr = make_jaxpr(lambda x: jnp.sin(x) + jnp.cos(x))(1.).jaxpr
@@ -406,7 +406,7 @@ class JaxprTypeChecks(jtu.JaxTestCase):
   def test_check_jaxpr_jit_invalid(self):
     jaxpr = make_jaxpr(jax.jit(lambda x, y: x + 1))(1., 2.).jaxpr
     pjit_eqn, = jaxpr.eqns
-    jaxpr._eqns[0] = pjit_eqn._replace(invars=())
+    jaxpr._eqns[0] = pjit_eqn.replace(invars=())
     self.assertRaisesRegex(
         core.JaxprTypeError,
         '0 operands cannot call jaxpr with 2 inputs',

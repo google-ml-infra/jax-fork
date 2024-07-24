@@ -24,13 +24,13 @@ import itertools
 import math
 from typing import Any, NamedTuple, Union, cast
 
+from jax._src import core
 from jax._src import mesh as mesh_lib
 from jax._src import sharding
 from jax._src import sharding_specs
 from jax._src import tree_util
 from jax._src import util
 from jax._src import xla_bridge
-from jax._src import core
 from jax._src.lib import xla_client as xc
 from jax._src.op_shardings import (
     are_op_shardings_equal, get_num_ways_dim_sharded, is_op_sharding_replicated)
@@ -295,6 +295,19 @@ class NamedSharding(sharding.Sharding):
   def _to_xla_hlo_sharding(self, num_dimensions: int) -> xc.HloSharding:
     return named_sharding_to_xla_hlo_sharding(self, num_dimensions)
 
+  def _to_sdy_sharding(self, num_dimensions: int) -> sharding.SdyArraySharding:
+    dim_shardings = [sharding.SdyDimSharding(axes=[], is_closed=True)
+                     for _ in range(num_dimensions)]
+    for i, dim_spec in enumerate(self._parsed_pspec):
+      if dim_spec is None:
+        dim_shardings[i].is_closed = False
+      elif not dim_spec:
+        # Already empty and closed sharding.
+        pass
+      else:
+        dim_shardings[i].axes = dim_spec
+    return sharding.SdyArraySharding('mesh', dim_shardings)
+
 
 @util.cache(max_size=128, trace_context_in_key=False)
 def get_replicated_hlo_sharding():
@@ -362,6 +375,12 @@ class SingleDeviceSharding(sharding.Sharding):
 
   def _to_xla_hlo_sharding(self, num_dimensions: int) -> xc.HloSharding:
     return get_replicated_hlo_sharding()
+
+  def _to_sdy_sharding(self, num_dimensions: int) -> sharding.SdyArraySharding:
+    return sharding.SdyArraySharding(
+        'mesh',
+        [sharding.SdyDimSharding(axes=[], is_closed=True)
+         for _ in range(num_dimensions)])
 
   @property
   def is_fully_replicated(self) -> bool:
@@ -494,6 +513,9 @@ class PmapSharding(sharding.Sharding):
 
   def _to_xla_hlo_sharding(self, num_dimensions: int) -> xc.HloSharding:
     raise NotImplementedError("pmap doesn't use OpSharding.")
+
+  def _to_sdy_sharding(self, num_dimensions: int) -> sharding.SdyArraySharding:
+    raise NotImplementedError("pmap doesn't use SdyArraySharding.")
 
   @functools.cached_property
   def is_fully_replicated(self) -> bool:
@@ -635,7 +657,7 @@ class PositionalSharding(sharding.Sharding):
     return self._remake(self._devices, new_ids)
 
   def check_compatible_aval(self, aval_shape: Shape) -> None:
-    if len(aval_shape) != len(self.shape):
+    if len(aval_shape) != len(self.shape) and not self.is_fully_replicated:
       raise ValueError(
           f"Sharding {self} is only valid for values of rank "
           f"{len(self.shape)}, but was applied to a value of rank "
@@ -697,6 +719,10 @@ class PositionalSharding(sharding.Sharding):
 
   def _to_xla_hlo_sharding(self, num_dimensions: int) -> xc.HloSharding:
     return _positional_sharding_to_xla_hlo_sharding(self, num_dimensions)
+
+  def _to_sdy_sharding(self, num_dimensions: int) -> sharding.SdyArraySharding:
+    raise NotImplementedError(
+        "PositionalSharding can't be converted to an SdyArraySharding.")
 
   @functools.cached_property
   def is_fully_addressable(self) -> bool:
@@ -806,6 +832,10 @@ class GSPMDSharding(sharding.Sharding):
 
   def _to_xla_hlo_sharding(self, num_dimensions: int) -> xc.HloSharding:
     return self._hlo_sharding
+
+  def _to_sdy_sharding(self, num_dimensions: int) -> sharding.SdyArraySharding:
+    raise NotImplementedError(
+        "GSPMDSharding can't be converted to SdyArraySharding.")
 
   @functools.cached_property
   def is_fully_replicated(self) -> bool:
@@ -1296,10 +1326,7 @@ class NonUniformShardingError(ValueError):
 
 
 def get_process_index_and_count(
-    tensor_sharding: sharding.Sharding,
-    dim: int,
-    ndims: int,
-) -> tuple[int, int]:
+    tensor_sharding: sharding.Sharding, dim: int, ndims: int) -> tuple[int, int]:
   """Get current process index and number of unique processes for given dimension.
 
   This function facilitates mapping of process-level data to individual
@@ -1365,10 +1392,8 @@ def get_process_index_and_count(
   """
   # TODO(sandler, yashkatariya): Consider making this function public.
 
-  if (
-      tensor_sharding.is_fully_addressable
-      or tensor_sharding.is_fully_replicated
-  ):
+  if (tensor_sharding.is_fully_addressable or
+      tensor_sharding.is_fully_replicated):
     return (0, 1)
   num_devices = len(tensor_sharding.device_set)
   # Get device to indices map, we don't care about the concrete
@@ -1416,9 +1441,7 @@ def get_process_index_and_count(
 
 
 def local_to_global_shape(
-    sharding: sharding.Sharding,
-    local_shape: Shape,
-) -> tuple[int | None, ...]:
+    sharding: sharding.Sharding, local_shape: Shape) -> tuple[int | None, ...]:
   """Computes the global shape given the per process if possible.
 
   The returned shape will have the size of the global tensor in that dimension
@@ -1467,8 +1490,7 @@ def local_to_global_shape(
   for i, local_dim in enumerate(local_shape):
     try:
       _, shard_count = get_process_index_and_count(
-          sharding, i, ndims=len(local_shape)
-      )
+          sharding, i, ndims=len(local_shape))
       global_shape[i] = local_dim * shard_count
     except NonUniformShardingError:
       global_shape[i] = None
@@ -1478,10 +1500,7 @@ def local_to_global_shape(
 
 
 def num_addressable_indices(
-    tensor_sharding: sharding.Sharding,
-    dim: int,
-    global_shape: Shape,
-) -> int:
+    tensor_sharding: sharding.Sharding, dim: int, global_shape: Shape) -> int:
   """Returns the number of indices for given dimension this host has access to.
 
   Each host can have multiple number of devices that are spanning

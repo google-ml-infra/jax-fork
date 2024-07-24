@@ -147,7 +147,7 @@ class LaxControlFlowTest(jtu.JaxTestCase):
     super().setUp()
     lax_control_flow._initial_style_open_jaxpr.cache_clear()
     lax_control_flow._initial_style_jaxpr.cache_clear()
-    lax_control_flow._initial_style_jaxprs_with_common_consts.cache_clear()
+    lax_control_flow.common._pad_jaxpr_constvars.cache_clear()
 
   def testCallableErrors(self):
     not_callable = 42
@@ -2562,22 +2562,6 @@ class LaxControlFlowTest(jtu.JaxTestCase):
                   'tuple of ClosedJaxpr required: (4, 2)'),
         lambda: core.check_jaxpr(jaxpr))
 
-    jaxpr, eqn = new_jaxpr()
-    eqn.params['linear'] = (4, 2)
-    self.assertRaisesRegex(
-        core.JaxprTypeError,
-        re.escape('invalid cond param linear of type tuple, '
-                  'tuple of bool required: (4, 2)'),
-        lambda: core.check_jaxpr(jaxpr))
-
-    jaxpr, eqn = new_jaxpr()
-    eqn.params['linear'] = 'multi\nline'
-    self.assertRaisesRegex(
-        core.JaxprTypeError,
-        r'invalid cond param linear of type str, '
-        r'tuple of bool required:\r?\nmulti\r?\nline',
-        lambda: core.check_jaxpr(jaxpr))
-
   def test_cond_transformation_rule_with_consts(self):
     # https://github.com/google/jax/pull/9731
 
@@ -2975,6 +2959,54 @@ class LaxControlFlowTest(jtu.JaxTestCase):
     init = np.array(np.arange(b * i * i), dtype=np.float32).reshape((b, i, i))
     hlo_text = fn.lower(init).as_text('hlo')
     self.assertNotIn('4,1,2,2', hlo_text)
+
+  def test_cond_vmap_forwarding_doesnt_promote(self):
+    def f(x, y):
+      x, y = jax.lax.cond(
+          x < 3,
+          lambda x, y: (x * 2, y),
+          lambda x, y: (x * 3, y),
+          x, y
+      )
+      return x, y
+
+    x = jnp.arange(3)
+    y = jnp.array(3.)
+
+    x2, y2 = jax.vmap(f, in_axes=(0, None), out_axes=(0, None))(x, y)  # don't crash
+
+    assert x is not x2
+    assert y is y2
+
+  def test_cond_casting(self):
+    x = 1.0
+    identity = lambda x: x
+
+    y = lax.cond(True, identity, identity, x)
+    self.assertEqual(y, x)
+    self.assertIsInstance(y, jax.Array)
+
+  def test_cond_memory_leak(self):
+    # https://github.com/google/jax/issues/12719
+
+    def leak():
+      data = jax.device_put(np.zeros((1024), dtype=np.float32) + 1)
+      def g():
+          return jax.lax.cond(
+              True,
+              lambda: data[0],  # noqa: F821
+              lambda: data[1],  # noqa: F821
+          )
+      jg = jax.jit(g)
+      _ = jg().block_until_ready()
+      del g, jg, data, _
+
+    leak()
+    self.assertEqual(0, len(jax.lib.xla_bridge.get_backend().live_buffers()))
+    leak()
+    self.assertEqual(0, len(jax.lib.xla_bridge.get_backend().live_buffers()))
+    leak()
+    self.assertEqual(0, len(jax.lib.xla_bridge.get_backend().live_buffers()))
 
 
 if __name__ == '__main__':
