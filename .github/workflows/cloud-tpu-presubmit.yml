@@ -11,6 +11,8 @@ on:
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+permissions:
+  contents: read
 jobs:
   cloud-tpu-test:
     # TODO: confirm final naming for optional label
@@ -61,12 +63,12 @@ jobs:
           # Run multi-accelerator across all chips
           python3 -m pytest --tb=short --junitxml=results/multijunit.xml \
             --maxfail=20 -m "multiaccelerator" tests
-      - name: 'Upload Artifact'
-        if: success() || failure()
-        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # ratchet:actions/upload-artifact@v4
-        with:
-          name: junit
-          path: |
-            results/singlejunit.xml
-            results/multijunit.xml
-          retention-days: 1
+      # - name: 'Upload Artifact'
+      #   if: success() || failure()
+      #   uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # ratchet:actions/upload-artifact@v4
+      #   with:
+      #     name: junit
+      #     path: |
+      #       results/singlejunit.xml
+      #       results/multijunit.xml
+      #     retention-days: 1
