@@ -1,0 +1,27 @@
+# WorkFlow dispatch to stress test the runner system
+name: GCS Access Test
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+# Cancel any previous iterations if a new commit is pushed
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  cpu-stress:
+    strategy:
+      matrix:
+        runner: ["arc-linux-x86-n2-64"]
+        instances: ["1"]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    container:
+      # TODO: Needs newer, light weight image
+      image: index.docker.io/tensorflow/build@sha256:7fb38f0319bda36393cad7f40670aa22352b44421bb906f5cf34d543acd8e1d2 # ratchet:tensorflow/build:latest-python3.11
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # ratchet:actions/checkout@v4
+      - name: Gcloud
+        run: |
+          curl -X GET -H "Authorization: Bearer $(gcloud auth print-access-token)" "https://storage.googleapis.com/storage/v1/b/quoct-tf-test/o"
