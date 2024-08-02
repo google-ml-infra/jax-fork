@@ -25,3 +25,7 @@ jobs:
       - name: Gcloud
         run: |
           curl -X GET -H "Authorization: Bearer $(gcloud auth print-access-token)" "https://storage.googleapis.com/storage/v1/b/quoct-tf-test/o"
+      - name: Install JAX
+        run: |
+          pip install -U -r build/test-requirements.txt
+          pip install -U --pre jax==0.4.31.dev20240625 -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
