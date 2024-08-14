@@ -14,7 +14,7 @@ runs:
   - name: Wait For Connection
     shell: bash
     env:
-      REPOSITORY_VAR: ${{ inputs.repository }}
+      REPOSITORY: ${{ inputs.repository }}
       INTERACTIVE_CI: ${{ inputs.should-wait }}
       PYTHONUNBUFFERED: 1
     run: |

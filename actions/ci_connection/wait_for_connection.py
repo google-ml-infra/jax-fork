@@ -90,10 +90,9 @@ if __name__ == "__main__":
 
     # Grab and print the data required to connect to this vm
     host = os.environ.get("HOSTNAME")
-    org = os.environ.get("ORGANIZATION_VAR")
-    repo = os.environ.get("REPO_VAR")
+    repo = os.environ.get("REPOSITORY")
 
-    print(f"Connection parameters: '{host} {org}/{repo}'")
+    print(f"Connection parameters: '{host} {repo}'")
 
     # Thread is running as a daemon so it will quit when the
     # main thread terminates.
