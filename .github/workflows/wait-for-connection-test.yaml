@@ -27,4 +27,4 @@ jobs:
       - name: Wait For Connection
         uses: ./actions/ci_connection/
         with:
-          halt-for-connection: "1"
+          should-wait: "1"

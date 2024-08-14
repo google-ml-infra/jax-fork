@@ -5,15 +5,17 @@ inputs:
     description: 'Should the action wait for user connection'
     required: true
     default: "0"
+  repository:
+      description: 'Repository name with owner. For example, actions/checkout'
+      default: ${{ github.repository }}
 runs:
   using: "composite"
   steps:
   - name: Wait For Connection
     shell: bash
     env:
-      REPOSITORY_VAR: ${{ vars.REPOSITORY_VAR }}
-      ORGANIZATION_VAR: ${{ vars.ORGANIZATION_VAR }}
+      REPOSITORY_VAR: ${{ inputs.repository }}
       INTERACTIVE_CI: ${{ inputs.should-wait }}
-      PYTHONUNBUFFERED: "1"
+      PYTHONUNBUFFERED: 1
     run: |
       python3 ./actions/ci_connection/wait_for_connection.py
