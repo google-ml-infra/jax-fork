@@ -39,7 +39,7 @@ jobs:
       - name: DEBUG HALT
         run: |
           echo "Halting"
-          sleep 180m
+          sleep 30m
 
 
 
