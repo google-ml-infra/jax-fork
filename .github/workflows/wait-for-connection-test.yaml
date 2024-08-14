@@ -25,10 +25,6 @@ jobs:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # ratchet:actions/checkout@v4
       # Install JAX, this should correspond to the code or pytest may be out of sync
       - name: Wait For Connection
-        env:
-          REPOSITORY_VAR: ${{ vars.REPOSITORY_VAR }}
-          ORGANIZATION_VAR: ${{ vars.ORGANIZATION_VAR }}
-          INTERACTIVE_CI: "1"
-          PYTHONUNBUFFERED: "1"
-        run: |
-          python3 ./build/wait_for_connection.py
+        uses: ./actions/ci_connection/
+        with:
+          halt-for-connection: "1"
