@@ -6,6 +6,11 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      halt-for-connection:
+        description: 'Should this invocation wait for a remote connection?'
+        required: false
+        default: '0'
 # Cancel any previous iterations if a new commit is pushed
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -27,4 +32,4 @@ jobs:
       - name: Wait For Connection
         uses: ./actions/ci_connection/
         with:
-          should-wait: "1"
+          should-wait: ${{ inputs.halt-for-connection }}
