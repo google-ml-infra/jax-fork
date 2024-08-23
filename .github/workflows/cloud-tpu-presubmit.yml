@@ -23,7 +23,7 @@ jobs:
     env:
       ENABLE_PJRT_COMPATIBILITY: 1
     # TODO: Needs final runs-on value
-    runs-on: t2a-standard-48-dev
+    runs-on: arc-linux-x86-n2-64-test
     container:
       # TODO: Needs newer, light weight image
       image: us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/build-arm64:jax-latest-multi-python
