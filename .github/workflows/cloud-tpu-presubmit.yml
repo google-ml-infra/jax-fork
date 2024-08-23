@@ -26,7 +26,7 @@ jobs:
     runs-on: arc-linux-x86-n2-64-test
     container:
       # TODO: Needs newer, light weight image
-      image: us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/build-arm64:jax-latest-multi-python
+      image: index.docker.io/tensorflow/build@sha256:7fb38f0319bda36393cad7f40670aa22352b44421bb906f5cf34d543acd8e1d2 # ratchet:tensorflow/build:latest-python3.11
     timeout-minutes: 45
     defaults:
       run:
