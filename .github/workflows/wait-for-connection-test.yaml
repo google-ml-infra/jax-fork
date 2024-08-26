@@ -9,8 +9,8 @@ on:
     inputs:
       halt-for-connection:
         description: 'Should this invocation wait for a remote connection?'
-        required: false
-        default: '0'
+        required: true
+        default: '1'
 # Cancel any previous iterations if a new commit is pushed
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
