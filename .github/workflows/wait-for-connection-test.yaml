@@ -9,7 +9,7 @@ on:
     inputs:
       halt-for-connection:
         description: 'Should this invocation wait for a remote connection?'
-        required: true
+        required: false
         default: '1'
 # Cancel any previous iterations if a new commit is pushed
 concurrency:
