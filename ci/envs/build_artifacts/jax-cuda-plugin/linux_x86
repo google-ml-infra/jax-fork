@@ -1,0 +1,8 @@
+# Inherit default environment variables.
+source ci/envs/default
+source ci/envs/build_artifacts/jax-cuda-plugin/common
+
+# Note Python version of the container does not matter. JAX supports hermetic
+# Python and thus the actual Python version of the artifact is controlled by
+# the value set in `HERMETIC_PYTHON_VERSION`
+export JAXCI_DOCKER_IMAGE="tensorflow/build:2.18-python3.10"

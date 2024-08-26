@@ -1,0 +1,9 @@
+# Inherit default environment variables.
+source ci/envs/default
+
+export JAXCI_RUN_TESTS=1
+export JAXCI_RUN_BAZEL_GPU_TEST_RBE=1
+
+# Only Linux x86 runs local GPU tests at the moment.
+export JAXCI_DOCKER_IMAGE="gcr.io/tensorflow-testing/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython"
+export JAXCI_DOCKER_ARGS="--gpus all"

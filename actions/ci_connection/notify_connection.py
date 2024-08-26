@@ -14,6 +14,7 @@
 
 import time
 import threading
+import os
 import subprocess
 from multiprocessing.connection import Client
 
@@ -42,8 +43,21 @@ if __name__ == "__main__":
     timer_thread.start()
 
     print("Entering interactive bash session")
+  
+    # Hard-coded for now for demo purposes.
+    next_command = "export ENV_FILE=ci/envs/build_artifacts/jaxlib/linux_x86 && bash ci/build_artifacts.sh"
+    # Print the "next" commands to be run
+    # TODO: actually get this data from workflow files
+    print(f"The next command that would have run is:\n\n{next_command}")
+
+    print("PUT DEBUG COMMAND HERE\n")
+    # Set the hardcoded envs for testing purposes
+    # TODO: sync env vars
+    sub_env = os.environ.copy()
+    sub_env["DEMO"] = "someval"
+
     # Enter interactive bash session
-    subprocess.run(["/bin/bash", "-i"])
+    subprocess.run(["/bin/bash", "-i"], env=sub_env)
 
     print("Exiting interactive bash session")
     with lock:

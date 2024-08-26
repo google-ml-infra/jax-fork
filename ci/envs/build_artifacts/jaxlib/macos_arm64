@@ -1,0 +1,6 @@
+# Inherit default environment variables.
+source ci/envs/default
+source ci/envs/build_artifacts/jaxlib/common
+
+# Mac builds do not run in Docker.
+export JAXCI_USE_DOCKER=0

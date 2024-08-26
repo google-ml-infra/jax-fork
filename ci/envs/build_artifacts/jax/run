@@ -1,0 +1,3 @@
+# Inherit default environment variables.
+source ci/envs/default
+export JAXCI_BUILD_JAX_ENABLE="1"

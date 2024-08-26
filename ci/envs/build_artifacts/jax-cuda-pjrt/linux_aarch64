@@ -1,0 +1,6 @@
+# Inherit default environment variables.
+source ci/envs/default
+# Inherit common environment variables for jax-cuda-pjrt.
+source ci/envs/build_artifacts/jax-cuda-pjrt/common
+
+export JAXCI_DOCKER_IMAGE="us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/build-arm64:jax-latest-multi-python"

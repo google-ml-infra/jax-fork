@@ -1,0 +1,7 @@
+# Inherit default environment variables.
+source ci/envs/default
+
+# Enable jax-cuda-plugin build
+export JAXCI_BUILD_PLUGIN_ENABLE="1"
+# Enable wheel audit to check for manylinux compliance.
+export JAXCI_WHEEL_AUDIT_ENABLE="1"
