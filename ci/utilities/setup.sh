@@ -15,24 +15,32 @@
 # ==============================================================================
 #
 # Common setup for all JAX builds.
-#
+
+# If we are building artifacts and the user has passed in the name of the
+# artifact to build, set the ENV_FILE to the corresponding env file.
+if [[ -n "$1" ]] && [[ $0 == "ci/build_artifacts.sh" ]]; then
+  export ENV_FILE="ci/envs/build_artifacts/$1"
+fi
+
+# If the user has not passed in an ENV_FILE nor has called "build_artifacts.sh"
+# with an artifact name, exit.
+if [[ -z "${ENV_FILE}" ]]; then
+    echo "ENV_FILE is not set."
+    echo "Setup script requires an ENV_FILE to be set."
+    echo "If you are looking to build JAX artifacts, please set ENV_FILE to an"
+    echo "env file in the ci/envs/build_artifacts directory."
+    echo "If you are looking to run JAX tests, please set ENV_FILE to an"
+    echo "env file in the ci/envs/run_tests directory."
+    exit 1
+fi
+
 # -e: abort script if one command fails
 # -u: error if undefined variable used
 # -x: log all commands
 # -o pipefail: entire command fails if pipe fails. watch out for yes | ...
 # -o history: record shell history
 # -o allexport: export all functions and variables to be available to subscripts
-set -euo pipefail -o history -o allexport
-
-if [[ -z "${ENV_FILE+dummy}" ]]; then
-  echo "Setup script requires an ENV_FILE to be set."
-  echo "If you are looking to build JAX artifacts, please set ENV_FILE to an"
-  echo "env file in the ci/envs/build_artifacts directory."
-  echo "If you are looking to run JAX tests, please set ENV_FILE to an"
-  echo "env file in the ci/envs/run_tests directory."
-  exit 1
-fi
-set -x
+set -exuo pipefail -o history -o allexport
 source "$ENV_FILE"
 
 # Pre-emptively mark the git directory as safe. This is necessary for JAX CI
