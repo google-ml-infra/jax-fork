@@ -15,19 +15,19 @@ jobs:
   cloud-tpu-test:
     # TODO: confirm final naming for optional label
     if: contains(github.event.pull_request.labels.*.name, 'optional_ci_tpu')
-    name: "TPU v5e x 8 Presubmit"
+    name: "Stress Test ${{ matrix.runners }} - ${{ matrix.instances }}"
     strategy:
       fail-fast: false # don't cancel all jobs on failure
       matrix:
-        instances: ["one", "two"]
+        instances: [1, 2, 3]
+        runners: ["arc-linux-x86-n2-64", "arc-linux-x86-n2-128", "arc-linux-arm64-t2a-48", "arc-linux-x86-g2-96-l4-8gpu", "arc-linux-x86-ct5lp-224-8tpu"]
     env:
       ENABLE_PJRT_COMPATIBILITY: 1
     # TODO: Needs final runs-on value
-    runs-on: arc-linux-x86-n2-64-test
+    runs-on: ${{ matrix.runners }}
     container:
-      # TODO: Needs newer, light weight image
-      image: index.docker.io/tensorflow/build@sha256:7fb38f0319bda36393cad7f40670aa22352b44421bb906f5cf34d543acd8e1d2 # ratchet:tensorflow/build:latest-python3.11
-    timeout-minutes: 45
+      image: ${{ contains(matrix.runners, "t2a") && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/build-arm64:jax-latest-multi-python') || ('index.docker.io/tensorflow/build@sha256:7fb38f0319bda36393cad7f40670aa22352b44421bb906f5cf34d543acd8e1d2') }}
+    timeout-minutes: 10
     defaults:
       run:
         shell: bash -ex {0}
@@ -39,7 +39,7 @@ jobs:
       - name: DEBUG HALT
         run: |
           echo "Halting"
-          sleep 30m
+          sleep 5m
 
 
 
