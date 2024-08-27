@@ -1,30 +1,26 @@
-# Stress Tests with multiple runners
-name: Stress Test
-# Run on pull_request that is labeled as "optional_ci_tpu" or workflow dispatch
+# Nightly Stress Test for self-hosted runners
+name: Self-hosted Runners Nightly Stress Test
 on:
-  pull_request:
-    branches:
-      - main
-    types: [labeled, synchronize]
-  workflow_dispatch:
+  schedule:
+    # Triggers at 11pm every night.
+    - cron: '0 23 * * *'
 # Cancel any previous iterations if a new commit is pushed.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 jobs:
-  cloud-stress-test:
+  nightly-stress-test:
     name: "Stress Test ${{ matrix.runners }} - ${{ matrix.instances }}"
     strategy:
       fail-fast: false # don't cancel all jobs on failure
       matrix:
-        instances: [1, 2, 3]
+        instances: [1, 2, 3, 4, 5]
         runners: ["arc-linux-x86-n2-64", "arc-linux-x86-n2-128", "arc-linux-arm64-t2a-48", "arc-linux-x86-g2-96-l4-8gpu", "arc-linux-x86-ct5lp-224-8tpu"]
-    env:
-      ENABLE_PJRT_COMPATIBILITY: 1
+    # TODO: Needs final runs-on value
     runs-on: ${{ matrix.runners }}
     container:
-      image: ${{ contains(matrix.runners, "t2a") && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/build-arm64:jax-latest-multi-python') || ('index.docker.io/tensorflow/build@sha256:7fb38f0319bda36393cad7f40670aa22352b44421bb906f5cf34d543acd8e1d2') }}
-    timeout-minutes: 15
+      image: ${{ (contains(matrix.runners, 't2a') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/build-arm64:jax-latest-multi-python') || 'index.docker.io/tensorflow/build@sha256:7fb38f0319bda36393cad7f40670aa22352b44421bb906f5cf34d543acd8e1d2' }}
+    timeout-minutes: 10
     defaults:
       run:
         shell: bash -ex {0}
