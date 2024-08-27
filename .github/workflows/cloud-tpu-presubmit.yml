@@ -13,9 +13,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   cloud-tpu-test:
-    # TODO: confirm final naming for optional label
-    if: "Stress Test ${{ matrix.runners }} - ${{ matrix.instances }}"
-    name: "TPU v5e x 8 Presubmit"
+    name: "Stress Test ${{ matrix.runners }} - ${{ matrix.instances }}"
     strategy:
       fail-fast: false # don't cancel all jobs on failure
       matrix:
