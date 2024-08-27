@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   cloud-stress-test:
-    name: "Stress Test"
+    name: "Stress Test ${{ matrix.runners }} - ${{ matrix.instances }}"
     strategy:
       fail-fast: false # don't cancel all jobs on failure
       matrix:
