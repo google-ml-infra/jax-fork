@@ -1,0 +1,39 @@
+# Stress Tests with multiple runners
+name: Stress Test
+# Run on pull_request that is labeled as "optional_ci_tpu" or workflow dispatch
+on:
+  pull_request:
+    branches:
+      - main
+    types: [labeled, synchronize]
+  workflow_dispatch:
+# Cancel any previous iterations if a new commit is pushed.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  cloud-stress-test:
+    name: "Stress Test"
+    strategy:
+      fail-fast: false # don't cancel all jobs on failure
+      matrix:
+        instances: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        runners: ["arc-linux-x86-n2-64", "arc-linux-x86-n2-128", "arc-linux-arm64-t2a-48", "arc-linux-x86-g2-96-l4-8gpu", "arc-linux-x86-ct5lp-224-8tpu"]
+    env:
+      ENABLE_PJRT_COMPATIBILITY: 1
+    runs-on: ${{ matrix.runners }}
+    container:
+      image: ${{ contains(matrix.runners, "t2a") && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/build-arm64:jax-latest-multi-python') || ('index.docker.io/tensorflow/build@sha256:7fb38f0319bda36393cad7f40670aa22352b44421bb906f5cf34d543acd8e1d2') }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash -ex {0}
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # ratchet:actions/checkout@v4
+      - name: Install JAX test requirements
+        run: |
+          pip install -U -r build/test-requirements.txt
+      - name: DEBUG HALT
+        run: |
+          echo "Halting"
+          sleep 5m
