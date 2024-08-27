@@ -15,7 +15,7 @@ jobs:
   cloud-tpu-test:
     # TODO: confirm final naming for optional label
     if: contains(github.event.pull_request.labels.*.name, 'optional_ci_tpu')
-    name: "Stress Test ${{ matrix.runners }} - ${{ matrix.instances }}"
+    name: "TPU v5e x 8 Presubmit"
     strategy:
       fail-fast: false # don't cancel all jobs on failure
       matrix:
