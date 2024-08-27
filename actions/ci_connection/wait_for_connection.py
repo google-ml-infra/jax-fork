@@ -102,7 +102,7 @@ if __name__ == "__main__":
 
   print("Googler connection only\nSee go/<insert final golink> for details")
   print(
-    f"Connection string: ml-actions-connect  --runner={host} --ns={ns} --loc={location} --cluster={cluster} --halt_directory={actions_path}"
+    f"Connection string: ml-actions-connect  --runner={host} --ns={ns} --loc={location} --cluster={cluster} --halt_directory={actions_path} --project=ml-velocity-actions-testing"
   )
 
   # Thread is running as a daemon so it will quit when the
