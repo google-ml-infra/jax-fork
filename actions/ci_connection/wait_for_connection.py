@@ -20,9 +20,9 @@ import threading
 import sys
 
 last_time = time.time()
-timeout = 600  # 10 minutes for initial connection
+timeout = 1800  # 30 minutes for initial connection
 keep_alive_timeout = (
-  900  # 30 minutes for keep-alive if no closed message (allow for reconnects)
+  3600  # 30 minutes for keep-alive if no closed message (allow for reconnects)
 )
 
 
