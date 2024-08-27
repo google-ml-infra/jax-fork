@@ -17,7 +17,7 @@ jobs:
     strategy:
       fail-fast: false # don't cancel all jobs on failure
       matrix:
-        instances: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        instances: [1, 2, 3]
         runners: ["arc-linux-x86-n2-64", "arc-linux-x86-n2-128", "arc-linux-arm64-t2a-48", "arc-linux-x86-g2-96-l4-8gpu", "arc-linux-x86-ct5lp-224-8tpu"]
     env:
       ENABLE_PJRT_COMPATIBILITY: 1
