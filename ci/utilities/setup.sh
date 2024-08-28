@@ -67,7 +67,6 @@ jaxrun() { "$@"; }
 # When running tests, we need to check out XLA at HEAD.
 if [[ -z ${JAXCI_XLA_GIT_DIR} ]] && [[ "$JAXCI_RUN_TESTS" == 1 ]]; then
     if [[ ! -d $(pwd)/xla ]]; then
-      rm -rf $(pwd)/xla
       echo "Checking out XLA..."
       jaxrun git clone --depth=1 https://github.com/openxla/xla.git $(pwd)/xla
       echo "Using XLA from $(pwd)/xla"
