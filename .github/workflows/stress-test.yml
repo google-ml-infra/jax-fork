@@ -1,16 +1,17 @@
-# Nightly Stress Test for self-hosted runners
-name: Self-hosted Runners Nightly Stress Test
+# Nightly Scale Test for self-hosted runners
+name: Self-hosted Runners Nightly Scale Test
 on:
   schedule:
-    # Triggers at 11pm every night.
-    - cron: '0 23 * * *'
+    # Triggers at 6AM UTC, which is 11PM PST.
+    - cron: '0 06 * * *'
+  workflow_dispatch:
 # Cancel any previous iterations if a new commit is pushed.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 jobs:
-  nightly-stress-test:
-    name: "Stress Test ${{ matrix.runners }} - ${{ matrix.instances }}"
+  nightly-scale-test:
+    name: "Scale Test ${{ matrix.runners }} - ${{ matrix.instances }}"
     strategy:
       fail-fast: false # don't cancel all jobs on failure
       matrix:
@@ -26,9 +27,6 @@ jobs:
         shell: bash -ex {0}
     steps:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # ratchet:actions/checkout@v4
-      - name: Install JAX test requirements
-        run: |
-          pip install -U -r build/test-requirements.txt
       - name: DEBUG HALT
         run: |
           echo "Halting"
