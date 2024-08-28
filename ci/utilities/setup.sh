@@ -18,7 +18,7 @@
 
 # If we are building artifacts and the user has passed in the name of the
 # artifact to build, set the ENV_FILE to the corresponding env file.
-if [[ -n "$1" ]] && [[ $0 == "ci/build_artifacts.sh" ]]; then
+if [[ -n "$1" ]] && [[ $0 =~ "build_artifacts.sh" ]]; then
   export ENV_FILE="ci/envs/build_artifacts/$1"
 fi
 
