@@ -21,7 +21,7 @@ export JAXCI_OUTPUT_DIR="$(pwd)/dist"
 export local_wheel_dist_folder=$JAXCI_OUTPUT_DIR
 
 # Release tag to use for the build.
-export JAXCI_RELEASE_TAG="${JAXCI_RELEASE_TAG:-}""
+export JAXCI_RELEASE_TAG="${JAXCI_RELEASE_TAG:-}"
 
 # #############################################################################
 # Artifact build specific environment variables.

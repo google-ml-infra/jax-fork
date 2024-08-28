@@ -44,6 +44,9 @@ if ! docker container inspect jax >/dev/null 2>&1 ; then
     JAXCI_DOCKER_ARGS="$JAXCI_DOCKER_ARGS -v $JAXCI_XLA_GIT_DIR:$JAXCI_DOCKER_WORK_DIR/xla -e JAXCI_XLA_GIT_DIR=$JAXCI_DOCKER_WORK_DIR/xla"
   fi
 
+  # Set the output directory to the container path.
+  export JAXCI_OUTPUT_DIR=$JAXCI_DOCKER_WORK_DIR/dist
+
   # When running `bazel test` and specifying dependencies on local wheels, 
   # Bazel will look for them in the ../dist directory by default. This can be
   # overridden by the setting `local_wheel_dist_folder`.
@@ -69,6 +72,7 @@ if ! docker container inspect jax >/dev/null 2>&1 ; then
     netsh advfirewall firewall add rule name="Allow Metadata Proxy" dir=in action=allow protocol=TCP localport=80 remoteip="$CONTAINER_IP_ADDR"
   fi
 fi
+
 jaxrun() { docker exec jax "$@"; }
 
 jaxrun git config --global --add safe.directory $JAXCI_DOCKER_WORK_DIR
