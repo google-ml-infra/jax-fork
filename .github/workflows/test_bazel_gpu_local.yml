@@ -34,5 +34,5 @@ jobs:
         run: ./ci/build_artifacts.sh jax-cuda-pjrt
       - name: Run Bazel GPU tests locally
         env:
-          ENV_FILE: ci/run_tests/bazel_local_gpu
+          ENV_FILE: ci/envs/run_tests/bazel_rbe_cpu
         run: ./ci/run_bazel_test_gpu.sh
