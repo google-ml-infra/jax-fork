@@ -13,7 +13,7 @@ jobs:
 
     runs-on: ${{ matrix.runner }}
     container:
-      image: "index.docker.io/tensorflow/build@sha256:e042f39c18a01012349ad42ae69f6c9fb6e8cc912ddf362d47f6caf1f97f54c3"
+      image: "gcr.io/tensorflow-testing/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython@sha256:32cdd70157f0c4f82e0c0a0332d190227c1ac56b07715921f52972efdb0edfa13"
 
     env:
       JAXCI_USE_DOCKER: 0
