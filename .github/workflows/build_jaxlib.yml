@@ -12,14 +12,14 @@ jobs:
       matrix:
         runner: ["arc-linux-x86-n2-64"]
         artifact: ["jaxlib", "jax-cuda-pjrt", "jax-cuda-plugin"]
-        # Include python only for artifacts that need it
-        include:
-          - artifact: "jaxlib"
-            python: ["3.10", "3.11", "3.12"]
-          - artifact: "jax-cuda-plugin"
-            python: ["3.10", "3.11", "3.12"]
+        python: ["3.10", "3.11", "3.12"]
+        # jax-cuda-pjrt is a pure Python package so it does not need to be built for each
+        # Python version.
+        exclude:
           - artifact: "jax-cuda-pjrt"
-            python: ["3.12"]
+            python: "3.10"
+          - artifact: "jax-cuda-pjrt"
+            python: "3.11"
 
     runs-on: ${{ matrix.runner }}
     container:
