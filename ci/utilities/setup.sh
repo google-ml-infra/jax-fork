@@ -65,20 +65,23 @@ fi
 jaxrun() { "$@"; }
 
 # When running tests, we need to check out XLA at HEAD.
-if [[ -n ${JAXCI_XLA_GIT_DIR} ]] && [[ "$JAXCI_RUN_TESTS" == 1 ]]; then
+if [[ -z ${JAXCI_XLA_GIT_DIR} ]] && [[ "$JAXCI_RUN_TESTS" == 1 ]]; then
     if [[ ! -d $(pwd)/xla ]]; then
       rm -rf $(pwd)/xla
       echo "Checking out XLA..."
       jaxrun git clone --depth=1 https://github.com/openxla/xla.git $(pwd)/xla
       echo "Using XLA from $(pwd)/xla"
     fi
+    export JAXCI_XLA_GIT_DIR=$(pwd)/xla
 fi
 
-if [[ -n ${JAXCI_XLA_GIT_DIR} ]]; then
+# If a path to XLA is provided, use that to build JAX or run tests.
+if [[ ! -z ${JAXCI_XLA_GIT_DIR} ]]; then
   echo "Using XLA from $JAXCI_XLA_GIT_DIR"
 fi
 
-if [[ -n "$JAXCI_XLA_COMMIT" ]]; then
+# If a XLA commit is provided, check out XLA at that commit.
+if [[ ! -z "$JAXCI_XLA_COMMIT" ]]; then
   jaxrun pushd "$JAXCI_XLA_GIT_DIR"
 
   jaxrun git fetch --depth=1 origin "$JAXCI_XLA_COMMIT"
@@ -95,6 +98,7 @@ if [[ "$JAXCI_USE_DOCKER" == 1 ]]; then
   source ./ci/utilities/setup_docker.sh
 fi
 
+# If we are running tests, set up the test environment.
 if [[ "$JAXCI_RUN_TESTS" == 1 ]]; then
    source ./ci/utilities/setup_test_environment.sh
 fi

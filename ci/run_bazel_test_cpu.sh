@@ -15,22 +15,23 @@
 # ==============================================================================
 source "ci/utilities/setup.sh"
 
-jaxrun "$JAXCI_PYTHON" -c "import jax; print(jax.default_backend()); print(jax.devices()); print(len(jax.devices()))"
-
 os=$(uname -s | awk '{print tolower($0)}')
 arch=$(uname -m)
 
-if [[ $JAXCI_BUILD_BAZEL_TEST_ENABLE == 1 ]]; then
-      # Bazel build on RBE CPU. Used when RBE is not available for the platform. E.g
-      # Linux Aarch64
+if [[ $JAXCI_BUILD_BAZEL_CPU_TEST_RBE == 1 ]]; then
+      # Bazel build on RBE CPU. Used when RBE is not available for the platform.
+      # E.g. Linux Aarch64 and Mac.
       jaxrun bazel --bazelrc=ci/.bazelrc build --config=rbe_cross_compile_${os}_${arch} \
-            --override_repository=xla="${KOKORO_ARTIFACTS_DIR}"/xla \
+            --override_repository=xla="${JAXCI_XLA_GIT_DIR}" \
+            --repo_env=HERMETIC_PYTHON_VERSION="$JAXCI_HERMETIC_PYTHON_VERSION" \
             --test_env=JAX_NUM_GENERATED_CASES=25 \
             //tests:cpu_tests //tests:backend_independent_tests
 else
-      # Bazel test on RBE CPU. Only Linux x86_64 can run tests on RBE at the moment.
+      # Bazel test on RBE CPU. Only Linux x86_64 can run tests on RBE at the
+      # moment.
       jaxrun bazel --bazelrc=ci/.bazelrc test --config=rbe_${os}_${arch} \
-            --override_repository=xla="${KOKORO_ARTIFACTS_DIR}"/xla \
+            --override_repository=xla="${JAXCI_XLA_GIT_DIR}" \
+            --repo_env=HERMETIC_PYTHON_VERSION="$JAXCI_HERMETIC_PYTHON_VERSION" \
             --test_env=JAX_NUM_GENERATED_CASES=25 \
             //tests:cpu_tests //tests:backend_independent_tests
 fi

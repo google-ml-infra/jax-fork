@@ -6,8 +6,8 @@
 # override the default values depening on the build type.
 
 # The build CLI can be run in either "ci" or "local" mode. This is used to
-# determine which .bazelrc configs to pass to the CLI.  If the variable is not
-#set, we will default to CI mode.
+# determine which .bazelrc configs to pass to the CLI. CI mode uses JAX's custom
+# toolchain and local mode uses the default Bazel toolchain. 
 export JAXCI_CLI_BUILD_MODE=${JAXCI_CLI_BUILD_MODE:-ci}
 
 # Environment variables that control which artifact to build. Used by
