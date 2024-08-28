@@ -18,6 +18,8 @@ jobs:
             python: ["3.10", "3.11", "3.12"]
           - artifact: "jax-cuda-plugin"
             python: ["3.10", "3.11", "3.12"]
+          - artifact: "jax-cuda-pjrt"
+            python: ["3.12"]
 
     runs-on: ${{ matrix.runner }}
     container:
