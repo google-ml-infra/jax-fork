@@ -5,6 +5,28 @@
 # in the "build_artifacts" and "run_tests" directory source this file and
 # override the default values depening on the build type.
 
+# This is expected to be the root of the JAX git repository.
+export JAXCI_JAX_GIT_DIR=$(pwd)
+
+# Controls the version of Hermetic Python to use. Use 3.12 as default if not
+# set.
+export JAXCI_HERMETIC_PYTHON_VERSION=${JAXCI_HERMETIC_PYTHON_VERSION:-3.12}
+
+# Controls the location where the artifacts are stored.
+export JAXCI_OUTPUT_DIR="$(pwd)/dist"
+
+# When running `bazel test` and specifying dependencies on local wheels, 
+# Bazel will look for them in the ../dist directory by default. This can be
+# overridden by the setting `local_wheel_dist_folder`.
+export local_wheel_dist_folder=$JAXCI_OUTPUT_DIR
+
+# Release tag to use for the build.
+export JAXCI_RELEASE_TAG="${JAXCI_RELEASE_TAG:-}""
+
+# #############################################################################
+# Artifact build specific environment variables.
+# #############################################################################
+
 # The build CLI can be run in either "ci" or "local" mode. This is used to
 # determine which .bazelrc configs to pass to the CLI. CI mode uses JAX's custom
 # toolchain and local mode uses the default Bazel toolchain. 
@@ -12,30 +34,25 @@ export JAXCI_CLI_BUILD_MODE=${JAXCI_CLI_BUILD_MODE:-ci}
 
 # Environment variables that control which artifact to build. Used by
 # `build_artifacts.sh`
-export JAXCI_BUILD_JAX_ENABLE=""
-export JAXCI_BUILD_JAXLIB_ENABLE=""
-export JAXCI_BUILD_PLUGIN_ENABLE=""
-export JAXCI_BUILD_PJRT_ENABLE=""
-export JAXCI_WHEEL_AUDIT_ENABLE=""
+export JAXCI_BUILD_JAX_ENABLE="${JAXCI_BUILD_JAX_ENABLE:-0}"
+export JAXCI_BUILD_JAXLIB_ENABLE="${JAXCI_BUILD_JAXLIB_ENABLE:-0}"
+export JAXCI_BUILD_PLUGIN_ENABLE="${JAXCI_BUILD_PLUGIN_ENABLE:-0}"
+export JAXCI_BUILD_PJRT_ENABLE="${JAXCI_BUILD_PJRT_ENABLE:-0}"
+export JAXCI_WHEEL_AUDIT_ENABLE="${JAXCI_WHEEL_AUDIT_ENABLE:-0}"
+
+# #############################################################################
+# Docker specific environment variables.
+# #############################################################################
 
 # Docker specifc environment variables. Used by `setup_docker.sh`
 export JAXCI_USE_DOCKER=${JAXCI_USE_DOCKER:-1}
 export JAXCI_DOCKER_IMAGE=""
-export JAXCI_CONTAINER_WORK_DIR="/jax"
+export JAXCI_DOCKER_WORK_DIR=${JAXCI_DOCKER_WORK_DIR:-"/jax"}
 export JAXCI_DOCKER_ARGS=""
 
-# Controls the version of Hermetic Python to use. Use 3.12 as default if not
-# set.
-export JAXCI_HERMETIC_PYTHON_VERSION=${JAXCI_HERMETIC_PYTHON_VERSION:-3.12}
-
-# Controls the location where the artifacts are stored on the Docker container.
-export JAXCI_OUTPUT_DIR="$JAXCI_CONTAINER_WORK_DIR/dist"
-
-# Release tag to use for the build.
-export JAXCI_RELEASE_TAG=""
-
-# This is expected to be the root of the JAX git repository.
-export JAXCI_GIT_DIR=$(pwd)
+# #############################################################################
+# Test specific environment variables.
+# #############################################################################
 
 # Test specific environment variables below. Used by `run_bazel_test.sh` and
 # `run_pytest.sh`

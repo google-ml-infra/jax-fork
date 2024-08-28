@@ -41,23 +41,27 @@ if ! docker container inspect jax >/dev/null 2>&1 ; then
   # If XLA repository on the local system is to be used, map it to the container
   # and set the JAXCI_XLA_GIT_DIR environment variable to the container path.
   if [[ -n $JAXCI_XLA_GIT_DIR ]]; then
-    JAXCI_DOCKER_ARGS="$JAXCI_DOCKER_ARGS -v $JAXCI_XLA_GIT_DIR:$JAXCI_CONTAINER_WORK_DIR/xla -e JAXCI_XLA_GIT_DIR=$JAXCI_CONTAINER_WORK_DIR/xla"
-    # Update `JAXCI_XLA_GIT_DIR` with the new path on the host shell
-    # environment as when running commands with `docker exec`, the command is
-    # run in the host shell environment. See `run_bazel_test_gpu.sh` for where
-    # this is needed.
-    export JAXCI_XLA_GIT_DIR=$JAXCI_CONTAINER_WORK_DIR/xla
+    JAXCI_DOCKER_ARGS="$JAXCI_DOCKER_ARGS -v $JAXCI_XLA_GIT_DIR:$JAXCI_DOCKER_WORK_DIR/xla -e JAXCI_XLA_GIT_DIR=$JAXCI_DOCKER_WORK_DIR/xla"
   fi
 
   # When running `bazel test` and specifying dependencies on local wheels, 
   # Bazel will look for them in the ../dist directory by default. This can be
   # overridden by the setting `local_wheel_dist_folder`.
   docker run --env-file <(env | grep ^JAXCI_ ) $JAXCI_DOCKER_ARGS --name jax \
-      -w $JAXCI_CONTAINER_WORK_DIR -itd --rm \
-      -v "$JAXCI_GIT_DIR:$JAXCI_CONTAINER_WORK_DIR" \
+      -w $JAXCI_DOCKER_WORK_DIR -itd --rm \
+      -v "$JAXCI_JAX_GIT_DIR:$JAXCI_DOCKER_WORK_DIR" \
       -e local_wheel_dist_folder=$JAXCI_OUTPUT_DIR \
       "$JAXCI_DOCKER_IMAGE" \
     bash
+
+  # Update `JAXCI_JAX_GIT_DIR` and `JAXCI_XLA_GIT_DIR` with the new Docker path
+  # on the host shell environment. This is needed because when running in
+  # Docker, the commands are run on the host shell environment with
+  # `docker exec`. This requires that the paths be mapped to the Docker
+  # container filesystem.
+  # See `run_bazel_test_gpu.sh` for where this is needed.
+  export JAXCI_JAX_GIT_DIR=$JAXCI_DOCKER_WORK_DIR
+  export JAXCI_XLA_GIT_DIR=$JAXCI_DOCKER_WORK_DIR/xla
 
   if [[ "$(uname -s)" =~ "MSYS_NT" ]]; then
     # Allow requests from the container.
@@ -67,4 +71,4 @@ if ! docker container inspect jax >/dev/null 2>&1 ; then
 fi
 jaxrun() { docker exec jax "$@"; }
 
-jaxrun git config --global --add safe.directory $JAXCI_CONTAINER_WORK_DIR
+jaxrun git config --global --add safe.directory $JAXCI_DOCKER_WORK_DIR

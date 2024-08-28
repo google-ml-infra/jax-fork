@@ -32,7 +32,7 @@ jobs:
         run: ./ci/build_artifacts.sh jax-cuda-plugin
       - name: Build jax-cuda-pjrt
         run: ./ci/build_artifacts.sh jax-cuda-pjrt
-      - name: Set ENV_FILE to run Bazel GPU tests locally
-        run: export ENV_FILE=ci/run_tests/bazel_local_gpu
       - name: Run Bazel GPU tests locally
+        env:
+          ENV_FILE: ci/run_tests/bazel_local_gpu
         run: ./ci/run_bazel_test_gpu.sh
