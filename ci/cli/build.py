@@ -304,11 +304,16 @@ async def main():
   if check_whether_running_tests() or args.local_xla_path:
     bazel_command.append(f"--override_repository=xla='{args.local_xla_path}'")
 
-  # Set the Python version if it is not the default. While jax-cuda-pjrt does
-  # not use the Python version, we set it here because Heremtic Python uses
-  # the system default if not Python version is set. On some of our Docker
-  # images, the system default is Python 3.9 which is not supported by JAX.
-  bazel_command.append(f"--repo_env=HERMETIC_PYTHON_VERSION={args.python_version}")
+  if hasattr(args, "python_version"):
+    bazel_command.append(f"--repo_env=HERMETIC_PYTHON_VERSION={args.python_version}")
+  else:
+    # While jax-cuda-pjrt does not use the Python version, we set the default
+    # as 3.12 because Heremtic Python uses the system default if not Python
+    # version is set. On some of our Docker images, the system default is Python
+    # 3.9 which is not supported by JAX.
+    # TODO(srnitin): Update the Docker images so that we can remove this.
+    bazel_command.append("--repo_env=HERMETIC_PYTHON_VERSION=3.12")
+
 
   # Set the CUDA and cuDNN versions if they are not the default.
   if hasattr(args, "cuda_version") and args.cuda_version != "12.3.2":
