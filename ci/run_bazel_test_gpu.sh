@@ -20,12 +20,12 @@ jaxrun nvidia-smi
 os=$(uname -s | awk '{print tolower($0)}')
 arch=$(uname -m)
 
+# Run Bazel GPU tests locally.
 if [[ $JAXCI_RUN_BAZEL_GPU_TEST_LOCAL == 1 ]]; then
       echo "Running local GPU tests..."
 
       jaxrun "$JAXCI_PYTHON" -c "import jax; print(jax.default_backend()); print(jax.devices()); print(len(jax.devices()))"
 
-      # Only Linux x86 builds run these for now.
       # Runs non-multiaccelerator tests with one GPU apiece.
       # It appears --run_under needs an absolute path.
       jaxrun bazel --bazelrc=ci/.bazelrc test --config=ci_${os}_${arch}_cuda \
@@ -43,9 +43,9 @@ if [[ $JAXCI_RUN_BAZEL_GPU_TEST_LOCAL == 1 ]]; then
             //tests:gpu_tests //tests/pallas:gpu_tests
 fi
 
+# Run Bazel GPU tests with RBE.
 if [[ $JAXCI_RUN_BAZEL_GPU_TEST_RBE == 1 ]]; then
       echo "Running RBE GPU tests..."
-      # RBE GPU tests. Only Linux x86 builds run these for now.
       # Runs non-multiaccelerator tests with one GPU apiece.
       jaxrun bazel --bazelrc=ci/.bazelrc test --config=rbe_${os}_${arch}_cuda \
             --config=non_multiaccelerator \

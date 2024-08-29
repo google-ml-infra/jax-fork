@@ -63,8 +63,9 @@ if [[ $JAXCI_RUN_TESTS == 1 ]]; then
   export JAX_ENABLE_X64=0
 fi
 
-export JAXCI_RUN_BAZEL_GPU_TEST_LOCAL=${JAXCI_RUN_BAZEL_GPU_TEST_LOCAL:-0}
-export JAXCI_RUN_BAZEL_GPU_TEST_RBE=${JAXCI_RUN_BAZEL_GPU_TEST_RBE:-0}
+# When running tests or building artifacts for running tests, we use XLA at
+# HEAD.
+export JAXCI_CLONE_MAIN_XLA=${JAXCI_CLONE_MAIN_XLA:-0}
 
 # Allow overriding the XLA git repository path and commit.
 export JAXCI_XLA_GIT_DIR=${JAXCI_XLA_GIT_DIR:-}
@@ -73,3 +74,11 @@ export JAXCI_XLA_COMMIT=${JAXCI_XLA_COMMIT:-}
 # JAXCI_PYTHON is used to install the wheels locally. It needs to match the
 # version of the hermetic Python used to Bazel.
 export JAXCI_PYTHON=python${JAXCI_HERMETIC_PYTHON_VERSION}
+
+# Bazel test environment variables.
+export JAXCI_RUN_BAZEL_GPU_TEST_LOCAL=${JAXCI_RUN_BAZEL_GPU_TEST_LOCAL:-0}
+export JAXCI_RUN_BAZEL_GPU_TEST_RBE=${JAXCI_RUN_BAZEL_GPU_TEST_RBE:-0}
+
+# Pytest environment variables.
+export JAXCI_RUN_PYTEST_CPU=${JAXCI_RUN_PYTEST_CPU:-0}
+export JAXCI_RUN_PYTEST_GPU=${JAXCI_RUN_PYTEST_GPU:-0}

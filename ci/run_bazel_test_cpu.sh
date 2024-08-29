@@ -18,17 +18,17 @@ source "ci/utilities/setup.sh"
 os=$(uname -s | awk '{print tolower($0)}')
 arch=$(uname -m)
 
-if [[ $JAXCI_BUILD_BAZEL_CPU_TEST_RBE == 1 ]]; then
-      # Bazel build on RBE CPU. Used when RBE is not available for the platform.
-      # E.g. Linux Aarch64 and Mac.
+# If running on Mac or Linux Aarch64, we only build the test targets. This is
+# because these platforms do not have native RBE support. Instead, we
+# cross-compile them on Linux x86 RBE pool. Since running the tests on a single
+# machine can take a long time, we skip running them on these platforms.
+if [[ $os == "darwin" ]] || ( [[ $os == "linux" ]] && [[ $arch == "aarch64" ]] ); then
       jaxrun bazel --bazelrc=ci/.bazelrc build --config=rbe_cross_compile_${os}_${arch} \
             --override_repository=xla="${JAXCI_XLA_GIT_DIR}" \
             --repo_env=HERMETIC_PYTHON_VERSION="$JAXCI_HERMETIC_PYTHON_VERSION" \
             --test_env=JAX_NUM_GENERATED_CASES=25 \
             //tests:cpu_tests //tests:backend_independent_tests
 else
-      # Bazel test on RBE CPU. Only Linux x86_64 can run tests on RBE at the
-      # moment.
       jaxrun bazel --bazelrc=ci/.bazelrc test --config=rbe_${os}_${arch} \
             --override_repository=xla="${JAXCI_XLA_GIT_DIR}" \
             --repo_env=HERMETIC_PYTHON_VERSION="$JAXCI_HERMETIC_PYTHON_VERSION" \

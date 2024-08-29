@@ -14,5 +14,4 @@ export JAXCI_DOCKER_CUDA_VERSION=${JAX_DOCKER_CUDA_VERSION:-12.3}
 export JAXCI_DOCKER_IMAGE="gcr.io/tensorflow-testing/nosla-cuda${JAXCI_DOCKER_CUDA_VERSION}-cudnn9.1-ubuntu20.04-manylinux2014-multipython"
 export JAXCI_DOCKER_ARGS="--gpus all"
 
-export TF_CPP_MIN_LOG_LEVEL=0
 export NCCL_DEBUG=WARN
