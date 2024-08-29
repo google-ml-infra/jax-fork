@@ -27,7 +27,7 @@ jobs:
 
     runs-on: ${{ matrix.runner }}
     container:
-      image: ${{ (contains(matrix.runners, 'linux-x86') && 'index.docker.io/tensorflow/build@sha256:e042f39c18a01012349ad42ae69f6c9fb6e8cc912ddf362d47f6caf1f97f54c3') || (contains(matrix.runners, 'linux-arm64') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/build-arm64:jax-latest-multi-python') }}
+      image: ${{ ( contains(matrix.runner, 'linux-x86') && 'index.docker.io/tensorflow/build@sha256:e042f39c18a01012349ad42ae69f6c9fb6e8cc912ddf362d47f6caf1f97f54c3' ) || ( contains(matrix.runner, 'linux-arm64') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/build-arm64:jax-latest-multi-python' ) }}
 
     env:
       JAXCI_USE_DOCKER: 0
