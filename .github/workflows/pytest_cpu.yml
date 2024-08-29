@@ -9,8 +9,8 @@ jobs:
   build:
     strategy:
       matrix:
-        runner: ["arc-linux-x86-n2-64"]
-        python: ["3.10", "3.11", "3.12"]
+        runner: ["linux-x86-n2-64"]
+        python: ["3.10"]
 
     runs-on: ${{ matrix.runner }}
     container:
