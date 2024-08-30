@@ -40,7 +40,7 @@ jobs:
       - name: Wait For Connection
         uses: ./actions/ci_connection/
       - name: Install missing docker dependencies
-        run: pip install build auditwheel
+        run: python3 -m pip install build auditwheel
       - name: Build ${{ matrix.artifact }}
         env:
           JAXCI_HERMETIC_PYTHON_VERSION: "${{ matrix.python }}"
