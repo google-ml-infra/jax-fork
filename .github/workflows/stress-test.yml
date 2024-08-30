@@ -16,7 +16,7 @@ jobs:
       fail-fast: false # don't cancel all jobs on failure
       matrix:
         instances: [1, 2, 3, 4, 5]
-        runners: ["arc-linux-x86-n2-64", "arc-linux-x86-n2-128", "arc-linux-arm64-t2a-48", "arc-linux-x86-g2-96-l4-8gpu", "arc-linux-x86-ct5lp-224-8tpu"]
+        runners: ["linux-x86-n2-64", "linux-x86-n2-128", "linux-arm64-t2a-48", "linux-x86-g2-96-l4-8gpu", "linux-x86-ct5lp-224-8tpu"]
     # TODO: Needs final runs-on value
     runs-on: ${{ matrix.runners }}
     container:
