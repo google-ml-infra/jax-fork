@@ -28,6 +28,10 @@ runs:
       echo "Should halt input: ${{ inputs.halt-dispatch-input }}"
       echo "Reattempt count: ${{ github.run_attempt }}"
       echo "PR number ${{ github.event.number }}"
+      # Grab the current status of labels
+      curl -s -H "Accept: application/vnd.github+json" \
+      "https://api.github.com/repos/${{ inputs.repository }}/pulls/${{ github.event.number }}/labels"
+
   - name: Halt For Connection 
     shell: bash
     if: |
