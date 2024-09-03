@@ -15,7 +15,6 @@ jobs:
         python: ["3.10", "3.11", "3.12"]
         # jax-cuda-pjrt and jax are pure Python packages so they do not need to be built for each
         # Python version.
-        #
         exclude:
           - artifact: "jax-cuda-pjrt"
             python: "3.10"
