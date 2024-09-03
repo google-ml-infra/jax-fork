@@ -11,7 +11,7 @@ jobs:
     strategy:
       matrix:
         runner: ["linux-x86-n2-64", "linux-arm64-t2a-48"]
-        artifact: ["jaxlib", "jax-cuda-pjrt", "jax-cuda-plugin"]
+        artifact: ["jax", "jaxlib", "jax-cuda-pjrt", "jax-cuda-plugin"]
         python: ["3.10", "3.11", "3.12"]
         # jax-cuda-pjrt and jax are pure Python packages so they do not need to be built for each
         # Python version.
@@ -21,10 +21,14 @@ jobs:
             python: "3.10"
           - artifact: "jax-cuda-pjrt"
             python: "3.11"
+          - artifact: "jax"
+            python: "3.10"
+          - artifact: "jax"
+            python: "3.11"
 
     runs-on: ${{ matrix.runner }}
     container:
-      image: ${{ (contains(matrix.runner, 'linux-x86') && 'index.docker.io/tensorflow/build@sha256:e042f39c18a01012349ad42ae69f6c9fb6e8cc912ddf362d47f6caf1f97f54c3') || (contains(matrix.runner, 'linux-arm64') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/build-arm64:jax-latest-multi-python') }}
+      image: ${{ (contains(matrix.runner, 'linux-x86') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/build:670606426-python3.9') || (contains(matrix.runner, 'linux-arm64') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/build-arm64:jax-') }}
 
     env:
       JAXCI_USE_DOCKER: 0
