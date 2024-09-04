@@ -31,7 +31,8 @@ jobs:
 
     env:
       JAXCI_SETUP_DOCKER: 0
-      JAXCI_USE_RBE: 1
+      # Use RBE to build the artifacts.
+      JAXCI_BUILD_ARTIFACT_WITH_RBE: 1
 
     steps:
       - uses: actions/checkout@v3

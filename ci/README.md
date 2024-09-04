@@ -59,7 +59,7 @@ set `JAXCI_HERMETIC_PYTHON_VERSION`. E.g.`export JAXCI_HERMETIC_PYTHON_VERSION=3
 
 If you are running this on a Linux x86 or a Windows machine, you have the option
 to use RBE to speed up the build. Please note this requires permissions to JAX's
-remote worker pool and RBE configs. To enable RBE, run `export JAXCI_USE_RBE=1`.
+remote worker pool and RBE configs. To enable RBE, run `export JAXCI_BUILD_ARTIFACT_WITH_RBE=1`.
 
 **How to run the script**
 

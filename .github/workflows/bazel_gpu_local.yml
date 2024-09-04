@@ -19,7 +19,7 @@ jobs:
       # GitHub actions run in Docker by defaut. Disable running the `setup_docker.sh` script.
       JAXCI_SETUP_DOCKER: 0
       # Use RBE to build the artifacts.
-      JAXCI_USE_RBE: 1
+      JAXCI_BUILD_ARTIFACT_WITH_RBE: 1
       # Setup the test environment (disable x64 mode and clone XLA at HEAD)
       JAXCI_SETUP_TEST_ENVIRONMENT: 1
       JAXCI_HERMETIC_PYTHON_VERSION: 3.11

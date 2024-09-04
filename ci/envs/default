@@ -32,6 +32,11 @@ export JAXCI_RELEASE_TAG="${JAXCI_RELEASE_TAG:-}"
 # toolchain and local mode uses the default Bazel toolchain. 
 export JAXCI_CLI_BUILD_MODE=${JAXCI_CLI_BUILD_MODE:-ci}
 
+# If set to 1, the build CLI will use RBE to build the artifacts. Available for
+# Linux x86 and Windows. RBE requires authentication to JAX's GCP project so
+$ only CI builds and Googlers can use RBE.
+export JAXCI_BUILD_ARTIFACT_WITH_RBE=${JAXCI_BUILD_ARTIFACT_WITH_RBE:-0}
+
 # Environment variables that control which artifact to build. Used by
 # `build_artifacts.sh`
 export JAXCI_BUILD_JAX_ENABLE="${JAXCI_BUILD_JAX_ENABLE:-0}"
