@@ -19,7 +19,7 @@ jobs:
       JAXCI_USE_DOCKER: 0
       JAXCI_USE_RBE: 1
       JAXCI_RUN_TESTS: 1
-      JAXCI_HERMETIC_PYTHON_VERSION: 3.10
+      JAXCI_HERMETIC_PYTHON_VERSION: "3.10"
 
     steps:
       - uses: actions/checkout@v3
