@@ -7,6 +7,14 @@ export JAXCI_INSTALL_WHEELS_LOCALLY=1
 
 export JAXCI_RUN_PYTEST_GPU=1
 
+# Tests targets are built with CUDA 12.3 and then tested with CUDA 12.3 and
+# CUDA 12.1. By default, we set the CUDA version of the docker image to 12.3.
+export JAXCI_DOCKER_CUDA_VERSION=${JAX_DOCKER_CUDA_VERSION:-12.3}
+
+# Only Linux x86 runs local GPU tests at the moment.
+export JAXCI_DOCKER_IMAGE="gcr.io/tensorflow-testing/nosla-cuda${JAXCI_DOCKER_CUDA_VERSION}-cudnn9.1-ubuntu20.04-manylinux2014-multipython"
+export JAXCI_DOCKER_ARGS="--shm-size=16g --gpus all"
+
 # TODO(srnitin): Figure out where this gets used
 export JAX_CUDA_VERSION=12
 export JAX_CUDA_FULL_VERSION=12.3

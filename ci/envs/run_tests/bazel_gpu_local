@@ -14,6 +14,6 @@ export JAXCI_DOCKER_CUDA_VERSION=${JAX_DOCKER_CUDA_VERSION:-12.3}
 
 # Only Linux x86 runs local GPU tests at the moment.
 export JAXCI_DOCKER_IMAGE="gcr.io/tensorflow-testing/nosla-cuda${JAXCI_DOCKER_CUDA_VERSION}-cudnn9.1-ubuntu20.04-manylinux2014-multipython"
-export JAXCI_DOCKER_ARGS="--gpus all"
+export JAXCI_DOCKER_ARGS="--shm-size=16g --gpus all"
 
 export NCCL_DEBUG=WARN

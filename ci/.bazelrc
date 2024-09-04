@@ -416,23 +416,21 @@ build:rbe_cross_compile_macos_x86 --config=rbe_cross_compile_base
 # #############################################################################
 test --test_output=errors
 
-# Configs for for running GPU tests.
+# Common configs for for running GPU tests.
 test:gpu --test_env=TF_CPP_MIN_LOG_LEVEL=0
 test:gpu --test_env=JAX_SKIP_SLOW_TESTS=1 --test_env=XLA_PYTHON_CLIENT_ALLOCATOR=platform
 
-# Configs for local_gpu
-test:local_gpu --config=gpu
-# Disable building jaxlib. Instead we depend on the local wheel. 
-test:local_gpu --//jax:build_jaxlib=false 
-
-# Non-multiaccelerator tests with one GPU apiece. Non-multiaccelerator tests
-# are run on RBE and locally.
+# Non-multiaccelerator tests with one GPU apiece. These tests are run on RBE
+# and locally.
 test:non_multiaccelerator --config=gpu
 test:non_multiaccelerator --test_env=JAX_EXCLUDE_TEST_TARGETS=PmapTest.testSizeOverflow
 test:non_multiaccelerator --test_tag_filters=-multiaccelerator
 
+# Configs for running non-multiaccelerator tests locally
 test:non_multiaccelerator_local --config=non_multiaccelerator
-test:non_multiaccelerator_local --config=local_gpu
+# Disable building jaxlib. Instead we depend on the local wheel.
+test:non_multiaccelerator_local --//jax:build_jaxlib=false
+
 # `JAX_ACCELERATOR_COUNT` needs to match the number of GPUs in the VM.
 test:non_multiaccelerator_local --test_env=JAX_TESTS_PER_ACCELERATOR=12 --test_env=JAX_ACCELERATOR_COUNT=4
 
@@ -440,9 +438,9 @@ test:non_multiaccelerator_local --test_env=JAX_TESTS_PER_ACCELERATOR=12 --test_e
 # should match the VM's CPU core count (set in `--local_test_jobs`).
 test:non_multiaccelerator_local --local_test_jobs=48 
 
-# Runs multiaccelerator tests with all GPUs. Multiaccelerator GPU tests are
-# only run locally
-test:multiaccelerator_local --config=local_gpu
+# Multiaccelerator tests with all GPUs. These tests are only run locally
+# Disable building jaxlib. Instead we depend on the local wheel.
+test:multiaccelerator_local --//jax:build_jaxlib=false
 test:multiaccelerator_local --jobs=8 --test_tag_filters=multiaccelerator
 
 #############################################################################
