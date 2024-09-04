@@ -34,6 +34,10 @@ if [[ -z "${ENV_FILE}" ]]; then
     exit 1
 fi
 
+# Store the current environment variables.
+env_before=$(mktemp)
+env > "$env_before"
+
 # -e: abort script if one command fails
 # -u: error if undefined variable used
 # -x: log all commands
@@ -41,7 +45,25 @@ fi
 # -o history: record shell history
 # -o allexport: export all functions and variables to be available to subscripts
 set -exuo pipefail -o history -o allexport
+
 source "$ENV_FILE"
+
+# Capture the environment variables that get set by ENV_FILE and store them in
+# a file. This is needed so that we know which envs to set when setting up the
+# Docker container in `setup_docker.sh`. An easier solution would be to just
+# grep for "JAXCI_" variables but unfortunately, this is not robust as we
+# there are some variables such as `JAX_ENABLE_X64`, `NCCL_DEBUG`, etc that
+# are used by JAX but do not have the `JAXCI_` prefix.
+env_after=$(mktemp)
+env > "$env_after"
+
+JAXCI_ENVS=$(mktemp)
+
+# Only print the new environment variables set by ENV_FILE. Use env_before
+# that gets set in setup.sh for the initial environment variables. diff
+# exits with a return code. This can end the build abrupty so we use "|| true"
+# to ignore the return code and continue.
+diff <(sort "$env_before") <(sort "$env_after") | grep "^> " | sed 's/^> //' > "$JAXCI_ENVS" || true
 
 # Pre-emptively mark the git directory as safe. This is necessary for JAX CI
 # jobs running on GitHub Actions. Without this, git complains that the directory

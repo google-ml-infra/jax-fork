@@ -50,7 +50,7 @@ if ! docker container inspect jax >/dev/null 2>&1 ; then
   # When running `bazel test` and specifying dependencies on local wheels, 
   # Bazel will look for them in the ../dist directory by default. This can be
   # overridden by the setting `local_wheel_dist_folder`.
-  docker run --env-file <(env | grep ^JAXCI_ ) $JAXCI_DOCKER_ARGS --name jax \
+  docker run --env-file $JAXCI_ENVS $JAXCI_DOCKER_ARGS --name jax \
       -w $JAXCI_DOCKER_WORK_DIR -itd --rm \
       -v "$JAXCI_JAX_GIT_DIR:$JAXCI_DOCKER_WORK_DIR" \
       -e local_wheel_dist_folder=$JAXCI_OUTPUT_DIR \
@@ -62,7 +62,7 @@ if ! docker container inspect jax >/dev/null 2>&1 ; then
   # Docker, the commands are run on the host shell environment with
   # `docker exec`. This requires that the paths be mapped to the Docker
   # container filesystem.
-  # See `run_bazel_test_gpu.sh` for where this is needed.
+  # See `run_bazel_test_gpu.sh` for an example of where this is needed.
   export JAXCI_JAX_GIT_DIR=$JAXCI_DOCKER_WORK_DIR
   export JAXCI_XLA_GIT_DIR=$JAXCI_DOCKER_WORK_DIR/xla
 
