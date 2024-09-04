@@ -1,4 +1,4 @@
-name: Run Bazel GPU tests locally
+name: Run Bazel GPU tests using RBE
 
 on:
   pull_request:

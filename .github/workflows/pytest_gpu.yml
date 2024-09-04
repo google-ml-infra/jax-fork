@@ -1,4 +1,4 @@
-name: Run Pytest CPU tests
+name: Run Pytest GPU tests
 
 on:
   pull_request:
