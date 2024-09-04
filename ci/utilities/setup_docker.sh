@@ -53,18 +53,10 @@ if ! docker container inspect jax >/dev/null 2>&1 ; then
   docker run --env-file $JAXCI_ENVS $JAXCI_DOCKER_ARGS --name jax \
       -w $JAXCI_DOCKER_WORK_DIR -itd --rm \
       -v "$JAXCI_JAX_GIT_DIR:$JAXCI_DOCKER_WORK_DIR" \
+      -e JAXCI_OUTPUT_DIR=$JAXCI_OUTPUT_DIR \
       -e local_wheel_dist_folder=$JAXCI_OUTPUT_DIR \
       "$JAXCI_DOCKER_IMAGE" \
     bash
-
-  # Update `JAXCI_JAX_GIT_DIR` and `JAXCI_XLA_GIT_DIR` with the new Docker path
-  # on the host shell environment. This is needed because when running in
-  # Docker, the commands are run on the host shell environment with
-  # `docker exec`. This requires that the paths be mapped to the Docker
-  # container filesystem.
-  # See `run_bazel_test_gpu.sh` for an example of where this is needed.
-  export JAXCI_JAX_GIT_DIR=$JAXCI_DOCKER_WORK_DIR
-  export JAXCI_XLA_GIT_DIR=$JAXCI_DOCKER_WORK_DIR/xla
 
   if [[ "$(uname -s)" =~ "MSYS_NT" ]]; then
     # Allow requests from the container.
@@ -72,6 +64,17 @@ if ! docker container inspect jax >/dev/null 2>&1 ; then
     netsh advfirewall firewall add rule name="Allow Metadata Proxy" dir=in action=allow protocol=TCP localport=80 remoteip="$CONTAINER_IP_ADDR"
   fi
 fi
+
+# Update `JAXCI_OUTPUT_DIR`, `JAXCI_JAX_GIT_DIR` and `JAXCI_XLA_GIT_DIR` with
+# the new Docker path on the host shell environment. This is needed because when
+# running in Docker, the commands are run on the host shell environment with
+# `docker exec`. This requires that the paths be mapped to the Docker
+# container filesystem.
+# See `build_artifacts.sh` and `run_bazel_test_gpu.sh` for an example of where
+# this is needed.
+export JAXCI_OUTPUT_DIR=$JAXCI_DOCKER_WORK_DIR/dist
+export JAXCI_JAX_GIT_DIR=$JAXCI_DOCKER_WORK_DIR
+export JAXCI_XLA_GIT_DIR=$JAXCI_DOCKER_WORK_DIR/xla
 
 jaxrun() { docker exec jax "$@"; }
 
