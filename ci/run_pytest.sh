@@ -31,3 +31,18 @@ if [[ $JAXCI_RUN_PYTEST_GPU == 1 ]]; then
   --deselect=tests/multiprocess_gpu_test.py::MultiProcessGpuTest::test_distributed_jax_visible_devices \
   --deselect=tests/compilation_cache_test.py::CompilationCacheTest::test_task_using_cache_metric
 fi
+
+if [[ $JAXCI_RUN_PYTEST_TPU == 1 ]]; then
+  # Run single-accelerator tests in parallel
+  export JAX_ENABLE_TPU_XDIST=true 
+  jaxrun "$JAXCI_PYTHON" -m pytest -n="$JAXCI_TPU_CORES" --tb=short \
+    --deselect=tests/pallas/tpu_pallas_test.py::PallasCallPrintTest \
+    --maxfail=20 -m "not multiaccelerator" tests examples
+ 
+  # Run Pallas printing tests, which need to run with I/O capturing disabled.
+  export TPU_STDERR_LOG_LEVEL=0 
+  jaxrun "$JAXCI_PYTHON" -m pytest -s tests/pallas/tpu_pallas_test.py::PallasCallPrintTest
+
+  # Run multi-accelerator across all chips
+  jaxrun "$JAXCI_PYTHON" -m pytest --tb=short --maxfail=20 -m "multiaccelerator" tests
+fi

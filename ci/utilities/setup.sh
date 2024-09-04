@@ -90,9 +90,9 @@ if [[ ! -z "$JAXCI_XLA_COMMIT" ]]; then
   jaxrun popd
 fi
 
-# All builds except for Mac run under Docker.
-# GitHub actions do not need to invoke this script. It always runs in a Docker
-# container. The image and the runner type are set in the workflow file.
+# All CI builds except for Mac run under Docker.
+# Jobs running on GitHub actions do not invoke this script. They define the
+# Docker image via the `container` field in the workflow file.
 if [[ "$JAXCI_USE_DOCKER" == 1 ]]; then
   source ./ci/utilities/setup_docker.sh
 fi

@@ -45,6 +45,8 @@ export JAXCI_WHEEL_AUDIT_ENABLE="${JAXCI_WHEEL_AUDIT_ENABLE:-0}"
 # #############################################################################
 
 # Docker specifc environment variables. Used by `setup_docker.sh`
+# TODO(srnitin): Change to `JAXCI_SETUP_DOCKER` to avoid confusion about its
+# usage.
 export JAXCI_USE_DOCKER=${JAXCI_USE_DOCKER:-1}
 export JAXCI_DOCKER_IMAGE=""
 export JAXCI_DOCKER_WORK_DIR=${JAXCI_DOCKER_WORK_DIR:-"/jax"}
@@ -82,3 +84,5 @@ export JAXCI_RUN_BAZEL_GPU_TEST_RBE=${JAXCI_RUN_BAZEL_GPU_TEST_RBE:-0}
 # Pytest environment variables.
 export JAXCI_RUN_PYTEST_CPU=${JAXCI_RUN_PYTEST_CPU:-0}
 export JAXCI_RUN_PYTEST_GPU=${JAXCI_RUN_PYTEST_GPU:-0}
+export JAXCI_RUN_PYTEST_TPU=${JAXCI_RUN_PYTEST_TPU:-0}
+export JAXCI_TPU_CORES=${JAXCI_TPU_CORES:-}

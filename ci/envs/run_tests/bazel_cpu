@@ -3,8 +3,4 @@ export JAXCI_RUN_TESTS=1
 # Inherit default environment variables.
 source ci/envs/default
 
-# By default, we will run the CPU tests on RBE. Only RBE cross-compile builds
-# build the test targets and do not run them.
-export JAXCI_BUILD_BAZEL_CPU_TEST_RBE=${JAXCI_BUILD_BAZEL_CPU_TEST_RBE:-0}
-
 export JAXCI_DOCKER_IMAGE="gcr.io/tensorflow-testing/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython"

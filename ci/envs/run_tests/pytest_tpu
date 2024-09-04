@@ -4,4 +4,4 @@ export JAXCI_RUN_TESTS=1
 source ci/envs/default
 
 export JAXCI_CLONE_MAIN_XLA=1
-export JAXCI_RUN_PYTEST_CPU=1
+export JAXCI_RUN_PYTEST_TPU=1

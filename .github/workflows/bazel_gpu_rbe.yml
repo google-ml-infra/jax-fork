@@ -9,7 +9,7 @@ jobs:
   build:
     strategy:
       matrix:
-        runner: ["linux-x86-g2-96-l4-4gpu"]
+        runner: ["arc-linux-x86-g2-96-l4-8gpu"]
 
     runs-on: ${{ matrix.runner }}
     container:
@@ -19,20 +19,14 @@ jobs:
       JAXCI_USE_DOCKER: 0
       JAXCI_USE_RBE: 1
       JAXCI_RUN_TESTS: 1
-      JAXCI_HERMETIC_PYTHON_VERSION: 3.11
+      JAXCI_HERMETIC_PYTHON_VERSION: 3.12
 
     steps:
       - uses: actions/checkout@v3
-      - name: Build jaxlib
-        run: ./ci/build_artifacts.sh jaxlib
-      - name: Build jax-cuda-plugin
-        run: ./ci/build_artifacts.sh jax-cuda-plugin
-      - name: Build jax-cuda-pjrt
-        run: ./ci/build_artifacts.sh jax-cuda-pjrt
       # Halt for testing
       - name: Wait For Connection
         uses: ./actions/ci_connection/
-      - name: Run Bazel GPU tests locally
+      - name: Run Bazel GPU tests using RBE
         env:
-          ENV_FILE: ci/envs/run_tests/bazel_gpu_local
+          ENV_FILE: ci/envs/run_tests/bazel_rbe
         run: ./ci/run_bazel_test_gpu.sh

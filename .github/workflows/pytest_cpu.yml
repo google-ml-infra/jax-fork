@@ -19,8 +19,6 @@ jobs:
     env:
       JAXCI_USE_DOCKER: 0
       JAXCI_USE_RBE: 1
-      JAXCI_RUN_TESTS: 1
-      JAXCI_CLONE_MAIN_XLA: 1
       JAXCI_HERMETIC_PYTHON_VERSION: ${{ matrix.python }}
 
     steps:

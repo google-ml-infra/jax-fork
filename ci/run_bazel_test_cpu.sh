@@ -24,14 +24,14 @@ arch=$(uname -m)
 # machine can take a long time, we skip running them on these platforms.
 if [[ $os == "darwin" ]] || ( [[ $os == "linux" ]] && [[ $arch == "aarch64" ]] ); then
       jaxrun bazel --bazelrc=ci/.bazelrc build --config=rbe_cross_compile_${os}_${arch} \
-            --override_repository=xla="${JAXCI_XLA_GIT_DIR}" \
             --repo_env=HERMETIC_PYTHON_VERSION="$JAXCI_HERMETIC_PYTHON_VERSION" \
+            --override_repository=xla="${JAXCI_XLA_GIT_DIR}" \
             --test_env=JAX_NUM_GENERATED_CASES=25 \
             //tests:cpu_tests //tests:backend_independent_tests
 else
       jaxrun bazel --bazelrc=ci/.bazelrc test --config=rbe_${os}_${arch} \
-            --override_repository=xla="${JAXCI_XLA_GIT_DIR}" \
             --repo_env=HERMETIC_PYTHON_VERSION="$JAXCI_HERMETIC_PYTHON_VERSION" \
+            --override_repository=xla="${JAXCI_XLA_GIT_DIR}" \
             --test_env=JAX_NUM_GENERATED_CASES=25 \
             //tests:cpu_tests //tests:backend_independent_tests
 fi

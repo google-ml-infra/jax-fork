@@ -46,6 +46,7 @@ fi
 # Run Bazel GPU tests with RBE.
 if [[ $JAXCI_RUN_BAZEL_GPU_TEST_RBE == 1 ]]; then
       echo "Running RBE GPU tests..."
+
       # Runs non-multiaccelerator tests with one GPU apiece.
       jaxrun bazel --bazelrc=ci/.bazelrc test --config=rbe_${os}_${arch}_cuda \
             --config=non_multiaccelerator \
