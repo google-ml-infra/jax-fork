@@ -34,7 +34,7 @@ export JAXCI_CLI_BUILD_MODE=${JAXCI_CLI_BUILD_MODE:-ci}
 
 # If set to 1, the build CLI will use RBE to build the artifacts. Available for
 # Linux x86 and Windows. RBE requires authentication to JAX's GCP project so
-$ only CI builds and Googlers can use RBE.
+# only CI builds and Googlers can use RBE.
 export JAXCI_BUILD_ARTIFACT_WITH_RBE=${JAXCI_BUILD_ARTIFACT_WITH_RBE:-0}
 
 # Environment variables that control which artifact to build. Used by
