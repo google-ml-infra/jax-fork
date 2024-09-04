@@ -1,7 +1,9 @@
-export JAXCI_RUN_TESTS=1
+export JAXCI_SETUP_TEST_ENVIRONMENT=1
 
 # Inherit default environment variables.
 source ci/envs/default
+
+export JAXCI_INSTALL_WHEELS_LOCALLY=1
 
 # Enable local GPU tests
 export JAXCI_RUN_BAZEL_GPU_TEST_LOCAL=1

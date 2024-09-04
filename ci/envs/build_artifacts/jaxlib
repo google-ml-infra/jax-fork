@@ -43,5 +43,5 @@ fi
 # Mac specific settings
 if [[ $os == "macos" ]]; then
   # Mac builds do not run in Docker.
-  export JAXCI_USE_DOCKER=0
+  export JAXCI_SETUP_DOCKER=0
 fi

@@ -1,8 +1,6 @@
-export JAXCI_RUN_TESTS=1
+export JAXCI_SETUP_TEST_ENVIRONMENT=1
 
 # Inherit default environment variables.
 source ci/envs/default
-
-export JAXCI_CLONE_MAIN_XLA=1
 
 export JAXCI_DOCKER_IMAGE="gcr.io/tensorflow-testing/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython"

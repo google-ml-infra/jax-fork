@@ -93,13 +93,13 @@ fi
 # All CI builds except for Mac run under Docker.
 # Jobs running on GitHub actions do not invoke this script. They define the
 # Docker image via the `container` field in the workflow file.
-if [[ "$JAXCI_USE_DOCKER" == 1 ]]; then
+if [[ "$JAXCI_SETUP_DOCKER" == 1 ]]; then
   source ./ci/utilities/setup_docker.sh
 fi
 
 # If we are running tests, set up the test environment.
-if [[ "$JAXCI_RUN_TESTS" == 1 ]]; then
-   source ./ci/utilities/setup_test_environment.sh
+if [[ "$JAXCI_INSTALL_WHEELS_LOCALLY" == 1 ]]; then
+   source ./ci/utilities/install_wheels_locally.sh
 fi
 
 # TODO: cleanup steps

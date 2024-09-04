@@ -14,7 +14,8 @@
 # limitations under the License.
 # ==============================================================================
 #
-# Set up the environment for JAX tests
+# Install wheels stored in `JAXCI_OUTPUT_DIR` locally using the Python binary
+# set in JAXCI_PYTHON.
 
 # TODO(srnitin): Check if this is needed for running Bazel tests locally.
 # When running tests with Pytests, install wheels using the Python binary set

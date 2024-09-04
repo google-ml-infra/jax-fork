@@ -30,7 +30,7 @@ jobs:
       image: ${{ (contains(matrix.runner, 'linux-x86') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/build:670606426-python3.9') || (contains(matrix.runner, 'linux-arm64') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/build-arm64:jax-') }}
 
     env:
-      JAXCI_USE_DOCKER: 0
+      JAXCI_SETUP_DOCKER: 0
       JAXCI_USE_RBE: 1
 
     steps:

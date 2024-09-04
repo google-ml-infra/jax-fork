@@ -46,7 +46,7 @@ the right build environment is set up before we can build the artifact. If you
 would like to disable Docker, run:
 
 ```
-export JAXCI_USE_DOCKER=0
+export JAXCI_SETUP_DOCKER=0
 export JAXCI_CLI_BUILD_MODE=local
 ```
 

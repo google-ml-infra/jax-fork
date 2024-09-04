@@ -1,7 +1,9 @@
-export JAXCI_RUN_TESTS=1
+export JAXCI_SETUP_TEST_ENVIRONMENT=1
 
 # Inherit default environment variables.
 source ci/envs/default
+
+export JAXCI_INSTALL_WHEELS_LOCALLY=1
 
 export JAXCI_CLONE_MAIN_XLA=1
 export JAXCI_RUN_PYTEST_TPU=1

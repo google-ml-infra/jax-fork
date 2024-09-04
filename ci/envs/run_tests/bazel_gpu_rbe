@@ -1,4 +1,4 @@
-export JAXCI_RUN_TESTS=1
+export JAXCI_SETUP_TEST_ENVIRONMENT=1
 
 # Inherit default environment variables.
 source ci/envs/default

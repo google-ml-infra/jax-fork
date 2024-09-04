@@ -113,14 +113,6 @@ def get_jaxlib_git_hash():
   res = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True)
   return res.stdout
 
-def check_whether_running_tests():
-  """
-  Returns True if running tests, False otherwise. When running tests, JAX
-  artifacts are built with `JAX_ENABLE_X64=0` and the XLA repository is checked
-  out at HEAD instead of the pinned version.
-  """
-  return os.environ.get("JAXCI_RUN_TESTS", "0") == "1"
-
 async def main():
   parser = argparse.ArgumentParser(
       description=(
@@ -205,7 +197,7 @@ async def main():
       at the pinned version in workspace.bzl.
       """,
   )
-  
+
   parser.add_argument(
       "--dry_run",
       action="store_true",
@@ -299,9 +291,10 @@ async def main():
   if bazelrc_config:
     bazel_command.append(f"--config={bazelrc_config}")
 
-  # Check if we are running tests or if a local XLA path is set.
-  # When running tests, JAX arifacts and tests are run with XLA at head.
-  if check_whether_running_tests() or args.local_xla_path:
+  # Check if a local XLA path is set.
+  # When building artifacts for running tests, we use clone XLA at HEAD into
+  # JAXCI_XLA_GIT_DIR and use that for building the artifacts.
+  if args.local_xla_path:
     bazel_command.append(f"--override_repository=xla='{args.local_xla_path}'")
 
   if hasattr(args, "python_version"):

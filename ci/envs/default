@@ -47,7 +47,7 @@ export JAXCI_WHEEL_AUDIT_ENABLE="${JAXCI_WHEEL_AUDIT_ENABLE:-0}"
 # Docker specifc environment variables. Used by `setup_docker.sh`
 # TODO(srnitin): Change to `JAXCI_SETUP_DOCKER` to avoid confusion about its
 # usage.
-export JAXCI_USE_DOCKER=${JAXCI_USE_DOCKER:-1}
+export JAXCI_SETUP_DOCKER=${JAXCI_SETUP_DOCKER:-1}
 export JAXCI_DOCKER_IMAGE=""
 export JAXCI_DOCKER_WORK_DIR=${JAXCI_DOCKER_WORK_DIR:-"/jax"}
 export JAXCI_DOCKER_ARGS=""
@@ -56,22 +56,26 @@ export JAXCI_DOCKER_ARGS=""
 # Test specific environment variables.
 # #############################################################################
 
-# Test specific environment variables below. Used by `run_bazel_test.sh` and
-# `run_pytest.sh`
-export JAXCI_RUN_TESTS=${JAXCI_RUN_TESTS:-0}
+# Test specific environment variables below. Used by `run_bazel_test_gpu.sh`,
+# `run_bazel_test_cpu.sh`, and `run_pytest.sh`.
+export JAXCI_SETUP_TEST_ENVIRONMENT=${JAXCI_SETUP_TEST_ENVIRONMENT:-0}
 
-# When running tests, we disable x64 mode.
-if [[ $JAXCI_RUN_TESTS == 1 ]]; then
+if [[ $JAXCI_SETUP_TEST_ENVIRONMENT == 1 ]]; then
+  # Disable x64 mode
   export JAX_ENABLE_X64=0
+  # Clone XLA at HEAD.
+  export JAXCI_CLONE_MAIN_XLA=1
 fi
 
-# When running tests or building artifacts for running tests, we use XLA at
-# HEAD.
 export JAXCI_CLONE_MAIN_XLA=${JAXCI_CLONE_MAIN_XLA:-0}
 
 # Allow overriding the XLA git repository path and commit.
 export JAXCI_XLA_GIT_DIR=${JAXCI_XLA_GIT_DIR:-}
 export JAXCI_XLA_COMMIT=${JAXCI_XLA_COMMIT:-}
+
+# Set when running tests locally where we need the wheels to be installed on
+# the system. 
+export JAXCI_INSTALL_WHEELS_LOCALLY=${JAXCI_INSTALL_WHEELS_LOCALLY:-0}
 
 # JAXCI_PYTHON is used to install the wheels locally. It needs to match the
 # version of the hermetic Python used to Bazel.
