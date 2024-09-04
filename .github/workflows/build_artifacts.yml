@@ -1,29 +1,29 @@
 name: Build JAX Artifacts
 
-# on:
-#   pull_request:
-#     branches:
-#       - main
-#   workflow_dispatch:
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
 
 jobs:
   build:
     strategy:
       matrix:
-        runner: ["linux-x86-n2-64", "linux-arm64-t2a-48"]
-        artifact: ["jax", "jaxlib", "jax-cuda-pjrt", "jax-cuda-plugin"]
-        python: ["3.10", "3.11", "3.12"]
+        runner: ["windows-x86-n2-64"] #["linux-x86-n2-64", "linux-arm64-t2a-48"]
+        artifact: ["jaxlib"] #["jax", "jaxlib", "jax-cuda-pjrt", "jax-cuda-plugin"]
+        python: ["3.10"] #["3.10", "3.11", "3.12"]
         # jax-cuda-pjrt and jax are pure Python packages so they do not need to be built for each
         # Python version.
-        exclude:
-          - artifact: "jax-cuda-pjrt"
-            python: "3.10"
-          - artifact: "jax-cuda-pjrt"
-            python: "3.11"
-          - artifact: "jax"
-            python: "3.10"
-          - artifact: "jax"
-            python: "3.11"
+        # exclude:
+        #   - artifact: "jax-cuda-pjrt"
+        #     python: "3.10"
+        #   - artifact: "jax-cuda-pjrt"
+        #     python: "3.11"
+        #   - artifact: "jax"
+        #     python: "3.10"
+        #   - artifact: "jax"
+        #     python: "3.11"
 
     runs-on: ${{ matrix.runner }}
     container:
