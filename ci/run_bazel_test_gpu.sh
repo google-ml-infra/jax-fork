@@ -34,7 +34,7 @@ if [[ $JAXCI_RUN_BAZEL_GPU_TEST_LOCAL == 1 ]]; then
             //tests:gpu_tests //tests:backend_independent_tests //tests/pallas:gpu_tests //tests/pallas:backend_independent_tests
 
       # Runs multiaccelerator tests with all GPUs.
-      jaxrun bazel --bazelrc=ci/.bazelrc test --config=ci_linux_x86_64_cuda \ 
+      jaxrun bazel --bazelrc=ci/.bazelrc test --config=ci_linux_x86_64_cuda \
             --config=multiaccelerator_local \
             --repo_env=HERMETIC_PYTHON_VERSION="$JAXCI_HERMETIC_PYTHON_VERSION" \
             --override_repository=xla="${JAXCI_XLA_GIT_DIR}" \

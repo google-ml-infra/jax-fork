@@ -29,5 +29,5 @@ jobs:
         uses: ./actions/ci_connection/
       - name: Run Bazel GPU tests using RBE
         env:
-          ENV_FILE: ci/envs/run_tests/bazel_rbe
+          ENV_FILE: ci/envs/run_tests/bazel_gpu_rbe
         run: ./ci/run_bazel_test_gpu.sh
