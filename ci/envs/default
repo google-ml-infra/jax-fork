@@ -83,7 +83,7 @@ export JAXCI_XLA_COMMIT=${JAXCI_XLA_COMMIT:-}
 export JAXCI_INSTALL_WHEELS_LOCALLY=${JAXCI_INSTALL_WHEELS_LOCALLY:-0}
 
 # JAXCI_PYTHON is used to install the wheels locally. It needs to match the
-# version of the hermetic Python used to Bazel.
+# version of the hermetic Python used by Bazel.
 export JAXCI_PYTHON=python${JAXCI_HERMETIC_PYTHON_VERSION}
 
 # Bazel test environment variables.
