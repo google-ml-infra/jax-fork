@@ -20,7 +20,8 @@
 # TODO(srnitin): Check if this is needed for running Bazel tests locally.
 # When running tests with Pytests, install wheels using the Python binary set
 # in JAXCI_PYTHON.
-if [[ $JAXCI_RUN_PYTEST_CPU == 1 ]] || [[ $JAXCI_RUN_PYTEST_GPU == 1 ]]; then
+if [[ $JAXCI_RUN_PYTEST_CPU == 1 ]] || [[ $JAXCI_RUN_PYTEST_GPU == 1 ]] || \
+   [[ $JAXCI_RUN_BAZEL_GPU_TEST_LOCAL == 1 ]]; then
   # Install the `jaxlib`, `jax-cuda-plugin` and `jax-pjrt` wheels.
   jaxrun bash -c "$JAXCI_PYTHON -m pip install $JAXCI_OUTPUT_DIR/*.whl"
 
