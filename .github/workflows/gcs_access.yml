@@ -13,8 +13,8 @@ jobs:
   cpu-stress:
     strategy:
       matrix:
-        runner: ["arc-linux-x86-n2-64"]
-        instances: ["1"]
+        runner: ["linux-x86-n2-16-test"]
+        instances: ["1", "2"]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     container:
