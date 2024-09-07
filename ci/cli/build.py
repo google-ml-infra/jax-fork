@@ -36,9 +36,7 @@ def add_python_argument(parser: argparse.ArgumentParser):
   )
 
 # Target system is assumed to be the host sytem (auto-detected) unless
-# specified otherwise, e.g. for cross-compile builds
-# allow override to pass in custom flags for certain builds like the RBE
-# jobs
+# specified otherwise, e.g. for cross-compile builds.
 def add_system_argument(parser: argparse.ArgumentParser):
   """Add Target System argument to the parser."""
   parser.add_argument(
