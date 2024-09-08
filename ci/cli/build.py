@@ -67,6 +67,7 @@ def add_cudnn_argument(parser: argparse.ArgumentParser):
 
 def get_bazelrc_config(os_name: str, arch: str, artifact: str, mode:str, use_rbe: bool):
   """Returns the bazelrc config for the given architecture, OS, and build type."""
+
   bazelrc_config = f"{os_name}_{arch}"
 
   # When the CLI is run by invoking ci/build_artifacts.sh, the CLI runs in CI
@@ -229,11 +230,7 @@ async def main():
   add_system_argument(pjrt_parser)
 
   # Get the host systems architecture
-  arch = platform.machine()
-  # On Windows, this returns "amd64" instead of "x86_64. However, they both
-  # are essentially the same.
-  if arch.lower() == "amd64":
-    arch = "x86_64"
+  arch = platform.machine().lower()
 
   # Get the host system OS
   os_name = platform.system().lower()
@@ -326,12 +323,20 @@ async def main():
 
   if not args.build_target_only:
     logger.info("Building wheel...")
+
+    if os_name == "windows":
+      # On Windows, the wheel binary has a .exe extension.
+      wheel_binary += ".exe"
+      # Change to upper case to match the architecture in
+      # "jax/tools/build_utils.py" for Windows.
+      arch = arch.upper()
+
     run_wheel_binary = command.CommandBuilder(wheel_binary)
 
     # Read output directory from environment variable. If not set, set it to
     # dist/ in the current working directory.
     output_dir = os.getenv("JAXCI_OUTPUT_DIR", os.path.join(os.getcwd(), "dist"))
-    run_wheel_binary.append(f"--output_path={output_dir}")
+    run_wheel_binary.append(f"--output_path='{output_dir}'")
 
     run_wheel_binary.append(f"--cpu={arch}")
 
