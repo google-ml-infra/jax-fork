@@ -28,6 +28,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     container:
       image: ${{ (contains(matrix.runner, 'linux-x86') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/build:670606426-python3.9') || (contains(matrix.runner, 'linux-arm64') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/build-arm64:jax-') }}
+      # Only Linux runners suppport Docker-in-Docker mode.
+      if: ${{ (contains(matrix.runner, 'linux') }}
 
     env:
       JAXCI_SETUP_DOCKER: 0
