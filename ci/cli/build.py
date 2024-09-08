@@ -324,20 +324,21 @@ async def main():
   if not args.build_target_only:
     logger.info("Building wheel...")
 
+    # Read output directory from environment variable. If not set, set it to
+    # dist/ in the current working directory.
+    output_dir = os.getenv("JAXCI_OUTPUT_DIR", os.path.join(os.getcwd(), "dist"))
+
     if os_name == "windows":
-      # On Windows, the wheel binary has a .exe extension.
-      wheel_binary += ".exe"
-      # Change to upper case to match the architecture in
+      # On Windows, the wheel binary has a .exe extension. and the path needs
+      # to be adjusted to use backslashes.
+      wheel_binary = wheel_binary.replace("/", "\\") + ".exe"
+      output_dir = output_dir.replace("/", "\\")
+      # Change to upper case to match the case in
       # "jax/tools/build_utils.py" for Windows.
       arch = arch.upper()
 
     run_wheel_binary = command.CommandBuilder(wheel_binary)
-
-    # Read output directory from environment variable. If not set, set it to
-    # dist/ in the current working directory.
-    output_dir = os.getenv("JAXCI_OUTPUT_DIR", os.path.join(os.getcwd(), "dist"))
-    run_wheel_binary.append(f"--output_path='{output_dir}'")
-
+    run_wheel_binary.append(f"--output_path={output_dir}")
     run_wheel_binary.append(f"--cpu={arch}")
 
     if args.command == "jax-cuda-plugin" or args.command == "jax-cuda-pjrt":
