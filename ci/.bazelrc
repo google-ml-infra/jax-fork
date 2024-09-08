@@ -269,7 +269,7 @@ build:ci_linux_aarch64_cuda --config=local_cuda_base
 build:ci_linux_aarch64_cuda --action_env=CLANG_CUDA_COMPILER_PATH="/usr/lib/llvm-18/bin/clang"
 
 # Mac x86 CI configs
-build:ci_darwin_x86_64 --config=local_darwin_arm64
+build:ci_darwin_x86_64 --config=local_darwin_x86_64
 # Mac CI builds read and push cache to/from GCS bucket.
 build:ci_darwin_x86_64 --config=macos_cache_push
 
