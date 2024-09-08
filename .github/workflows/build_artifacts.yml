@@ -40,6 +40,7 @@ jobs:
       - name: Wait For Connection
         uses: ./actions/ci_connection/
       - name: Build ${{ matrix.artifact }}
+        # Explicitly set the shell to bash to override the default Windows environment, i.e, cmd.
         shell: bash
         env:
           JAXCI_HERMETIC_PYTHON_VERSION: "${{ matrix.python }}"

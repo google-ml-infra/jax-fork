@@ -56,9 +56,14 @@ set -exuo pipefail -o history -o allexport
 source "$ENV_FILE"
 
 # Pre-emptively mark the git directory as safe. This is necessary for JAX CI
-# jobs running on GitHub Actions. Without this, git complains that the directory
-# has dubious ownership and refuses to run any commands.
-git config --global --add safe.directory $JAXCI_JAX_GIT_DIR
+# jobs running on Linux runners in GitHub Actions. Without this, git complains
+# that the directory has dubious ownership and refuses to run any commands.
+# Avoid running on Windows runners as git seems to complain about not being able
+# to lock the config file. We are able to run git commands on Windows runners
+# without this so we can skip it.
+if [[ ! $(uname -s) =~ "MSYS_NT" ]]; then
+  git config --global --add safe.directory $JAXCI_JAX_GIT_DIR
+fi
 
 # When building release artifacts, check out the release tag. JAX CI jobs build
 # from the main branch by default. 
