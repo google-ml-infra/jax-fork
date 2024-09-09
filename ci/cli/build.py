@@ -85,7 +85,8 @@ def get_bazelrc_config(os_name: str, arch: str, artifact: str, mode:str, use_rbe
   # supported on Linux x86 and Windows. If an user is requesting RBE, the CLI
   # will use RBE if the host system supports it, otherwise it will use the
   # local config.
-  if use_rbe and (os_name == "linux" or os_name == "windows") and arch == "x86_64":
+  if use_rbe and ((os_name == "linux" and arch == "x86_64") \
+      or (os_name == "windows" and arch == "amd64")):
     bazelrc_config = "rbe_" + bazelrc_config
   elif mode == "local":
     if use_rbe:
@@ -98,7 +99,7 @@ def get_bazelrc_config(os_name: str, arch: str, artifact: str, mode:str, use_rbe
   else:
     if use_rbe:
       logger.warning("RBE is not supported on %s_%s. Using CI config instead.", os_name, arch)
-    elif (os_name == "linux" or os_name == "windows") and arch == "x86_64":
+    elif (os_name == "linux" and arch == "x86_64")or (os_name == "windows" and arch == "amd64"):
       logger.info("RBE support is available for this platform. If you want to use RBE and have the required permissions, run the CLI with `--use_rbe` or set `JAXCI_BUILD_ARTIFACT_WITH_RBE=1`")
     bazelrc_config = "ci_" + bazelrc_config
 
