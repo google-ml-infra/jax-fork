@@ -13,7 +13,7 @@ Maintainer: ML Velocity team @ Google
 The CI folder contains the configuration files and scripts used to build, test,
 and deploy JAX. This folder is typically used by continuous integration
 (CI) tools to build and test JAX whenever there is a change to the
-code. 
+code.
 
 ## JAX's Official CI and Build/Test Scripts
 
