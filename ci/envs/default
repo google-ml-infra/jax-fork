@@ -1,0 +1,58 @@
+# This file contains all the default values for the environment variables
+# used in the JAX CI scripts.
+#
+# The default values are set here. Other build specifc envs such as those 
+# in the "build_artifacts" and "run_tests" directory source this file and
+# override the default values depening on the build type.
+
+# The build CLI can be run in either "ci" or "local" mode. This is used to
+# determine which .bazelrc configs to pass to the CLI.  If the variable is not
+#set, we will default to CI mode.
+export JAXCI_CLI_BUILD_MODE=${JAXCI_CLI_BUILD_MODE:-ci}
+
+# Environment variables that control which artifact to build. Used by
+# `build_artifacts.sh`
+export JAXCI_BUILD_JAX_ENABLE=""
+export JAXCI_BUILD_JAXLIB_ENABLE=""
+export JAXCI_BUILD_PLUGIN_ENABLE=""
+export JAXCI_BUILD_PJRT_ENABLE=""
+export JAXCI_WHEEL_AUDIT_ENABLE=""
+
+# Docker specifc environment variables. Used by `setup_docker.sh`
+export JAXCI_USE_DOCKER=${JAXCI_USE_DOCKER:-1}
+export JAXCI_DOCKER_IMAGE=""
+export JAXCI_CONTAINER_WORK_DIR="/jax"
+export JAXCI_DOCKER_ARGS=""
+
+# Controls the version of Hermetic Python to use. Use 3.12 as default if not
+# set.
+export JAXCI_HERMETIC_PYTHON_VERSION=${JAXCI_HERMETIC_PYTHON_VERSION:-3.12}
+
+# Controls the location where the artifacts are stored on the Docker container.
+export JAXCI_OUTPUT_DIR="$JAXCI_CONTAINER_WORK_DIR/dist"
+
+# Release tag to use for the build.
+export JAXCI_RELEASE_TAG=""
+
+# This is expected to be the root of the JAX git repository.
+export JAXCI_GIT_DIR=$(pwd)
+
+# Test specific environment variables below. Used by `run_bazel_test.sh` and
+# `run_pytest.sh`
+export JAXCI_RUN_TESTS=${JAXCI_RUN_TESTS:-0}
+
+# When running tests, we disable x64 mode.
+if [[ $JAXCI_RUN_TESTS == 1 ]]; then
+  export JAX_ENABLE_X64=0
+fi
+
+export JAXCI_RUN_BAZEL_GPU_TEST_LOCAL=${JAXCI_RUN_BAZEL_GPU_TEST_LOCAL:-0}
+export JAXCI_RUN_BAZEL_GPU_TEST_RBE=${JAXCI_RUN_BAZEL_GPU_TEST_RBE:-0}
+
+# Allow overriding the XLA git repository path and commit.
+export JAXCI_XLA_GIT_DIR=${JAXCI_XLA_GIT_DIR:-}
+export JAXCI_XLA_COMMIT=${JAXCI_XLA_COMMIT:-}
+
+# JAXCI_PYTHON is used to install the wheels locally. It needs to match the
+# version of the hermetic Python used to Bazel.
+export JAXCI_PYTHON=python${JAXCI_HERMETIC_PYTHON_VERSION}
