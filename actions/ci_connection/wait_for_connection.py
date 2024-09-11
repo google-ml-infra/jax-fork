@@ -93,7 +93,7 @@ if __name__ == "__main__":
     exit(0)
 
   # Grab and print the data required to connect to this vm
-  host = os.environ.get("HOSTNAME")
+  host = os.environ.get("CONNECTION_POD_NAME")
   repo = os.environ.get("REPOSITORY")
   cluster = os.environ.get("CONNECTION_CLUSTER")
   location = os.environ.get("CONNECTION_LOCATION")
