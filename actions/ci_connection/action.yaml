@@ -30,7 +30,10 @@ runs:
       echo "PR number ${{ github.event.number }}"
   - name: Halt For Connection 
     shell: bash
-    if: 1 == 1
+    if: |
+      (contains(github.event.pull_request.labels.*.name, inputs.should-wait-retry-tag) && github.run_attempt > 1) ||
+      contains(github.event.pull_request.labels.*.name, inputs.should-wait-always-tag) ||
+      inputs.halt-dispatch-input == 'yes'
     env:
       REPOSITORY: ${{ inputs.repository }}
       INTERACTIVE_CI: 1 
