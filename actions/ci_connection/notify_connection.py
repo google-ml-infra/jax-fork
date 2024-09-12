@@ -58,7 +58,7 @@ if __name__ == "__main__":
     sub_env["JAXCI_USE_RBE"] = "1"
 
     # Enter interactive bash session
-    subprocess.run(["bash", "-i"], env=sub_env)
+    subprocess.run(["bash", "-i"])
 
     print("Exiting interactive bash session")
     with lock:
