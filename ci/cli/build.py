@@ -444,7 +444,7 @@ def add_global_arguments(parser: argparse.ArgumentParser):
   parser.add_argument(
       "--output_dir",
       type=str,
-      default=os.path.join(os.getcwd(), "dist"),
+      default=os.environ.get("JAXCI_OUTPUT_DIR", os.path.join(os.getcwd(), "dist")),
       help="Directory in which artifacts should be stored."
   )
 

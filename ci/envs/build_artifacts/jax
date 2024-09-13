@@ -1,5 +1,7 @@
-# Inherit default environment variables.
+# Inherit default JAXCI environment variables.
 source ci/envs/default
+
+# Build JAX artifact.
 export JAXCI_BUILD_JAX_ENABLE="1"
 
 os=$(uname -s | awk '{print tolower($0)}')
@@ -24,7 +26,7 @@ if [[ $os =~ "msys_nt" ]]; then
 
   # While we run these scripts in Cygwin on Windows,
   # the path needs to be in Windows format.
-  export JAXCI_JAX_GIT_DIR=$(cygpath -w "/tmpfs/src/github/jax")
-  export JAXCI_OUTPUT_DIR=$(cygpath -w /c/jax/dist)
+  export JAXCI_JAX_GIT_DIR=$(cygpath -w $JAXCI_JAX_GIT_DIR)
+  export JAXCI_OUTPUT_DIR=$(cygpath -w $JAXCI_JAX_GIT_DIR)
   export JAXCI_DOCKER_WORK_DIR=$(cygpath -w /c/jax/)
 fi

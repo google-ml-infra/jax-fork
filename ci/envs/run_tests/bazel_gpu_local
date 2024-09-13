@@ -1,19 +1,21 @@
-export JAXCI_SETUP_TEST_ENVIRONMENT=1
-
-# Inherit default environment variables.
+# Inherit default JAXCI environment variables.
 source ci/envs/default
 
-export JAXCI_INSTALL_WHEELS_LOCALLY=1
-
-# Enable local GPU tests
+# Enable local Bazel GPU tests
 export JAXCI_RUN_BAZEL_GPU_TEST_LOCAL=1
 
 # Tests targets are built with CUDA 12.3 and then tested with CUDA 12.3 and
 # CUDA 12.1. By default, we set the CUDA version of the docker image to 12.3.
-export JAXCI_DOCKER_CUDA_VERSION=${JAX_DOCKER_CUDA_VERSION:-12.3}
+export JAXCI_DOCKER_CUDA_VERSION=${JAXCI_DOCKER_CUDA_VERSION:-12.3}
 
 # Only Linux x86 runs local GPU tests at the moment.
 export JAXCI_DOCKER_IMAGE="gcr.io/tensorflow-testing/nosla-cuda${JAXCI_DOCKER_CUDA_VERSION}-cudnn9.1-ubuntu20.04-manylinux2014-multipython"
 export JAXCI_DOCKER_ARGS="--shm-size=16g --gpus all"
 
 export NCCL_DEBUG=WARN
+
+# Disable x64 mode
+export JAX_ENABLE_X64=0
+
+# Clone XLA at HEAD.
+export JAXCI_CLONE_MAIN_XLA=1

@@ -13,20 +13,45 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-source "ci/utilities/setup.sh"
+# Source JAXCI environment variables.
+source "ci/utilities/setup_envs.sh"
+# Set up the build environment.
+source "ci/utilities/setup_build_environment.sh"
 
-jaxrun nvidia-smi
+if [[ $JAXCI_RUN_BAZEL_TEST_CPU == 1 ]]; then
+      os=$(uname -s | awk '{print tolower($0)}')
+      arch=$(uname -m)
+
+      # If running on Mac or Linux Aarch64, we only build the test targets. This is
+      # because these platforms do not have native RBE support. Instead, we
+      # cross-compile them on Linux x86 RBE pool. Since running the tests on a single
+      # machine can take a long time, we skip running them on these platforms.
+      if [[ $os == "darwin" ]] || ( [[ $os == "linux" ]] && [[ $arch == "aarch64" ]] ); then
+            check_if_to_run_in_docker bazel --bazelrc=ci/.bazelrc build --config=rbe_cross_compile_${os}_${arch} \
+                  --repo_env=HERMETIC_PYTHON_VERSION="$JAXCI_HERMETIC_PYTHON_VERSION" \
+                  --override_repository=xla="${JAXCI_XLA_GIT_DIR}" \
+                  --test_env=JAX_NUM_GENERATED_CASES=25 \
+                  //tests:cpu_tests //tests:backend_independent_tests
+      else
+            check_if_to_run_in_docker bazel --bazelrc=ci/.bazelrc test --config=rbe_${os}_${arch} \
+                  --repo_env=HERMETIC_PYTHON_VERSION="$JAXCI_HERMETIC_PYTHON_VERSION" \
+                  --override_repository=xla="${JAXCI_XLA_GIT_DIR}" \
+                  --test_env=JAX_NUM_GENERATED_CASES=25 \
+                  //tests:cpu_tests //tests:backend_independent_tests
+      fi
+fi
 
 # Run Bazel GPU tests locally.
-if [[ $JAXCI_RUN_BAZEL_GPU_TEST_LOCAL == 1 ]]; then
+if [[ $JAXCI_RUN_BAZEL_TEST_GPU_LOCAL == 1 ]]; then
+      check_if_to_run_in_docker nvidia-smi
       echo "Running local GPU tests..."
 
-      jaxrun "$JAXCI_PYTHON" -c "import jax; print(jax.default_backend()); print(jax.devices()); print(len(jax.devices()))"
+      check_if_to_run_in_docker "$JAXCI_PYTHON" -c "import jax; print(jax.default_backend()); print(jax.devices()); print(len(jax.devices()))"
 
       # Only Linux x86 builds run GPU tests
       # Runs non-multiaccelerator tests with one GPU apiece.
       # It appears --run_under needs an absolute path.
-      jaxrun bazel --bazelrc=ci/.bazelrc test --config=ci_linux_x86_64_cuda \
+      check_if_to_run_in_docker bazel --bazelrc=ci/.bazelrc test --config=ci_linux_x86_64_cuda \
             --config=non_multiaccelerator_local \
             --repo_env=HERMETIC_PYTHON_VERSION="$JAXCI_HERMETIC_PYTHON_VERSION" \
             --override_repository=xla="${JAXCI_XLA_GIT_DIR}" \
@@ -34,7 +59,7 @@ if [[ $JAXCI_RUN_BAZEL_GPU_TEST_LOCAL == 1 ]]; then
             //tests:gpu_tests //tests:backend_independent_tests //tests/pallas:gpu_tests //tests/pallas:backend_independent_tests
 
       # Runs multiaccelerator tests with all GPUs.
-      jaxrun bazel --bazelrc=ci/.bazelrc test --config=ci_linux_x86_64_cuda \
+      check_if_to_run_in_docker bazel --bazelrc=ci/.bazelrc test --config=ci_linux_x86_64_cuda \
             --config=multiaccelerator_local \
             --repo_env=HERMETIC_PYTHON_VERSION="$JAXCI_HERMETIC_PYTHON_VERSION" \
             --override_repository=xla="${JAXCI_XLA_GIT_DIR}" \
@@ -42,12 +67,13 @@ if [[ $JAXCI_RUN_BAZEL_GPU_TEST_LOCAL == 1 ]]; then
 fi
 
 # Run Bazel GPU tests with RBE.
-if [[ $JAXCI_RUN_BAZEL_GPU_TEST_RBE == 1 ]]; then
+if [[ $JAXCI_RUN_BAZEL_TEST_GPU_RBE == 1 ]]; then
+      check_if_to_run_in_docker nvidia-smi
       echo "Running RBE GPU tests..."
 
       # Only Linux x86 builds run GPU tests
       # Runs non-multiaccelerator tests with one GPU apiece.
-      jaxrun bazel --bazelrc=ci/.bazelrc test --config=rbe_linux_x86_64_cuda \
+      check_if_to_run_in_docker bazel --bazelrc=ci/.bazelrc test --config=rbe_linux_x86_64_cuda \
             --config=non_multiaccelerator \
             --repo_env=HERMETIC_PYTHON_VERSION="$JAXCI_HERMETIC_PYTHON_VERSION" \
             --override_repository=xla="${JAXCI_XLA_GIT_DIR}" \

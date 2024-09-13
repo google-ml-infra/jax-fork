@@ -14,7 +14,7 @@
 # limitations under the License.
 # ==============================================================================
 #
-# Set up Docker for JAX CI jobs.
+# Set up the Docker container and start it for JAX CI jobs.
 
 # Keep the existing "jax" container if it's already present.
 if ! docker container inspect jax >/dev/null 2>&1 ; then
@@ -46,10 +46,6 @@ if ! docker container inspect jax >/dev/null 2>&1 ; then
 
   # Set the output directory to the container path.
   export JAXCI_OUTPUT_DIR=$JAXCI_DOCKER_WORK_DIR/dist
-  # When running `bazel test` and specifying dependencies on local wheels, 
-  # Bazel will look for them in the ../dist directory by default. This can be
-  # overridden by the setting `local_wheel_dist_folder`.
-  export local_wheel_dist_folder=$JAXCI_OUTPUT_DIR
 
   # Capture the environment variables that get set by ENV_FILE and store them in
   # a file. This is needed so that we know which envs to set when setting up the
@@ -83,17 +79,15 @@ if ! docker container inspect jax >/dev/null 2>&1 ; then
   fi
 fi
 
+check_if_to_run_in_docker() { docker exec jax "$@"; }
+
 # Update `JAXCI_OUTPUT_DIR`, `JAXCI_JAX_GIT_DIR` and `JAXCI_XLA_GIT_DIR` with
 # the new Docker path on the host shell environment. This is needed because when
-# running in Docker, the commands are run on the host shell environment with
-# `docker exec`. This requires that the paths be mapped to the Docker
-# container filesystem.
-# See `build_artifacts.sh` and `run_bazel_test_gpu.sh` for an example of where
-# this is needed.
+# running in Docker with `docker exec`, the commands are run on the host shell
+# environment and as such the following variables need to be updated with The
+# Docker paths.
 export JAXCI_OUTPUT_DIR=$JAXCI_DOCKER_WORK_DIR/dist
 export JAXCI_JAX_GIT_DIR=$JAXCI_DOCKER_WORK_DIR
 export JAXCI_XLA_GIT_DIR=$JAXCI_DOCKER_WORK_DIR/xla
 
-jaxrun() { docker exec jax "$@"; }
-
-jaxrun git config --global --add safe.directory $JAXCI_DOCKER_WORK_DIR
+check_if_to_run_in_docker git config --global --add safe.directory $JAXCI_DOCKER_WORK_DIR

@@ -13,18 +13,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-source "ci/utilities/setup.sh"
+# Source JAXCI environment variables.
+source "ci/utilities/setup_envs.sh"
+# Set up the build environment.
+source "ci/utilities/setup_build_environment.sh"
 
-jaxrun "$JAXCI_PYTHON" -c "import jax; print(jax.default_backend()); print(jax.devices()); print(len(jax.devices()))"
+check_if_to_run_in_docker "$JAXCI_PYTHON" -c "import jax; print(jax.default_backend()); print(jax.devices()); print(len(jax.devices()))"
 
 if [[ $JAXCI_RUN_PYTEST_CPU == 1 ]]; then
-  jaxrun "$JAXCI_PYTHON" -m pytest -n auto --tb=short --maxfail=20 tests examples
+  check_if_to_run_in_docker "$JAXCI_PYTHON" -m pytest -n auto --tb=short --maxfail=20 tests examples
 fi
 
 if [[ $JAXCI_RUN_PYTEST_GPU == 1 ]]; then
   export XLA_PYTHON_CLIENT_ALLOCATOR=platform
   export XLA_FLAGS=--xla_gpu_force_compilation_parallelism=1
-  jaxrun "$JAXCI_PYTHON" -m pytest -n 8 --tb=short --maxfail=20 \
+  check_if_to_run_in_docker "$JAXCI_PYTHON" -m pytest -n 8 --tb=short --maxfail=20 \
   tests examples \
   --deselect=tests/multi_device_test.py::MultiDeviceTest::test_computation_follows_data \
   --deselect=tests/xmap_test.py::XMapTest::testCollectivePermute2D \
@@ -35,14 +38,14 @@ fi
 if [[ $JAXCI_RUN_PYTEST_TPU == 1 ]]; then
   # Run single-accelerator tests in parallel
   export JAX_ENABLE_TPU_XDIST=true 
-  jaxrun "$JAXCI_PYTHON" -m pytest -n="$JAXCI_TPU_CORES" --tb=short \
+  check_if_to_run_in_docker "$JAXCI_PYTHON" -m pytest -n="$JAXCI_TPU_CORES" --tb=short \
     --deselect=tests/pallas/tpu_pallas_test.py::PallasCallPrintTest \
     --maxfail=20 -m "not multiaccelerator" tests examples
  
   # Run Pallas printing tests, which need to run with I/O capturing disabled.
   export TPU_STDERR_LOG_LEVEL=0 
-  jaxrun "$JAXCI_PYTHON" -m pytest -s tests/pallas/tpu_pallas_test.py::PallasCallPrintTest
+  check_if_to_run_in_docker "$JAXCI_PYTHON" -m pytest -s tests/pallas/tpu_pallas_test.py::PallasCallPrintTest
 
   # Run multi-accelerator across all chips
-  jaxrun "$JAXCI_PYTHON" -m pytest --tb=short --maxfail=20 -m "multiaccelerator" tests
+  check_if_to_run_in_docker "$JAXCI_PYTHON" -m pytest --tb=short --maxfail=20 -m "multiaccelerator" tests
 fi

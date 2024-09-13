@@ -1,9 +1,9 @@
 name: Run Bazel CPU tests
 
-# on:
-#   pull_request:
-#     branches:
-#       - main
+on:
+  pull_request:
+    branches:
+      - main
 
 jobs:
   build:
@@ -16,11 +16,9 @@ jobs:
       image: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/build:670606426-python3.9"
 
     env:
-      # GitHub actions run in Docker by defaut. Disable running the `setup_docker.sh` script.
-      JAXCI_SETUP_DOCKER: 0
-      # Setup the test environment (disable x64 mode and clone XLA at HEAD)
-      JAXCI_SETUP_TEST_ENVIRONMENT: 1
-      JAXCI_HERMETIC_PYTHON_VERSION: "3.10"
+      # Do not run Docker container for Linux runners. Linux runners already run in a Docker container.
+      JAXCI_RUN_DOCKER_CONTAINER: 0
+      JAXCI_HERMETIC_PYTHON_VERSION: "3.12"
 
     steps:
       - uses: actions/checkout@v3
@@ -30,4 +28,4 @@ jobs:
       - name: Run Bazel CPU Tests
         env:
           ENV_FILE: ci/envs/run_tests/bazel_cpu
-        run: ./ci/run_bazel_test_cpu.sh
+        run: ./ci/run_bazel_test.sh

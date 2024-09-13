@@ -1,11 +1,11 @@
-export JAXCI_SETUP_TEST_ENVIRONMENT=1
-
-# Inherit default environment variables.
+# Inherit default JAXCI environment variables.
 source ci/envs/default
 
-export JAXCI_INSTALL_WHEELS_LOCALLY=1
-
+# Enable GPU Pytests
 export JAXCI_RUN_PYTEST_GPU=1
+
+# Install jaxlib, jax-cuda-plugin, and jax-cuda-pjrt wheels locally.
+export JAXCI_INSTALL_WHEELS_LOCALLY=1
 
 # Tests targets are built with CUDA 12.3 and then tested with CUDA 12.3 and
 # CUDA 12.1. By default, we set the CUDA version of the docker image to 12.3.
@@ -21,3 +21,9 @@ export JAX_CUDA_FULL_VERSION=12.3
 export JAX_DOCKER_CUDA_FULL_VERSION=12.1
 export JAX_CUDNN_VERSION=9.1
 export JAX_CUDA_PLUGIN='True'
+
+# Disable x64 mode
+export JAX_ENABLE_X64=0
+
+# Clone XLA at HEAD.
+export JAXCI_CLONE_MAIN_XLA=1

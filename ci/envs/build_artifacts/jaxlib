@@ -1,4 +1,4 @@
-# Inherit default environment variables.
+# Inherit default JAXCI environment variables.
 source ci/envs/default
 
 # Enable jaxlib build.
@@ -43,5 +43,12 @@ fi
 # Mac specific settings
 if [[ $os == "macos" ]]; then
   # Mac builds do not run in Docker.
-  export JAXCI_SETUP_DOCKER=0
+  export JAXCI_RUN_DOCKER_CONTAINER=0
+fi
+
+if [[ $JAXCI_SETUP_TEST_ENVIRONMENT == 1 ]]; then
+  # Disable x64 mode
+  export JAX_ENABLE_X64=0
+  # Clone XLA at HEAD.
+  export JAXCI_CLONE_MAIN_XLA=1
 fi

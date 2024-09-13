@@ -1,8 +1,7 @@
-export JAXCI_SETUP_TEST_ENVIRONMENT=1
-
-# Inherit default environment variables.
+# Inherit default JAXCI environment variables.
 source ci/envs/default
 
+# Enable Bazel GPU tests with RBE
 export JAXCI_RUN_BAZEL_GPU_TEST_RBE=1
 
 # Only Linux x86 runs local GPU tests at the moment.
@@ -12,3 +11,9 @@ export JAXCI_DOCKER_ARGS="--gpus all"
 # TODO(srnitin): Figure out where this gets used
 export JAX_CUDA_VERSION=12
 export JAX_CUDNN_VERSION=9.1
+
+# Disable x64 mode
+export JAX_ENABLE_X64=0
+
+# Clone XLA at HEAD.
+export JAXCI_CLONE_MAIN_XLA=1
