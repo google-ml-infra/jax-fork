@@ -2,7 +2,7 @@
 source ci/envs/default
 
 # Enable Bazel GPU tests with RBE
-export JAXCI_RUN_BAZEL_GPU_TEST_RBE=1
+export JAXCI_RUN_BAZEL_TEST_GPU_RBE=1
 
 # Only Linux x86 runs local GPU tests at the moment.
 export JAXCI_DOCKER_IMAGE="gcr.io/tensorflow-testing/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython"
