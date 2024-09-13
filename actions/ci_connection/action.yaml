@@ -26,7 +26,6 @@ runs:
       # Fetch labels using GitHub API
       labels=$(curl -sL \
         -H "Accept: application/vnd.github+json" \
-        -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
         https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/labels)
 
       # Extract label names using jq
