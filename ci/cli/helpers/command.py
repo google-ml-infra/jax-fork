@@ -5,7 +5,7 @@ import os
 import logging
 from typing import Dict, Optional
 
-logger = logging.getLogger()
+logger = logging.getLogger(__name__)
 
 class CommandBuilder:
   def __init__(self, base_command: str):
@@ -14,7 +14,6 @@ class CommandBuilder:
   def append(self, parameter: str):
     self.command += " {}".format(parameter)
     return self
-
 
 @dataclasses.dataclass
 class CommandResult:
@@ -30,36 +29,18 @@ class CommandResult:
   )
   end_time: Optional[datetime.datetime] = None
 
-  # def logger.info(self):
-  #   """
-  #   Prints a summary of the command execution.
-  #   """
-  #   duration = (
-  #     (self.end_time - self.start_time).total_seconds() if self.end_time else None
-  #   )
-  #   logger.info(f"Command: {self.get_command()}")
-  #   logger.info(f"Return code: {self.return_code}")
-  #   logger.info(f"Duration: {duration:.3f} seconds" if duration else "Command still running")
-  #   if self.logs:
-  #     logger.info("Logs:")
-  #     logger.info(self.logs)
-
-
 class SubprocessExecutor:
   """
   Manages execution of subprocess commands with reusable environment and logging.
   """
 
-  def __init__(self, environment: Dict[str, str] = dict(os.environ)):
-    self.environment = environment
+  def __init__(self, environment: Dict[str, str] = None):
+    """
 
-  def set_verbose(self, verbose: bool):
-    """Enables or disables verbose logging."""
-    self._verbose = verbose
-
-  def update_environment(self, new_env: Dict[str, str]):
-    """Updates the environment with new key-value pairs."""
-    self.environment.update(new_env)
+    Args:
+      environment:
+    """
+    self.environment = environment or dict(os.environ)
 
   async def run(self, cmd: str, dry_run: bool = False) -> CommandResult:
     """
