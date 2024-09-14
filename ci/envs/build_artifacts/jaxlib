@@ -28,16 +28,6 @@ fi
 # Windows specific settings
 if [[ $os =~ "msys_nt" ]]; then
   export JAXCI_DOCKER_IMAGE="gcr.io/tensorflow-testing/tf-win2019-rbe@sha256:1082ef4299a72e44a84388f192ecefc81ec9091c146f507bc36070c089c0edcc"
-
-  # While we run these scripts in Cygwin on Windows,
-  # the path needs to be in Windows format.
-  export JAXCI_JAX_GIT_DIR=$(cygpath -w "$JAXCI_JAX_GIT_DIR")
-  export JAXCI_OUTPUT_DIR=$(cygpath -w "$JAXCI_OUTPUT_DIR")
-  export JAXCI_DOCKER_WORK_DIR=$(cygpath -w /c/jax/)
-
-  if [[ -n $JAXCI_XLA_GIT_DIR ]]; then
-    export JAXCI_XLA_GIT_DIR=$(cygpath -w "$JAXCI_XLA_GIT_DIR")
-  fi
 fi
 
 # Mac specific settings
