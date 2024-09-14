@@ -619,7 +619,7 @@ async def main():
   # JAXCI_XLA_GIT_DIR and use that for building the artifacts.
   if args.local_xla_path:
     logging.debug("Setting local XLA path to %s", args.local_xla_path)
-    bazel_command.append(f"--override_repository=xla='{args.local_xla_path}'")
+    bazel_command.append(f"--override_repository=xla={args.local_xla_path}")
 
   # Set the Hermetic Python version.
   if hasattr(args, "python_version"):
