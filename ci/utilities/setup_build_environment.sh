@@ -79,7 +79,8 @@ check_if_to_run_in_docker() { "$@"; }
 # For Windows, convert MSYS Linux-like paths to Windows paths.
 if [[ $(uname -s) =~ "MSYS_NT" ]]; then
   echo 'Converting MSYS Linux-like paths to Windows paths (for Docker, Python, etc.)'
-  source <(python3 ./ci/utilities/convert_msys_paths_to_win_paths.py --whitelist-prefix JAXCI_)
+  # Convert all "_DIR" variables to Windows paths.
+  source <(python3 ./ci/utilities/convert_msys_paths_to_win_paths.py)
 fi
 
 # All CI builds except for Mac run under Docker.
