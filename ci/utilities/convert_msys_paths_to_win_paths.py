@@ -13,7 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""Converts MSYS Linux-like paths stored in env variables to Windows paths.
+"""
+Converts MSYS Linux-like paths stored in env variables to Windows paths.
 
 This is necessary on Windows, because some applications do not understand/handle
 Linux-like paths MSYS uses, for example, Docker.
