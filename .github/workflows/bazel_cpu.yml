@@ -1,4 +1,4 @@
-name: Run Bazel CPU tests
+name: Run Bazel CPU tests with RBE
 
 on:
   pull_request:
@@ -9,14 +9,15 @@ jobs:
   build:
     strategy:
       matrix:
-        runner: ["linux-x86-n2-64"]
+        runner: ["linux-x86-n2-64", "linux-arm64-t2a-48"]
 
     runs-on: ${{ matrix.runner }}
-    container:
-      image: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/build:670606426-python3.9"
+    container: ${{ (contains(matrix.runner, 'linux-x86') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/build:670606426-python3.9') ||
+                   (contains(matrix.runner, 'linux-arm64') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/build-arm64:jax-') }}
 
     env:
-      # Do not run Docker container for Linux runners. Linux runners already run in a Docker container.
+      # Disable running `run_docker_container.sh`. JAX self-hosted runners already run in a Docker
+      # container.
       JAXCI_RUN_DOCKER_CONTAINER: 0
       JAXCI_HERMETIC_PYTHON_VERSION: "3.12"
 

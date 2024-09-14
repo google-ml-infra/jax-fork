@@ -21,8 +21,8 @@
 # in JAXCI_PYTHON.
 if [[ $JAXCI_RUN_PYTEST_CPU == 1 ]] || [[ $JAXCI_RUN_PYTEST_GPU == 1 ]]; then
   # Install the `jaxlib`, `jax-cuda-plugin` and `jax-pjrt` wheels.
-  check_if_running_in_docker bash -c "$JAXCI_PYTHON -m pip install $JAXCI_OUTPUT_DIR/*.whl"
+  bash -c "$JAXCI_PYTHON -m pip install $JAXCI_OUTPUT_DIR/*.whl"
 
   # Install JAX package at the current commit.
-  check_if_running_in_docker "$JAXCI_PYTHON" -m pip install -U -e .
+  "$JAXCI_PYTHON" -m pip install -U -e .
 fi

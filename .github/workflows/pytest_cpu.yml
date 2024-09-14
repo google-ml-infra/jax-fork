@@ -1,25 +1,27 @@
 name: Run Pytest CPU tests
 
-# on:
-#   pull_request:
-#     branches:
-#       - main
+on:
+  pull_request:
+    branches:
+      - main
 
 jobs:
   build:
     strategy:
       matrix:
-        runner: ["linux-x86-n2-64"]
-        python: ["3.10"]
+        runner: ["windows-x86-n2-64", "linux-x86-n2-64", "linux-arm64-t2a-48"]
+        python: ["3.12"]
 
     runs-on: ${{ matrix.runner }}
-    container:
-      image: "gcr.io/tensorflow-testing/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest"
+    container: ${{ (contains(matrix.runner, 'linux-x86') && 'gcr.io/tensorflow-testing/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest') ||
+                (contains(matrix.runner, 'linux-arm64') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/build-arm64:jax-') ||
+                (contains(matrix.runner, 'windows-x86') && null) }}
 
     env:
-      # GitHub actions run in Docker by defaut. Disable running the `setup_docker.sh` script.
-      JAXCI_SETUP_DOCKER: 0
-      # Use RBE to build the artifacts.
+      # Disable running `run_docker_container.sh`. JAX self-hosted runners already run in a Docker
+      # container.
+      JAXCI_RUN_DOCKER_CONTAINER: 0
+      # Use RBE to build the artifacts where possible (Linux x86 and Windows).
       JAXCI_BUILD_ARTIFACT_WITH_RBE: 1
       # Setup the test environment (disable x64 mode and clone XLA at HEAD)
       JAXCI_SETUP_TEST_ENVIRONMENT: 1

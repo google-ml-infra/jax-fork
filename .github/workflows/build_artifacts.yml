@@ -45,7 +45,7 @@ jobs:
     env:
       # Do not run Docker container for Linux runners. Linux runners already run in a Docker container.
       JAXCI_RUN_DOCKER_CONTAINER: 0
-      # Use RBE to build the artifacts where possible.
+      # Use RBE to build the artifacts where possibl (Linux x86 and Windows).
       JAXCI_BUILD_ARTIFACT_WITH_RBE: 1
 
     steps:

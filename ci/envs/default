@@ -91,3 +91,8 @@ export JAXCI_XLA_GIT_DIR=${JAXCI_XLA_GIT_DIR:-}
 # Set JAXCI_XLA_COMMIT to the commit to use for the XLA repository. Requires
 # the path to the local copy of XLA to be set in JAXCI_XLA_GIT_DIR. 
 export JAXCI_XLA_COMMIT=${JAXCI_XLA_COMMIT:-}
+
+# When running tests locally, JAX artifacts are built with CUDA 12.3 and then
+# tested with a Docker image with CUDA 12.3 and CUDA 12.1. By default, we set
+# the CUDA version of the Docker image to 12.3.
+export JAXCI_DOCKER_CUDA_VERSION=${JAXCI_DOCKER_CUDA_VERSION:-12.3}
