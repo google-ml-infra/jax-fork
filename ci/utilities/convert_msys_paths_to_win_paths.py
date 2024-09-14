@@ -47,9 +47,9 @@ def main(parsed_args: argparse.Namespace):
   converted_paths = {}
 
   for var, value in os.environ.items():
-    if var in parsed_args.blacklist:
+    if parsed_args.blacklist and var in parsed_args.blacklist:
       continue
-    if "_DIR" in var or var in parsed_args.whitelist:
+    if "_DIR" in var or (args.whitelist and var in parsed_args.whitelist):
       converted_path = msys_to_windows_path(value)
       converted_paths[var] = converted_path
 
