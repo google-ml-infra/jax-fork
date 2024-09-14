@@ -79,6 +79,8 @@ if ! docker container inspect jax >/dev/null 2>&1 ; then
   fi
 fi
 
+# Update `check_if_to_run_in_docker` to execute the commands inside the Docker
+# container.
 check_if_to_run_in_docker() { docker exec jax "$@"; }
 
 # Update `JAXCI_OUTPUT_DIR`, `JAXCI_JAX_GIT_DIR` and `JAXCI_XLA_GIT_DIR` with
