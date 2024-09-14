@@ -8,6 +8,10 @@ name: Build JAX Artifacts
 
 jobs:
   build:
+    defaults:
+      run:
+        # Explicitly set the shell to bash to override the default Windows environment, i.e, cmd.
+        shell: bash
     strategy:
       matrix:
         runner: ["windows-x86-n2-64", "linux-x86-n2-64", "linux-arm64-t2a-48"]
