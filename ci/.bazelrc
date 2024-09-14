@@ -377,41 +377,41 @@ build:cross_compile_base --host_crosstool_top=@xla//tools/toolchains/cross_compi
 build:cross_compile_base --extra_execution_platforms=@xla//tools/toolchains/cross_compile/config:linux_x86_64
 
 # Linux Aarch64
-build:cross_compile_linux_arm64 --config=cross_compile_base
+build:cross_compile_linux_aarch64 --config=cross_compile_base
 
 # Set the target CPU to Aarch64
-build:cross_compile_linux_arm64 --platforms=@xla//tools/toolchains/cross_compile/config:linux_aarch64
-build:cross_compile_linux_arm64 --cpu=aarch64
-build:cross_compile_linux_arm64 --crosstool_top=@xla//tools/toolchains/cross_compile/cc:cross_compile_toolchain_suite
+build:cross_compile_linux_aarch64 --platforms=@xla//tools/toolchains/cross_compile/config:linux_aarch64
+build:cross_compile_linux_aarch64 --cpu=aarch64
+build:cross_compile_linux_aarch64 --crosstool_top=@xla//tools/toolchains/cross_compile/cc:cross_compile_toolchain_suite
 
 build:rbe_cross_compile_base --config=rbe
 
 # RBE cross-compile configs for Linux Aarch64
-build:rbe_cross_compile_linux_arm64 --config=cross_compile_linux_arm64
-build:rbe_cross_compile_linux_arm64 --config=rbe_cross_compile_base
+build:rbe_cross_compile_linux_aarch64 --config=cross_compile_linux_aarch64
+build:rbe_cross_compile_linux_aarch64 --config=rbe_cross_compile_base
 
 # Mac x86
-build:cross_compile_macos_x86 --config=cross_compile_base
-build:cross_compile_macos_x86 --config=nonccl
+build:cross_compile_darwin_x86_64 --config=cross_compile_base
+build:cross_compile_darwin_x86_64 --config=nonccl
 # Target Catalina (10.15) as the minimum supported OS
-build:cross_compile_macos_x86 --action_env  MACOSX_DEPLOYMENT_TARGET=10.15
+build:cross_compile_darwin_x86_64 --action_env  MACOSX_DEPLOYMENT_TARGET=10.15
 
 # Set the target CPU to Darwin x86
-build:cross_compile_macos_x86 --platforms=@xla//tools/toolchains/cross_compile/config:darwin_x86_64
-build:cross_compile_macos_x86 --cpu=darwin
-build:cross_compile_macos_x86 --crosstool_top=@xla//tools/toolchains/cross_compile/cc:cross_compile_toolchain_suite
+build:cross_compile_darwin_x86_64 --platforms=@xla//tools/toolchains/cross_compile/config:darwin_x86_64
+build:cross_compile_darwin_x86_64 --cpu=darwin
+build:cross_compile_darwin_x86_64 --crosstool_top=@xla//tools/toolchains/cross_compile/cc:cross_compile_toolchain_suite
 # When RBE cross-compiling for macOS, we need to explicitly register the
 # toolchain. Otherwise, oddly, RBE complains that a "docker container must be
 # specified".
-build:cross_compile_macos_x86 --extra_toolchains=@xla//tools/toolchains/cross_compile/config:macos-x86-cross-compile-cc-toolchain
+build:cross_compile_darwin_x86_64 --extra_toolchains=@xla//tools/toolchains/cross_compile/config:macos-x86-cross-compile-cc-toolchain
 # Map --platforms=darwin_x86_64 to --cpu=darwin and vice-versa to make selects()
 # and transistions that use these flags work. The flag --platform_mappings needs
 # to be set to a file that exists relative to the package path roots.
-build:cross_compile_macos_x86 --platform_mappings=platform_mappings
+build:cross_compile_darwin_x86_64 --platform_mappings=platform_mappings
 
 # RBE cross-compile configs for Darwin x86
-build:rbe_cross_compile_macos_x86 --config=cross_compile_macos_x86
-build:rbe_cross_compile_macos_x86 --config=rbe_cross_compile_base
+build:rbe_cross_compile_darwin_x86_64 --config=cross_compile_darwin_x86_64
+build:rbe_cross_compile_darwin_x86_64 --config=rbe_cross_compile_base
 
 # #############################################################################
 # Test specific config options below. These are used when `bazel test` is run.

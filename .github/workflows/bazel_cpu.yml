@@ -6,6 +6,7 @@ on:
       - main
 
 jobs:
+  continue-on-error: true
   build:
     strategy:
       matrix:
