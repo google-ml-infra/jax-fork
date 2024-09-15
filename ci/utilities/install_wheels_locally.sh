@@ -20,8 +20,13 @@
 # When running tests with Pytests, install wheels using the Python binary set
 # in JAXCI_PYTHON.
 if [[ $JAXCI_RUN_PYTEST_CPU == 1 ]] || [[ $JAXCI_RUN_PYTEST_GPU == 1 ]]; then
-  # Install the `jaxlib`, `jax-cuda-plugin` and `jax-pjrt` wheels.
-  bash -c "$JAXCI_PYTHON -m pip install $JAXCI_OUTPUT_DIR/*.whl"
+  # Install the wheels inside the output directory. On Windows, the path needs
+  # to be in Linux format.
+  if [[ ! $(uname -s) =~ "MSYS_NT" ]]; then
+    bash -c "$JAXCI_PYTHON -m pip install $JAXCI_OUTPUT_DIR/*.whl"
+  else
+    bash -c "$JAXCI_PYTHON -m pip install $(cygpath $JAXCI_OUTPUT_DIR)/*.whl"
+  fi
 
   # Install JAX package at the current commit.
   "$JAXCI_PYTHON" -m pip install -U -e .
