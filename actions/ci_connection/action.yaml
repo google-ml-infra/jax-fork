@@ -44,6 +44,8 @@ runs:
       python_bin=$(which python3 2>/dev/null || which python)
 
       labels=$(echo "$labels_json" | $python_bin -c "import sys, json; labels=[label['name'] for label in json.load(sys.stdin)]; print(json.dumps(labels))")
+      echo 'check out fallback labels'
+      echo ${FALLBACK_LABELS}
       fallback_labels=$(echo ${FALLBACK_LABELS} | $python_bin -c "import sys, json; labels=[label['name'] for label in json.load(sys.stdin)]; print(json.dumps(labels))")
       # Set the labels as an output 
       echo "labels=$labels_json" >> $GITHUB_OUTPUT
