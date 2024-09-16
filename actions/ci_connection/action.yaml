@@ -25,13 +25,14 @@ runs:
     env:
       FALLBACK_LABELS: ${{ toJSON(github.event.pull_request.labels) }}
     run: |
-      # Fetch labels using GitHub API, since labels from context may be stale
+      # Fetch labels using GitHub API, since labels from context may be stale:
       # https://github.com/orgs/community/discussions/39062
       response=$(curl -sL \
         -H "Accept: application/vnd.github+json" \
         -H "Authorization: Bearer ${{ github.token }}" \
         https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/labels)
 
+      # In case of API failure, fall back on labels from workflow context
       if echo "$response" | grep -q '"name":'; then
         labels_json="$response"
       else
@@ -50,10 +51,10 @@ runs:
       # echo 'check out context labels'
       # echo "${fallback_labels}"
       
-      # Set the labels as an output 
+      # Set the labels as an output for this step, to be used in the next steps
       echo "labels=$labels" >> $GITHUB_OUTPUT
 
-  - name: Print halt conditions
+  - name: Print out halt conditions
     shell: bash
     run: |
       echo "All labels: ${{ steps.get-labels.outputs.labels }}"
@@ -63,14 +64,18 @@ runs:
       echo "Reattempt count: ${{ github.run_attempt }}"
       echo "PR number: ${{ github.event.pull_request.number }}"
 
-  - name: Halt For Connection
+  - name: Halt for connection
     shell: bash
     if: |
       # fromJSON parses the search string into an actual array
       # https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/evaluate-expressions-in-workflows-and-actions#example-matching-an-array-of-strings
+      
+      # Wait on 2nd+ attempt, if the retry label is set
       contains(fromJSON(steps.get-labels.outputs.labels), inputs.should-wait-retry-tag) && github.run_attempt > 1 ||
+      # Always wait, if the label is set
       contains(fromJSON(steps.get-labels.outputs.labels), inputs.should-wait-always-tag) ||
-      inputs.halt-dispatch-input == 'yes'
+      # Always wait if the workflow was triggered manually, and the value was set
+      contains(fromJSON('["yes", "Yes", "y", "1"]'), inputs.halt-dispatch-input)
     env:
       REPOSITORY: ${{ inputs.repository }}
       INTERACTIVE_CI: 1 
