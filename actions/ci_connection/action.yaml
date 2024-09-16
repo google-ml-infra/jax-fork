@@ -41,6 +41,9 @@ runs:
         labels_json="${FALLBACK_LABELS}"
       fi
       
+      echo 'See the labels'
+      echo "$labels_json"
+      
       # Safeguard against no labels, to prevent parsing failures
       if [ -z "$labels_json" ]; then
         echo "No PR labels detected."
