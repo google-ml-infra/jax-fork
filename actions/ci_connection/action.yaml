@@ -33,11 +33,18 @@ runs:
         https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/labels)
 
       # In case of API failure, fall back on labels from workflow context
+      
       if echo "$response" | grep -q '"name":'; then
         labels_json="$response"
       else
         echo "Could not retrieve labels via API, falling back to using context"
         labels_json="${FALLBACK_LABELS}"
+      fi
+      
+      # Safeguard against no labels, to prevent parsing failures
+      if [ -z "$labels_json" ]; then
+        echo "No PR labels detected."
+        labels_json='[]'
       fi
       
       # Pick an existing Python alias
