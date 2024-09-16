@@ -28,6 +28,7 @@ runs:
       # Fetch labels using GitHub API, since labels from context may be stale:
       # https://github.com/orgs/community/discussions/39062
       response=$(curl -sL \
+        -H "X-GitHub-Api-Version:2022-11-28" \
         -H "Accept: application/vnd.github+json" \
         -H "Authorization: Bearer ${{ github.token }}" \
         https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/labels)
@@ -41,11 +42,12 @@ runs:
         labels_json="${FALLBACK_LABELS}"
       fi
       
-      echo 'See the labels'
-      echo "$labels_json"
+      # echo 'See the labels'
+      # echo "$labels_json"
       
-      # Safeguard against no labels, to prevent parsing failures
-      if [ -z "$labels_json" ]; then
+      # Safeguard against no labels, to prevent parsing failures.
+      # This will happen when a run is triggered on a branch, instead of a PR.
+      if [ "$labels_json" == null ]; then
         echo "No PR labels detected."
         labels_json='[]'
       fi
