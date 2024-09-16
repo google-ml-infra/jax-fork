@@ -22,6 +22,8 @@ runs:
   - name: Get current labels
     shell: bash
     id: get-labels
+    env:
+      FALLBACK_LABELS: ${{ toJSON(github.event.pull_request.labels) }}
     run: |
       # Fetch labels using GitHub API
       response=$(curl -sL \
@@ -29,16 +31,23 @@ runs:
         -H "Authorization: Bearer ${{ github.token }}" \
         https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/labels)
 
-      # Extract label names using jq
-      labels=$(echo "$response" | jq -r '.[].name' | paste -sd "," -)
+      # labels=$(echo "$response" | $python_bin -c "import sys, json; labels=[label['name'] for label in json.load(sys.stdin)]; print(json.dumps(labels))")
 
+      if echo "$response" | grep -q '"name":'; then
+        labels_json=$response
+      else
+        echo Could not retrieve labels via API, falling back to using context
+        labels_json=${FALLBACK_LABELS}
+      fi
       # Set the labels as an output
-      echo "labels=$labels" >> $GITHUB_OUTPUT
+      
+      echo "labels=$labels_json" >> $GITHUB_OUTPUT
 
   - name: Print halt conditions
     shell: bash
     run: |
-      echo "All labels: ${{ steps.get-labels.outputs.labels }}"
+      echo "All labels: ${{ toJSON(github.event.pull_request.labels.*) }}"
+      echo "All labels: ${{ steps.get-labels.outputs.labels.* }}"
       echo "Halt retry tag: ${{ inputs.should-wait-retry-tag }}"
       echo "Halt always tag: ${{ inputs.should-wait-always-tag }}"
       echo "Should halt input: ${{ inputs.halt-dispatch-input }}"
@@ -48,8 +57,8 @@ runs:
   - name: Halt For Connection
     shell: bash
     if: |
-      contains(steps.get-labels.outputs.labels, inputs.should-wait-retry-tag) && github.run_attempt > 1 ||
-      contains(steps.get-labels.outputs.labels, inputs.should-wait-always-tag) ||
+      contains(fromJSON(steps.get-labels.outputs.labels), inputs.should-wait-retry-tag) && github.run_attempt > 1 ||
+      contains(fromJSON(steps.get-labels.outputs.labels), inputs.should-wait-always-tag) ||
       inputs.halt-dispatch-input == 'yes'
     env:
       REPOSITORY: ${{ inputs.repository }}
