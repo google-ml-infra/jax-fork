@@ -54,7 +54,7 @@ runs:
       echo "${fallback_labels}"
       
       echo "labels=$labels_json" >> $GITHUB_OUTPUT
-      echo "labels_fallback=$fallback_labels" >> $GITHUB_OUTPUT
+#      echo "labels_fallback=$fallback_labels" >> $GITHUB_OUTPUT
 
   - name: Print halt conditions
     shell: bash
