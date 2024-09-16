@@ -19,22 +19,63 @@ inputs:
 runs:
   using: "composite"
   steps:
-  - name: Print halt conditions
+  - name: Get current labels
+    shell: bash
+    id: get-labels
+    env:
+      FALLBACK_LABELS: ${{ toJSON(github.event.pull_request.labels) }}
+    run: |
+      # Fetch labels using GitHub API, since labels from context may be stale:
+      # https://github.com/orgs/community/discussions/39062
+      response=$(curl -sL \
+        -H "Accept: application/vnd.github+json" \
+        -H "Authorization: Bearer ${{ github.token }}" \
+        https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/labels)
+
+      # In case of API failure, fall back on labels from workflow context
+      if echo "$response" | grep -q '"name":'; then
+        labels_json="$response"
+      else
+        echo "Could not retrieve labels via API, falling back to using context"
+        labels_json="${FALLBACK_LABELS}"
+      fi
+      
+      # Pick an existing Python alias
+      python_bin=$(which python3 2>/dev/null || which python)
+
+      labels=$(echo "$labels_json" | $python_bin -c "import sys, json; labels=[label['name'] for label in json.load(sys.stdin)]; print(json.dumps(labels))")
+
+      # fallback_labels=$(echo "${FALLBACK_LABELS}" | $python_bin -c "import sys, json; labels=[label['name'] for label in json.load(sys.stdin)]; print(json.dumps(labels))")
+      # echo 'Check out API labels:'
+      # echo "${labels}"
+      # echo 'check out context labels'
+      # echo "${fallback_labels}"
+      
+      # Set the labels as an output for this step, to be used in the next steps
+      echo "labels=$labels" >> $GITHUB_OUTPUT
+
+  - name: Print out halt conditions
     shell: bash
     run: |
-      echo "All labels: ${{ toJSON(github.event.pull_request.labels.*.name) }}"
+      echo "All labels: ${{ steps.get-labels.outputs.labels }}"
       echo "Halt retry tag: ${{ inputs.should-wait-retry-tag }}"
-      echo "Halt always tag ${{ inputs.should-wait-always-tag}}"
+      echo "Halt always tag: ${{ inputs.should-wait-always-tag }}"
       echo "Should halt input: ${{ inputs.halt-dispatch-input }}"
       echo "Reattempt count: ${{ github.run_attempt }}"
-      echo "PR number ${{ github.event.number }}"
-  - name: Halt For Connection 
+      echo "PR number: ${{ github.event.pull_request.number }}"
+
+  - name: Halt for connection
     shell: bash
+    # fromJSON parses the search string into an actual array
+    # https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/evaluate-expressions-in-workflows-and-actions#example-matching-an-array-of-strings
+
+    # Wait on 2+ retries, if the wait-on-retry label is set
+    # Always wait, if the always-wait label is set
+    # Always wait if the workflow was triggered manually, and the value was set
     if: |
-      (contains(github.event.pull_request.labels.*.name, inputs.should-wait-retry-tag) && github.run_attempt > 1) ||
-      contains(github.event.pull_request.labels.*.name, inputs.should-wait-always-tag) ||
-      inputs.halt-dispatch-input == '1' ||
-      inputs.halt-dispatch-input == 'yes'
+      contains(fromJSON(steps.get-labels.outputs.labels), inputs.should-wait-retry-tag) && github.run_attempt > 1 ||
+      contains(fromJSON(steps.get-labels.outputs.labels), inputs.should-wait-always-tag) ||
+      contains(fromJSON('["yes", "Yes", "y", "1"]'), inputs.halt-dispatch-input)
     env:
       REPOSITORY: ${{ inputs.repository }}
       INTERACTIVE_CI: 1 

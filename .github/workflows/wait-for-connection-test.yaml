@@ -8,9 +8,13 @@ on:
   workflow_dispatch:
     inputs:
       halt-for-connection:
-        description: 'Should this invocation wait for a remote connection?'
-        required: false
-        default: '0'
+        description: 'Should this workflow run wait for a remote connection?'
+        type: choice
+        required: true
+        default: 'no'
+        options:
+        - 'yes'
+        - 'no'
 # Cancel any previous iterations if a new commit is pushed
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -20,7 +24,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: ["linux-x86-n2-64","linux-arm64-t2a-48"]
+        runner: ["linux-x86-n2-16"]
         instances: ["1"]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
