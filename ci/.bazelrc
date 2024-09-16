@@ -413,6 +413,38 @@ build:cross_compile_darwin_x86_64 --platform_mappings=platform_mappings
 build:rbe_cross_compile_darwin_x86_64 --config=cross_compile_darwin_x86_64
 build:rbe_cross_compile_darwin_x86_64 --config=rbe_cross_compile_base
 
+# #############################################################################
+# Test specific config options below. These are used when `bazel test` is run.
+# #############################################################################
+test --test_output=errors
+
+# Common configs for for running GPU tests.
+test:gpu --test_env=TF_CPP_MIN_LOG_LEVEL=0
+test:gpu --test_env=JAX_SKIP_SLOW_TESTS=1 --test_env=XLA_PYTHON_CLIENT_ALLOCATOR=platform
+
+# Non-multiaccelerator tests with one GPU apiece. These tests are run on RBE
+# and locally.
+test:non_multiaccelerator --config=gpu
+test:non_multiaccelerator --test_env=JAX_EXCLUDE_TEST_TARGETS=PmapTest.testSizeOverflow
+test:non_multiaccelerator --test_tag_filters=-multiaccelerator
+
+# Configs for running non-multiaccelerator tests locally
+test:non_multiaccelerator_local --config=non_multiaccelerator
+# Disable building jaxlib. Instead we depend on the local wheel.
+test:non_multiaccelerator_local --//jax:build_jaxlib=false
+
+# `JAX_ACCELERATOR_COUNT` needs to match the number of GPUs in the VM.
+test:non_multiaccelerator_local --test_env=JAX_TESTS_PER_ACCELERATOR=12 --test_env=JAX_ACCELERATOR_COUNT=4
+
+# The product of the `JAX_ACCELERATOR_COUNT`` and `JAX_TESTS_PER_ACCELERATOR`
+# should match the VM's CPU core count (set in `--local_test_jobs`).
+test:non_multiaccelerator_local --local_test_jobs=48
+
+# Multiaccelerator tests with all GPUs. These tests are only run locally
+# Disable building jaxlib. Instead we depend on the local wheel.
+test:multiaccelerator_local --//jax:build_jaxlib=false
+test:multiaccelerator_local --jobs=8 --test_tag_filters=multiaccelerator
+
 #############################################################################
 # Some configs to make getting some forms of debug builds. In general, the
 # codebase is only regularly built with optimizations. Use 'debug_symbols' to
