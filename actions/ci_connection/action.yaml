@@ -48,6 +48,11 @@ runs:
       echo "${FALLBACK_LABELS}"
       fallback_labels=$(echo "${FALLBACK_LABELS}" | $python_bin -c "import sys, json; labels=[label['name'] for label in json.load(sys.stdin)]; print(json.dumps(labels))")
       # Set the labels as an output 
+      echo 'check out labels processed'
+      echo "${labels}"
+      echo 'check out fallback labels processed'
+      echo "${fallback_labels}"
+      
       echo "labels=$labels_json" >> $GITHUB_OUTPUT
       echo "labels_fallback=$labels_json" >> $GITHUB_OUTPUT
 
