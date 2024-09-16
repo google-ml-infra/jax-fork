@@ -51,5 +51,5 @@ jobs:
         run: $JAXCI_PYTHON -m pip install -r build/test-requirements.txt
       - name: Run Pytest CPU tests
         env:
-          ENV_FILE: ci/envs/run_tests/pytest_cpu
+          JAXCI_ENV_FILE: ci/envs/run_tests/pytest_cpu
         run: ./ci/run_pytest.sh
