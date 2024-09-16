@@ -34,10 +34,10 @@ runs:
       # labels=$(echo "$response" | $python_bin -c "import sys, json; labels=[label['name'] for label in json.load(sys.stdin)]; print(json.dumps(labels))")
 
       if echo "$response" | grep -q '"name":'; then
-        labels_json=$response
+        labels_json="$response"
       else
-        echo Could not retrieve labels via API, falling back to using context
-        labels_json=${FALLBACK_LABELS}
+        echo "Could not retrieve labels via API, falling back to using context"
+        labels_json="${FALLBACK_LABELS}"
       fi
       
       # Pick an existing Python alias
@@ -54,7 +54,7 @@ runs:
       echo "${fallback_labels}"
       
       echo "labels=$labels_json" >> $GITHUB_OUTPUT
-      echo "labels_fallback=$labels_json" >> $GITHUB_OUTPUT
+      echo "labels_fallback=$fallback_labels" >> $GITHUB_OUTPUT
 
   - name: Print halt conditions
     shell: bash
