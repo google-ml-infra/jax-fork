@@ -1,3 +1,18 @@
+# Copyright 2024 The JAX Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+# Helper script for setting up the tools used by the CLI.
 import collections
 import hashlib
 import logging
@@ -10,7 +25,7 @@ import urllib.request
 logger = logging.getLogger(__name__)
 
 BAZELISK_BASE_URI = (
-    "https://github.com/bazelbuild/bazelisk/releases/download/v1.20.0/"
+    "https://github.com/bazelbuild/bazelisk/releases/download/v1.21.0/"
 )
 
 BazeliskPackage = collections.namedtuple("BazeliskPackage", ["file", "sha256"])
@@ -19,31 +34,31 @@ BAZELISK_PACKAGES = {
     ("Linux", "x86_64"): BazeliskPackage(
         file="bazelisk-linux-amd64",
         sha256=(
-            "d9af1fa808c0529753c3befda75123236a711d971d3485a390507122148773a3"
+            "655a5c675dacf3b7ef4970688b6a54598aa30cbaa0b9e717cd1412c1ef9ec5a7"
         ),
     ),
     ("Linux", "aarch64"): BazeliskPackage(
         file="bazelisk-linux-arm64",
         sha256=(
-            "467ec3821aca5e278c8570b7c25e0dfc1a061d2873be89e4a266aaf488148426"
+            "ff793b461968e30d9f954c080f4acaa557edbdeab1ce276c02e4929b767ead66"
         ),
     ),
     ("Darwin", "x86_64"): BazeliskPackage(
         file="bazelisk-darwin",
         sha256=(
-            "9a4b169038a63ebf60a9b4f367b449ab9b484c4ec7d1ef9f6b7a4196dfd50f33"
+            "07ba3d6b90c28984237a6273f6b7de2fd714a1e3a65d1e78f9b342675ecb75e4"
         ),
     ),
     ("Darwin", "arm64"): BazeliskPackage(
         file="bazelisk-darwin-arm64",
         sha256=(
-            "29753341c0ddc35931fb240e247fbba0b83ef81bccc2433dd075363ec02a67a6"
+            "17529faeed52219ee170d59bd820c401f1645a95f95ee4ac3ebd06972edfb6ff"
         ),
     ),
     ("Windows", "AMD64"): BazeliskPackage(
         file="bazelisk-windows-amd64.exe",
         sha256=(
-            "4175ce7ef4b552fb17e93ce49a245679dc26a35cf2fbc7c3146daca6ffc7a81e"
+            "3da1895614f460692635f8baa0cab6bb35754fc87d9badbd2b3b2ba55873cf89"
         ),
     ),
 }

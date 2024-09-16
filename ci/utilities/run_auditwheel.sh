@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright 2024 JAX Authors. All Rights Reserved.
+# Copyright 2024 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,6 +20,11 @@
 # that need to be verified for manylinux compliance.
 WHEELS=$(find "$JAXCI_OUTPUT_DIR/" -type f \( -name "*jaxlib*" -o -name "*jax*cuda*pjrt*" -o -name "*jax*cuda*plugin*" \))
 
+if [[ -z "$WHEELS" ]]; then
+  echo "ERROR: No wheels found under $JAXCI_OUTPUT_DIR"
+  exit 1
+fi
+
 for wheel in $WHEELS; do
     printf "\nRunning auditwheel on the following wheel:"
     ls $wheel
@@ -32,10 +37,10 @@ for wheel in $WHEELS; do
     # platform tag as manylinux_2_17. manylinux2014 is an alias for
     # manylinux_2_17.
     if echo "$OUTPUT" | grep -q "manylinux_2_17"; then
-        printf "\nThe wheel is manylinux2014 compliant.\n"
+        printf "\n$wheel_name is manylinux2014 compliant.\n"
     else
         echo "$OUTPUT_FULL"
-        printf "\nThe wheel is NOT manylinux2014 compliant.\n"
+        printf "\n$wheel_name is NOT manylinux2014 compliant.\n"
         exit 1
     fi
 done

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright 2024 JAX Authors. All Rights Reserved.
+# Copyright 2024 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -43,38 +43,42 @@ fi
 # When running tests, we need to check out XLA at HEAD.
 if [[ -z ${JAXCI_XLA_GIT_DIR} ]] && [[ "$JAXCI_CLONE_MAIN_XLA" == 1 ]]; then
     if [[ ! -d $(pwd)/xla ]]; then
-      echo "Checking out XLA..."
+      echo "Cloning XLA at HEAD to $(pwd)/xla"
       git clone --depth=1 https://github.com/openxla/xla.git $(pwd)/xla
-      echo "Using XLA from $(pwd)/xla"
     fi
     export JAXCI_XLA_GIT_DIR=$(pwd)/xla
 fi
 
 # If a path to XLA is provided, use that to build JAX or run tests.
 if [[ ! -z ${JAXCI_XLA_GIT_DIR} ]]; then
-  echo "Using XLA from $JAXCI_XLA_GIT_DIR"
+  echo "Overriding XLA to be read from $JAXCI_XLA_GIT_DIR instead of the pinned"
+  echo "version in the WORKSPACE."
+  echo "If you would like to revert this behavior, unset JAXCI_XLA_GIT_DIR and"
+  echo "JAXCI_CLONE_MAIN_XLA in your environment."
 
   # If a XLA commit is provided, check out XLA at that commit.
   if [[ ! -z "$JAXCI_XLA_COMMIT" ]]; then
     pushd "$JAXCI_XLA_GIT_DIR"
 
     git fetch --depth=1 origin "$JAXCI_XLA_COMMIT"
+    echo "JAXCI_XLA_COMMIT is set. Checking out XLA at $JAXCI_XLA_COMMIT"
     git checkout "$JAXCI_XLA_COMMIT"
-    echo "XLA git hash: $(git rev-parse HEAD)"
 
     popd
   fi
 fi
 
-# Setup check_if_to_run_in_docker, a helper function for executing steps that can 
-# either be run locally or run under Docker. 
+# Setup check_if_to_run_in_docker, a helper function for executing steps that
+# can either be run locally or run under Docker.
 # run_docker_container.sh, below, redefines it as "docker exec".
-# Important: "check_if_to_run_in_docker foo | bar" is "( check_if_to_run_in_docker foo ) | bar", not "check_if_to_run_in_docker (foo | bar)".
-# Therefore, "check_if_to_run_in_docker" commands cannot include pipes -- which is
-# probably for the better. If a pipe is necessary for something, it is probably
-# complex. Write a well-documented script under utilities/ to encapsulate the
-# functionality instead.
-check_if_to_run_in_docker() { "$@"; } 
+# Important: "check_if_to_run_in_docker foo | bar" is
+# "( check_if_to_run_in_docker foo ) | bar", and
+# not "check_if_to_run_in_docker (foo | bar)".
+# Therefore, "check_if_to_run_in_docker" commands cannot include pipes -- which
+# is probably for the better. If a pipe is necessary for something, it is
+# probably complex. Write a well-documented script under utilities/ to
+# encapsulate the functionality instead.
+check_if_to_run_in_docker() { "$@"; }
 
 # For Windows, convert MSYS Linux-like paths to Windows paths.
 if [[ $(uname -s) =~ "MSYS_NT" ]]; then

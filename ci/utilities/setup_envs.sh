@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright 2024 JAX Authors. All Rights Reserved.
+# Copyright 2024 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,14 +14,14 @@
 # limitations under the License.
 # ==============================================================================
 #
-# Source JAXCI environment variables. 
+# Source JAXCI environment variables.
 
 # If the user has not passed in an JAXCI_ENV_FILE, exit.
 if [[ -z "${JAXCI_ENV_FILE}" ]]; then
     echo "JAXCI_ENV_FILE is not set."
     echo "setup_envs.sh requires that `JAXCI_ENV_FILE` be set."
-    echo "If you are looking to build JAX artifacts, please set JAXCI_ENV_FILE to an"
-    echo "env file in the ci/envs/build_artifacts directory."
+    echo "If you are looking to build JAX artifacts, please set JAXCI_ENV_FILE"
+    echo "to an env file in the ci/envs/build_artifacts directory."
     echo "If you are looking to run JAX tests, please set JAXCI_ENV_FILE to an"
     echo "env file in the ci/envs/run_tests directory."
     exit 1

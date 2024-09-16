@@ -1,4 +1,18 @@
-#!/usr/bin/python
+# Copyright 2024 The JAX Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+# CLI for building JAX artifacts.
 import argparse
 import asyncio
 import logging
@@ -319,11 +333,11 @@ def add_global_arguments(parser: argparse.ArgumentParser):
       choices=["ci", "local"],
       default="local",
       help="""
-        Sets the build mode to use. 
+        Sets the build mode to use.
         If set to "ci", the CLI will assume the build is being run in CI or CI
-        like environment and will use the "ci_" configs in the .bazelrc. 
-        If set to "local", the CLI will use the "local_" configs in the 
-        .bazelrc. 
+        like environment and will use the "ci_" configs in the .bazelrc.
+        If set to "local", the CLI will use the "local_" configs in the
+        .bazelrc.
         CI configs inherit the local configs and set a custom C++ toolchain to
         use Clang and specific versioned standard libraries. As a result, CI
         configs require the toolchain to be present on the system.
@@ -349,8 +363,7 @@ def add_global_arguments(parser: argparse.ArgumentParser):
       help=
         """
         Path to the Bazel binary to use. The default is to find bazel via the
-        PATH; if none is found, downloads a fresh copy of Bazelisk from 
-        GitHub.
+        PATH; if none is found, downloads a fresh copy of Bazelisk from GitHub.
         """,
   )
 
@@ -574,12 +587,7 @@ async def main():
   if args.requirements_update or args.requirements_nightly_update:
     python_version = args.python_version if hasattr(args, "python_version") else ""
     construct_requirements_update_command(bazel_command, args.bazel_build_options, python_version, args.requirements_nightly_update)
-    logger.info("Requirements command:\n\n%s\n", bazel_command.command)
-
-    if args.dry_run:
-      logger.info("CLI is in dry run mode. Not executing the command.")
-    else:
-      await executor.run(bazel_command.command)
+    await executor.run(bazel_command.command, args.dry_run)
     sys.exit(0)
 
   bazel_command.append("build")
@@ -665,13 +673,8 @@ async def main():
   build_target, wheel_binary = ARTIFACT_BUILD_TARGET_DICT[args.command]
   bazel_command.append(build_target)
 
-  logger.info("Bazel build command:\n\n%s\n", bazel_command.command)
-
-  if args.dry_run:
-    logger.info("CLI is in dry run mode. Not running the Bazel command.")
-  else:
-    # Execute the Bazel command.
-    await executor.run(bazel_command.command)
+  # Execute the Bazel command.
+  await executor.run(bazel_command.command, args.dry_run)
 
   # Construct the wheel build command.
   logger.info("Constructing wheel build command...")
@@ -710,13 +713,8 @@ async def main():
   jaxlib_git_hash = get_jaxlib_git_hash()
   run_wheel_binary.append(f"--jaxlib_git_hash={jaxlib_git_hash}")
 
-  logger.info("Wheel build command:\n\n%s\n", run_wheel_binary.command)
-
-  if args.dry_run:
-    logger.info("CLI is in dry run mode. Not running the wheel build command.")
-  else:
-    # Execute the wheel build command.
-    await executor.run(run_wheel_binary.command)
+  # Execute the wheel build command.
+  await executor.run(run_wheel_binary.command, args.dry_run)
 
 if __name__ == "__main__":
   asyncio.run(main())
