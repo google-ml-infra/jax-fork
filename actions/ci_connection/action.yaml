@@ -70,11 +70,11 @@ runs:
       # fromJSON parses the search string into an actual array
       # https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/evaluate-expressions-in-workflows-and-actions#example-matching-an-array-of-strings
       
-      # Wait on 2nd+ attempt, if the retry label is set
-      contains(fromJSON(steps.get-labels.outputs.labels), inputs.should-wait-retry-tag) && github.run_attempt > 1 ||
-      # Always wait, if the label is set
-      contains(fromJSON(steps.get-labels.outputs.labels), inputs.should-wait-always-tag) ||
+      # Wait on 2+ retries, if the wait-on-retry label is set
+      # Always wait, if the always-wait label is set
       # Always wait if the workflow was triggered manually, and the value was set
+      contains(fromJSON(steps.get-labels.outputs.labels), inputs.should-wait-retry-tag) && github.run_attempt > 1 ||
+      contains(fromJSON(steps.get-labels.outputs.labels), inputs.should-wait-always-tag) ||
       contains(fromJSON('["yes", "Yes", "y", "1"]'), inputs.halt-dispatch-input)
     env:
       REPOSITORY: ${{ inputs.repository }}
