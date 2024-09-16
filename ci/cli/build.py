@@ -25,9 +25,9 @@ BANNER = r"""
 
 EPILOG = """
 From the root directory of the JAX repository, run
-    python ci/cli/build.py [jaxlib|jax-cuda-plugin|jax-cuda-pjrt|jax-rocm-plugin|jax-rocm-pjrt]
+    python ci/cli/build.py [jaxlib | jax-cuda-plugin | jax-cuda-pjrt | jax-rocm-plugin | jax-rocm-pjrt]
 or
-    python3 ci/cli/build.py [jaxlib|jax-cuda-plugin|jax-cuda-pjrt|jax-rocm-plugin|jax-rocm-pjrt]
+    python3 ci/cli/build.py [jaxlib | jax-cuda-plugin | jax-cuda-pjrt | jax-rocm-plugin | jax-rocm-pjrt]
 
 to build one of: jaxlib, jax-cuda-plugin, jax-cuda-pjrt, jax-rocm-plugin, or jax-rocm-pjrt.
 """
@@ -37,6 +37,7 @@ ArtifactBuildSpec = collections.namedtuple(
     ["bazel_build_target", "wheel_binary"],
 )
 
+# Define the build target and resulting wheel binary for each artifact.
 ARTIFACT_BUILD_TARGET_DICT = {
     "jaxlib": ArtifactBuildSpec("//jaxlib/tools:build_wheel", "bazel-bin/jaxlib/tools/build_wheel"),
     "jax-cuda-plugin": ArtifactBuildSpec("//jaxlib/tools:build_gpu_kernels_wheel", "bazel-bin/jaxlib/tools/build_gpu_kernels_wheel"),
@@ -64,16 +65,16 @@ def get_bazelrc_config(os_name: str, arch: str, artifact: str, mode:str, use_rbe
   bazelrc_config = f"{os_name}_{arch}"
 
   # When the CLI is run by invoking ci/build_artifacts.sh, the CLI runs in CI
-  # mode by default and will use one of the "ci_" configs in the .bazelrc. We
-  # want to run certain CI builds with RBE and we also want to allow users the
-  # flexibility to build JAX artifacts either by running the CLI or by running
+  # mode and will use one of the "ci_" configs in the .bazelrc. We want to run
+  # certain CI builds with RBE and we also want to allow users the flexibility
+  # to build JAX artifacts either by running the CLI or by running
   # ci/build_artifacts.sh. Because RBE requires permissions, we cannot enable it
-  # by default in ci/build_artifacts.sh. Instead, we have the CI builds set 
+  # by default in ci/build_artifacts.sh. Instead, we have the CI builds set
   # JAXCI_BUILD_ARTIFACT_WITH_RBE to 1 to enable RBE.
   if os.environ.get("JAXCI_BUILD_ARTIFACT_WITH_RBE", "0") == "1":
     use_rbe = True
 
-  # In CI, we want to use RBE where possible. At the moment, RBE is only
+  # In CI builds, we want to use RBE where possible. At the moment, RBE is only
   # supported on Linux x86 and Windows. If an user is requesting RBE, the CLI
   # will use RBE if the host system supports it, otherwise it will use the
   # local config.
@@ -92,17 +93,16 @@ def get_bazelrc_config(os_name: str, arch: str, artifact: str, mode:str, use_rbe
       bazelrc_config = ""
       return bazelrc_config
 
-    # Use the Local config
     bazelrc_config = "local_" + bazelrc_config
   else:
     # Show warning if RBE is requested on an unsupported platform.
     if use_rbe:
       logger.warning("RBE is not supported on %s_%s. Using CI config instead.", os_name, arch)
+
     # Let user know that RBE is available for this platform.
-    elif (os_name == "linux" and arch == "x86_64")or (os_name == "windows" and arch == "amd64"):
+    if (os_name == "linux" and arch == "x86_64")or (os_name == "windows" and arch == "amd64"):
       logger.info("RBE support is available for this platform. If you want to use RBE and have the required permissions, run the CLI with `--use_rbe` or set `JAXCI_BUILD_ARTIFACT_WITH_RBE=1`")
 
-    # Use the CI config.
     bazelrc_config = "ci_" + bazelrc_config
 
   # When building jax-cuda-plugin or jax-cuda-pjrt, append "_cuda" to the
@@ -165,10 +165,24 @@ def adjust_paths_for_windows(wheel_binary: str, output_dir: str, arch: str) -> t
   return (wheel_binary, output_dir, arch)
 
 def parse_and_append_bazel_options(bazel_command: command.CommandBuilder, bazel_options: str):
+  """
+  Parses the bazel options and appends them to the bazel command.
+  Args:
+    bazel_command: An instance of command.CommandBuilder.
+    bazel_options: The bazel options to parse and append.
+  """
   for option in bazel_options.split(" "):
     bazel_command.append(option)
 
 def construct_requirements_update_command(bazel_command: command.CommandBuilder, additional_build_options: str, python_version: str, update_nightly: bool):
+  """
+  Constructs the Bazel command to run the requirements update.
+  Args:
+    bazel_command: An instance of command.CommandBuilder.
+    additional_build_options: Additional build options to pass to Bazel.
+    python_version: Hermetic Python version to use.
+    update_nightly: Whether to update the nightly requirements file.
+  """
   bazel_command.append("run")
 
   if python_version:
@@ -317,16 +331,6 @@ def add_global_arguments(parser: argparse.ArgumentParser):
         system which is GCC for Linux and MSVC for Windows. If you want to use
         Clang for local builds, use the `--use_clang` flag.
         """,
-  )
-
-  # Target system is assumed to be the host sytem (auto-detected) unless
-  # specified otherwise, e.g. for cross-compile builds.
-  parser.add_argument(
-      "--target_system",
-      type=str,
-      default="",
-      choices=["linux_x86_64", "linux_aarch64", "darwin_x86_64", "darwin_arm64", "windows_x86_64"],
-      help="Target system to build for",
   )
 
   # If set, the build will create an 'editable' build instead of a wheel.
@@ -657,7 +661,6 @@ async def main():
     logging.debug("Using additional Bazel build options: %s", args.bazel_build_options)
     parse_and_append_bazel_options(bazel_command, args.bazel_build_options)
 
-
   # Append the build target to the Bazel command.
   build_target, wheel_binary = ARTIFACT_BUILD_TARGET_DICT[args.command]
   bazel_command.append(build_target)
@@ -714,7 +717,6 @@ async def main():
   else:
     # Execute the wheel build command.
     await executor.run(run_wheel_binary.command)
-
 
 if __name__ == "__main__":
   asyncio.run(main())

@@ -27,15 +27,15 @@ set -exuo pipefail -o history -o allexport
 # Pre-emptively mark the git directory as safe. This is necessary for JAX CI
 # jobs running on Linux runners in GitHub Actions. Without this, git complains
 # that the directory has dubious ownership and refuses to run any commands.
-# Avoid running on Windows runners as git seems to complain about not being able
-# to lock the config file. We are able to run git commands on Windows runners
-# without this so we can skip it.
+# Avoid running on Windows runners as git runs into issues with not being able
+# to lock the config file. Other git commands seem to work the on Windows
+# runners so we can skip this step.
 if [[ ! $(uname -s) =~ "MSYS_NT" ]]; then
   git config --global --add safe.directory $JAXCI_JAX_GIT_DIR
 fi
 
 # When building release artifacts, check out the release tag. JAX CI jobs build
-# from the main branch by default. 
+# from the main branch by default.
 if [[ -n "$JAXCI_RELEASE_TAG" ]]; then
   git checkout tags/"$JAXCI_RELEASE_TAG"
 fi
@@ -83,7 +83,7 @@ if [[ $(uname -s) =~ "MSYS_NT" ]]; then
   source <(python3 ./ci/utilities/convert_msys_paths_to_win_paths.py)
 fi
 
-# All CI builds except for Mac run under Docker.
+# Set up and and run the Docker container if needed.
 # Jobs running on GitHub actions do not invoke this script. They define the
 # Docker image via the `container` field in the workflow file.
 if [[ "$JAXCI_RUN_DOCKER_CONTAINER" == 1 ]]; then
@@ -96,6 +96,5 @@ if [[ "$JAXCI_INSTALL_WHEELS_LOCALLY" == 1 ]]; then
    echo "Installing wheels locally..."
    source ./ci/utilities/install_wheels_locally.sh
 fi
-
 
 # TODO: cleanup steps

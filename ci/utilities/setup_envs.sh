@@ -13,16 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-# Source JAXCI environment variables. 
 #
-# If the user has not passed in an ENV_FILE nor has called "build_artifacts.sh"
-# with an artifact name, exit.
-if [[ -z "${ENV_FILE}" ]]; then
-    echo "ENV_FILE is not set."
-    echo "setup_envs.sh requires that `ENV_FILE` be set."
-    echo "If you are looking to build JAX artifacts, please set ENV_FILE to an"
+# Source JAXCI environment variables. 
+
+# If the user has not passed in an JAXCI_ENV_FILE, exit.
+if [[ -z "${JAXCI_ENV_FILE}" ]]; then
+    echo "JAXCI_ENV_FILE is not set."
+    echo "setup_envs.sh requires that `JAXCI_ENV_FILE` be set."
+    echo "If you are looking to build JAX artifacts, please set JAXCI_ENV_FILE to an"
     echo "env file in the ci/envs/build_artifacts directory."
-    echo "If you are looking to run JAX tests, please set ENV_FILE to an"
+    echo "If you are looking to run JAX tests, please set JAXCI_ENV_FILE to an"
     echo "env file in the ci/envs/run_tests directory."
     exit 1
 fi
@@ -45,4 +45,4 @@ env | grep ^JAXCI_ > "$user_set_jaxci_envs"
 # -o history: record shell history
 # -o allexport: export all functions and variables to be available to subscripts
 set -exuo pipefail -o history -o allexport
-source "$ENV_FILE"
+source "$JAXCI_ENV_FILE"

@@ -18,7 +18,7 @@ code.
 ## JAX's Official CI and Build/Test Scripts
 
 JAX's official CI jobs run the scripts in this folder. The CI scripts require
-an env file to be set in `ENV_FILE` that sets various configuration settings.
+an env file to be set in `JAXCI_ENV_FILE` that sets various configuration settings.
 These "env" files are structured by their build type. For e.g.,
 `ci/envs/build_artifacts/jaxlib` contains the configs for building the `jaxlib`
 package. The scripts are intended to be used across different platforms and
@@ -64,9 +64,9 @@ remote worker pool and RBE configs. To enable RBE, run `export JAXCI_BUILD_ARTIF
 **How to run the script**
 
 ```
-1. Set ENV_FILE to one of the envs inside ci/build_artifacts based the artifact
+1. Set JAXCI_ENV_FILE to one of the envs inside ci/build_artifacts based the artifact
 you want to build and your sytem.
-E.g. export ENV_FILE=ci/envs/build_artifacts/jaxlib
+E.g. export JAXCI_ENV_FILE=ci/envs/build_artifacts/jaxlib
 2. Run: bash ci/build_artifacts.sh
 ```
 

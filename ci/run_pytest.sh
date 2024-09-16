@@ -21,10 +21,12 @@ source "ci/utilities/setup_build_environment.sh"
 check_if_to_run_in_docker "$JAXCI_PYTHON" -c "import jax; print(jax.default_backend()); print(jax.devices()); print(len(jax.devices()))"
 
 if [[ $JAXCI_RUN_PYTEST_CPU == 1 ]]; then
+  echo "Running CPU tests..."
   check_if_to_run_in_docker "$JAXCI_PYTHON" -m pytest -n auto --tb=short --maxfail=20 tests examples
 fi
 
 if [[ $JAXCI_RUN_PYTEST_GPU == 1 ]]; then
+  echo "Running GPU tests..."
   export XLA_PYTHON_CLIENT_ALLOCATOR=platform
   export XLA_FLAGS=--xla_gpu_force_compilation_parallelism=1
   check_if_to_run_in_docker "$JAXCI_PYTHON" -m pytest -n 8 --tb=short --maxfail=20 \
@@ -36,6 +38,7 @@ if [[ $JAXCI_RUN_PYTEST_GPU == 1 ]]; then
 fi
 
 if [[ $JAXCI_RUN_PYTEST_TPU == 1 ]]; then
+  echo "Running TPU tests..."
   # Run single-accelerator tests in parallel
   export JAX_ENABLE_TPU_XDIST=true 
   check_if_to_run_in_docker "$JAXCI_PYTHON" -m pytest -n="$JAXCI_TPU_CORES" --tb=short \

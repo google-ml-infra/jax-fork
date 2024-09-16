@@ -47,25 +47,25 @@ if ! docker container inspect jax >/dev/null 2>&1 ; then
   # Set the output directory to the container path.
   export JAXCI_OUTPUT_DIR=$JAXCI_DOCKER_WORK_DIR/dist
 
-  # Capture the environment variables that get set by ENV_FILE and store them in
-  # a file. This is needed so that we know which envs to set when setting up the
-  # Docker container in `setup_docker.sh`. An easier solution would be to just
-  # grep for "JAXCI_" variables but unfortunately, this is not robust as there
-  # are some variables such as `JAX_ENABLE_X64`, `NCCL_DEBUG`, etc that are used
-  # by JAX but do not have the `JAXCI_` prefix.
+  # Capture the environment variables that get set by JAXCI_ENV_FILE and store
+  # them in a file. This is needed so that we know which envs to set when
+  # setting up the Docker container in `setup_docker.sh`. An easier solution
+  # would be to just grep for "JAXCI_" variables but unfortunately, this is not
+  # robust as there are some variables such as `JAX_ENABLE_X64`, `NCCL_DEBUG`,
+  # etc that are used by JAX but do not have the `JAXCI_` prefix.
   envs_after=$(mktemp)
   env > "$envs_after"
 
   jax_ci_envs=$(mktemp)
 
-  # Only get the new environment variables set by ENV_FILE. Use "env_before"
-  # that gets set in setup.sh for the initial environment variables. diff
-  # exits with a return code. This can end the build abrupty so we use "|| true"
-  # to ignore the return code and continue.
+  # Only get the new environment variables set by JAXCI_ENV_FILE. Use
+  # "env_before" that gets set in setup.sh for the initial environment
+  # variables. diff exits with a return code. This can end the build abrupty so
+  # we use "|| true" to ignore the return code and continue.
   diff <(sort "$envs_before") <(sort "$envs_after") | grep "^> " | sed 's/^> //' | grep -v "^BASH_FUNC" > "$jax_ci_envs" || true
 
   # Start the container. `user_set_jaxci_envs` is read after `jax_ci_envs` to
-  # allow the user to override any environment variables set by ENV_FILE.
+  # allow the user to override any environment variables set by JAXCI_ENV_FILE.
   docker run --env-file $jax_ci_envs --env-file "$user_set_jaxci_envs" $JAXCI_DOCKER_ARGS --name jax \
       -w $JAXCI_DOCKER_WORK_DIR -itd --rm \
       -v "$JAXCI_JAX_GIT_DIR:$JAXCI_DOCKER_WORK_DIR" \

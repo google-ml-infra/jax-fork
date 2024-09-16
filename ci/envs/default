@@ -44,7 +44,7 @@ export JAXCI_WHEEL_AUDIT_ENABLE=0
 # Docker specific environment variables.
 # #############################################################################
 
-# Docker specifc environment variables. Used by `setup_docker.sh`
+# Docker specifc environment variables. Used by `run_docker_container.sh`
 export JAXCI_RUN_DOCKER_CONTAINER=${JAXCI_RUN_DOCKER_CONTAINER:-1}
 export JAXCI_DOCKER_WORK_DIR="/jax"
 export JAXCI_DOCKER_IMAGE=""
@@ -77,13 +77,13 @@ export JAXCI_RUN_PYTEST_GPU=0
 export JAXCI_RUN_PYTEST_TPU=0
 export JAXCI_TPU_CORES=""
 
-# #############################################################################
-# Variables that can be overridden by the user.
-# #############################################################################
 # If set to 1, the script will clone the main XLA repository at HEAD, set its
 # path in JAXCI_XLA_GIT_DIR and use it to build the artifacts or run the tests.
 export JAXCI_CLONE_MAIN_XLA=${JAXCI_CLONE_MAIN_XLA:-0}
 
+# #############################################################################
+# Variables that can be overridden by the user.
+# #############################################################################
 # Set JAXCI_XLA_GIT_DIR to the root of the XLA git repository if you want to
 # use a local copy of XLA instead of the pinned version in the WORKSPACE.
 export JAXCI_XLA_GIT_DIR=${JAXCI_XLA_GIT_DIR:-}
