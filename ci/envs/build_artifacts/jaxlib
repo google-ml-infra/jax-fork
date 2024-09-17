@@ -16,7 +16,7 @@
 source ci/envs/default
 
 # Enable jaxlib build.
-export JAXCI_BUILD_JAXLIB_ENABLE="1"
+export JAXCI_BUILD_JAXLIB="1"
 
 os=$(uname -s | awk '{print tolower($0)}')
 arch=$(uname -m)
@@ -24,7 +24,7 @@ arch=$(uname -m)
 # Linux x86 specifc settings
 if [[ $os == "linux" ]] && [[ $arch == "x86_64" ]]; then
   # Enable wheel audit to check for manylinux compliance.
-  export JAXCI_WHEEL_AUDIT_ENABLE=1
+  export JAXCI_RUN_AUDITWHEEL=1
 
   # Note Python version of the container does not matter for Bazel builds and
   # Bazel tests. JAX supports hermetic Python and thus the actual Python version
@@ -35,7 +35,7 @@ fi
 # Linux Aarch64 specifc settings
 if [[ $os == "linux" ]] && [[ $arch == "aarch64" ]]; then
   # Enable wheel audit to check for manylinux compliance.
-  export JAXCI_WHEEL_AUDIT_ENABLE=1
+  export JAXCI_RUN_AUDITWHEEL=1
   export JAXCI_DOCKER_IMAGE="us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/build-arm64:jax-"
 fi
 
