@@ -48,11 +48,11 @@ export JAXCI_BUILD_ARTIFACT_WITH_RBE=${JAXCI_BUILD_ARTIFACT_WITH_RBE:-0}
 
 # Environment variables that control which artifact to build. Used by
 # `build_artifacts.sh`
-export JAXCI_BUILD_JAX_ENABLE=0
-export JAXCI_BUILD_JAXLIB_ENABLE=0
-export JAXCI_BUILD_PLUGIN_ENABLE=0
-export JAXCI_BUILD_PJRT_ENABLE=0
-export JAXCI_WHEEL_AUDIT_ENABLE=0
+export JAXCI_BUILD_JAX=0
+export JAXCI_BUILD_JAXLIB=0
+export JAXCI_BUILD_PLUGIN=0
+export JAXCI_BUILD_PJRT=0
+export JAXCI_RUN_AUDITWHEEL=0
 
 # #############################################################################
 # Docker specific environment variables.

@@ -386,10 +386,11 @@ build:cross_compile_linux_aarch64 --cpu=aarch64
 build:cross_compile_linux_aarch64 --crosstool_top=@xla//tools/toolchains/cross_compile/cc:cross_compile_toolchain_suite
 
 build:rbe_cross_compile_base --config=rbe
+build:rbe_cross_compile_base --remote_instance_name=projects/tensorflow-testing/instances/default_instance
 
 # RBE cross-compile configs for Linux Aarch64
 build:rbe_cross_compile_linux_aarch64 --config=cross_compile_linux_aarch64
-build:rbe_cross_compile_linux_aarch64 --config=rbe_cross_compile_base
+build:rbe_cross_compile_linux_aarch64 --config=rbe
 
 # Mac x86
 build:cross_compile_darwin_x86_64 --config=cross_compile_base

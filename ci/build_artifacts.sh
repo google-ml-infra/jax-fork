@@ -19,27 +19,27 @@ source "ci/utilities/setup_envs.sh"
 source "ci/utilities/setup_build_environment.sh"
 
 # Build the jax artifact
-if [[ "$JAXCI_BUILD_JAX_ENABLE" == 1 ]]; then
+if [[ "$JAXCI_BUILD_JAX" == 1 ]]; then
   check_if_to_run_in_docker python3 -m build --outdir $JAXCI_OUTPUT_DIR
 fi
 
 # Build the jaxlib CPU artifact
-if [[ "$JAXCI_BUILD_JAXLIB_ENABLE" == 1 ]]; then
+if [[ "$JAXCI_BUILD_JAXLIB" == 1 ]]; then
   check_if_to_run_in_docker python3 ci/cli/build.py jaxlib --mode=$JAXCI_CLI_BUILD_MODE --python_version=$JAXCI_HERMETIC_PYTHON_VERSION
 fi
 
 # Build the jax-cuda-plugin artifact
-if [[ "$JAXCI_BUILD_PLUGIN_ENABLE" == 1 ]]; then
+if [[ "$JAXCI_BUILD_PLUGIN" == 1 ]]; then
   check_if_to_run_in_docker python3 ci/cli/build.py jax-cuda-plugin --mode=$JAXCI_CLI_BUILD_MODE --python_version=$JAXCI_HERMETIC_PYTHON_VERSION
 fi
 
 # Build the jax-cuda-pjrt artifact
-if [[ "$JAXCI_BUILD_PJRT_ENABLE" == 1 ]]; then
+if [[ "$JAXCI_BUILD_PJRT" == 1 ]]; then
   check_if_to_run_in_docker python3 ci/cli/build.py jax-cuda-pjrt --mode=$JAXCI_CLI_BUILD_MODE
 fi
 
 # After building `jaxlib`, `jaxcuda-plugin`, and `jax-cuda-pjrt`, we run
 # `auditwheel show` to ensure manylinux compliance.
-if  [[ "$JAXCI_WHEEL_AUDIT_ENABLE" == 1 ]]; then
+if  [[ "$JAXCI_RUN_AUDITWHEEL" == 1 ]]; then
   check_if_to_run_in_docker ./ci/utilities/run_auditwheel.sh
 fi
