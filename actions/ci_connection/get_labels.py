@@ -1,10 +1,10 @@
-"""Retrieve labels for the PR from context, if any.
+"""Retrieve PR labels, if any.
 
 While these labels are also available via GH context, and the event payload
 file, they may be stale:
 https://github.com/orgs/community/discussions/39062
 
-As such, the API is used as the main source, with the event payload file
+Thus, the API is used as the main source, with the event payload file
 being the fallback.
 
 The script is only geared towards use within a GH Action run.
@@ -19,6 +19,7 @@ import time
 import urllib.request
 
 
+# Check if debug logging should be enabled for the script:
 # GET_LABELS_DEBUG is a variable specifically for this script.
 # RUNNER_DEBUG and ACTIONS_RUNNER_DEBUG are GH env vars, which can be set
 # in various ways, one of them - enabling debug logging from the UI, when
@@ -34,6 +35,7 @@ logging.basicConfig(level=logging.INFO if not _SHOW_DEBUG else logging.DEBUG,
                     format='%(levelname)s: %(message)s', stream=sys.stderr)
 
 
+# Check if this is a PR (pull request)
 _GITHUB_REF = os.environ.get('GITHUB_REF')
 # Outside a PR context - no labels to be found
 if not _GITHUB_REF.startswith('refs/pull/'):
@@ -41,22 +43,22 @@ if not _GITHUB_REF.startswith('refs/pull/'):
   print([])
   raise SystemExit
 
+# Get the PR number
 # Since passing the previous check confirms this is a PR, there's no need
 # to safeguard this regex
-GH_ISSUE = re.search(r'\d+', _GITHUB_REF).group()
+GH_ISSUE = re.search(r'/refs/pull/(\d+)/merge', _GITHUB_REF).group(1)
 GH_REPO = os.environ.get('GITHUB_REPOSITORY')
-
-logging.debug(f'{GH_ISSUE=!r}\n'
-              f'{GH_REPO=!r}')
-
 URL = f'https://api.github.com/repos/{GH_REPO}/issues/{GH_ISSUE}/labels'
-
 WAIT_TIME = 3
 ATTEMPTS = 3
 
 data = None
 cur_attempt = 1
 
+logging.debug(f'{GH_ISSUE=!r}\n'
+              f'{GH_REPO=!r}')
+
+# Try retrieving the labels' info via API
 while cur_attempt <= ATTEMPTS:
   request = urllib.request.Request(
     URL,
@@ -83,7 +85,7 @@ while cur_attempt <= ATTEMPTS:
 if data and data != 'null':
   data_json = json.loads(data)
 else:
-  # Fall back on labels from the event's payload
+  # Fall back on labels from the event's payload, if API failed (unlikely)
   event_payload_path = os.environ.get('GITHUB_EVENT_PATH')
   with open(event_payload_path, 'r', encoding='utf-8') as event_payload:
     data_json = json.load(event_payload).get('pull_request',
@@ -96,4 +98,5 @@ else:
 labels = [label['name'] for label in data_json]
 logging.debug(f'Final labels: \n'
               f'{labels}')
+# Output the labels to stdout for further use elsewhere
 print(labels)
