@@ -22,49 +22,13 @@ runs:
   - name: Get current labels
     shell: bash
     id: get-labels
-    env:
-      FALLBACK_LABELS: ${{ toJSON(github.event.pull_request.labels) }}
     run: |
-      # Fetch labels using GitHub API, since labels from context may be stale:
-      # https://github.com/orgs/community/discussions/39062
-      response=$(curl -sL \
-        -H "X-GitHub-Api-Version:2022-11-28" \
-        -H "Accept: application/vnd.github+json" \
-        -H "Authorization: Bearer ${{ github.token }}" \
-        https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/labels)
-
-      # In case of API failure, fall back on labels from workflow context
-      if echo "$response" | grep -q '"name":'; then
-        labels_json="$response"
-      else
-        echo "Could not retrieve labels via API, falling back to using context"
-        labels_json="${FALLBACK_LABELS}"
-      fi
-      
-      # echo 'See the labels'
-      # echo "$labels_json"
-      
-      # Safeguard against no labels, to prevent parsing failures.
-      # This will happen when a run is triggered on a branch, instead of a PR.
-      if [ "$labels_json" == null ]; then
-        echo "No PR labels detected."
-        labels_json='[]'
-      fi
-      
       # Pick an existing Python alias
       python_bin=$(which python3 2>/dev/null || which python)
 
-      labels=$(echo "$labels_json" | $python_bin -c "import sys, json; labels=[label['name'] for label in json.load(sys.stdin)]; print(json.dumps(labels))")
-
-      # fallback_labels=$(echo "${FALLBACK_LABELS}" | $python_bin -c "import sys, json; labels=[label['name'] for label in json.load(sys.stdin)]; print(json.dumps(labels))")
-      # echo 'Check out API labels:'
-      # echo "${labels}"
-      # echo 'check out context labels'
-      # echo "${fallback_labels}"
+      labels=$($python_bin "$GITHUB_ACTION_PATH"/get_labels.py)
+      echo "labels=$labels" >> "$GITHUB_OUTPUT"
       
-      # Set the labels as an output for this step, to be used in the next steps
-      echo "labels=$labels" >> $GITHUB_OUTPUT
-
   - name: Print out halt conditions
     shell: bash
     run: |
