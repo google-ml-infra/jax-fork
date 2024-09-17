@@ -46,7 +46,7 @@ if not _GITHUB_REF.startswith('refs/pull/'):
 # Get the PR number
 # Since passing the previous check confirms this is a PR, there's no need
 # to safeguard this regex
-GH_ISSUE = re.search(r'/refs/pull/(\d+)/merge', _GITHUB_REF).group(1)
+GH_ISSUE = re.search(r'refs/pull/(\d+)/merge', _GITHUB_REF).group(1)
 GH_REPO = os.environ.get('GITHUB_REPOSITORY')
 URL = f'https://api.github.com/repos/{GH_REPO}/issues/{GH_ISSUE}/labels'
 WAIT_TIME = 3
