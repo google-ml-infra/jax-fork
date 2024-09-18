@@ -25,8 +25,14 @@ runs:
     run: |
       # Pick an existing Python alias
       python_bin=$(which python3 2>/dev/null || which python)
+<<<<<<< HEAD
 
       labels=$($python_bin "$GITHUB_ACTION_PATH"/get_labels.py)
+=======
+      # Get the labels
+      labels=$($python_bin "$GITHUB_ACTION_PATH"/get_labels.py)
+      # Store them in the output, to be used in subsequent steps
+>>>>>>> use_api_labels_in_ssh
       echo "labels=$labels" >> "$GITHUB_OUTPUT"
       
   - name: Print out halt conditions
@@ -37,7 +43,7 @@ runs:
       echo "Halt always tag: ${{ inputs.should-wait-always-tag }}"
       echo "Should halt input: ${{ inputs.halt-dispatch-input }}"
       echo "Reattempt count: ${{ github.run_attempt }}"
-      echo "PR number: ${{ github.event.pull_request.number }}"
+      echo "PR number: ${{ github.event.number }}"
 
   - name: Halt for connection
     shell: bash
