@@ -25,14 +25,9 @@ runs:
     run: |
       # Pick an existing Python alias
       python_bin=$(which python3 2>/dev/null || which python)
-<<<<<<< HEAD
-
-      labels=$($python_bin "$GITHUB_ACTION_PATH"/get_labels.py)
-=======
       # Get the labels
       labels=$($python_bin "$GITHUB_ACTION_PATH"/get_labels.py)
       # Store them in the output, to be used in subsequent steps
->>>>>>> use_api_labels_in_ssh
       echo "labels=$labels" >> "$GITHUB_OUTPUT"
       
   - name: Print out halt conditions
