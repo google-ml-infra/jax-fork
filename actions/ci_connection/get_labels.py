@@ -14,89 +14,84 @@ import json
 import logging
 import os
 import re
-import sys
 import time
 import urllib.request
 
 
-# Check if debug logging should be enabled for the script:
-# GET_LABELS_DEBUG is a variable specifically for this script.
-# RUNNER_DEBUG and ACTIONS_RUNNER_DEBUG are GH env vars, which can be set
-# in various ways, one of them - enabling debug logging from the UI, when
-# triggering a run
-# https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/store-information-in-variables#default-environment-variables
-# https://docs.github.com/en/actions/monitoring-and-troubleshooting-workflows/troubleshooting-workflows/enabling-debug-logging#enabling-runner-diagnostic-logging
-_SHOW_DEBUG = bool(
-  os.getenv('GET_LABELS_DEBUG',
-            os.getenv('RUNNER_DEBUG',
-                      os.getenv('ACTIONS_RUNNER_DEBUG')))
-)
-logging.basicConfig(level=logging.INFO if not _SHOW_DEBUG else logging.DEBUG,
-                    format='%(levelname)s: %(message)s', stream=sys.stderr)
+def retrieve_labels(print_to_stdout: bool = True) -> list[str]:
+  """Get the most up-to-date labels.
 
+  In case this is not a PR, return an empty list.
+  """
+  # Check if this is a PR (pull request)
+  github_ref = os.getenv('GITHUB_REF')
+  # Outside a PR context - no labels to be found
+  if not github_ref.startswith('refs/pull/'):
+    logging.info('Not a PR workflow run, returning an empty label list')
+    if print_to_stdout:
+      print([])
+    return []
 
-# Check if this is a PR (pull request)
-_GITHUB_REF = os.environ.get('GITHUB_REF')
-# Outside a PR context - no labels to be found
-if not _GITHUB_REF.startswith('refs/pull/'):
-  logging.debug('Not a PR run')
-  print([])
-  raise SystemExit
-
-# Get the PR number
-# Since passing the previous check confirms this is a PR, there's no need
-# to safeguard this regex
-GH_ISSUE = re.search(r'refs/pull/(\d+)/merge', _GITHUB_REF).group(1)
-GH_REPO = os.environ.get('GITHUB_REPOSITORY')
-URL = f'https://api.github.com/repos/{GH_REPO}/issues/{GH_ISSUE}/labels'
-WAIT_TIME = 3
-ATTEMPTS = 3
-
-data = None
-cur_attempt = 1
-
-logging.debug(f'{GH_ISSUE=!r}\n'
-              f'{GH_REPO=!r}')
-
-# Try retrieving the labels' info via API
-while cur_attempt <= ATTEMPTS:
-  request = urllib.request.Request(
-    URL,
-    headers={'Accept': 'application/vnd.github+json',
-             'X-GitHub-Api-Version': '2022-11-28'}
+  # Get the PR number
+  # Since passing the previous check confirms this is a PR, there's no need
+  # to safeguard this regex
+  gh_issue = re.search(r'refs/pull/(\d+)/merge', github_ref).group(1)
+  gh_repo = os.getenv('GITHUB_REPOSITORY')
+  labels_url = (
+    f'https://api.github.com/repos/{gh_repo}/issues/{gh_issue}/labels'
   )
-  logging.info(f'Retrieving PR labels via API - attempt {cur_attempt}...')
-  response = urllib.request.urlopen(request)
+  logging.debug(f'{gh_issue=!r}\n'
+                f'{gh_repo=!r}')
 
-  if response.status == 200:
-      data = response.read().decode('utf-8')
-      logging.debug('API labels data: \n'
-                    f'{data}')
-      break
+  wait_time = 3
+  total_attempts = 3
+  cur_attempt = 1
+  data = None
+
+  # Try retrieving the labels' info via API
+  while cur_attempt <= total_attempts:
+    request = urllib.request.Request(
+      labels_url,
+      headers={'Accept': 'application/vnd.github+json',
+               'X-GitHub-Api-Version': '2022-11-28'}
+    )
+    logging.info(f'Retrieving PR labels via API - attempt {cur_attempt}...')
+    response = urllib.request.urlopen(request)
+
+    if response.status == 200:
+        data = response.read().decode('utf-8')
+        logging.debug('API labels data: \n'
+                      f'{data}')
+        break
+    else:
+        logging.error(f'Request failed with status code: {response.status}')
+        cur_attempt += 1
+        if cur_attempt <= total_attempts:
+          logging.info(f'Trying again in {wait_time} seconds')
+          time.sleep(wait_time)
+
+  # The null check is probably unnecessary, but rather be safe
+  if data and data != 'null':
+    data_json = json.loads(data)
   else:
-      logging.error(f'Request failed with status code: {response.status}')
-      cur_attempt += 1
-      if cur_attempt <= ATTEMPTS:
-        logging.info(f'Trying again in {WAIT_TIME} seconds')
-        time.sleep(WAIT_TIME)
+    # Fall back on labels from the event's payload, if API failed (unlikely)
+    event_payload_path = os.getenv('GITHUB_EVENT_PATH')
+    with open(event_payload_path, 'r', encoding='utf-8') as event_payload:
+      data_json = json.load(event_payload).get('pull_request',
+                                               {}).get('labels', [])
+      logging.info('Using fallback labels')
+      logging.info(f'Fallback labels: \n'
+                   f'{data_json}')
+
+  labels = [label['name'] for label in data_json]
+  logging.debug(f'Final labels: \n'
+                f'{labels}')
+
+  # Output the labels to stdout for further use elsewhere
+  if print_to_stdout:
+    print(labels)
+  return labels
 
 
-# The null check is probably unnecessary, but rather be safe
-if data and data != 'null':
-  data_json = json.loads(data)
-else:
-  # Fall back on labels from the event's payload, if API failed (unlikely)
-  event_payload_path = os.environ.get('GITHUB_EVENT_PATH')
-  with open(event_payload_path, 'r', encoding='utf-8') as event_payload:
-    data_json = json.load(event_payload).get('pull_request',
-                                             {}).get('labels', [])
-    logging.info('Using fallback labels')
-    logging.info(f'Fallback labels: \n'
-                 f'{data_json}')
-
-
-labels = [label['name'] for label in data_json]
-logging.debug(f'Final labels: \n'
-              f'{labels}')
-# Output the labels to stdout for further use elsewhere
-print(labels)
+if __name__ == '__main__':
+    retrieve_labels(print_to_stdout=True)
