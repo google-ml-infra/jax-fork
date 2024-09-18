@@ -45,19 +45,25 @@ keep_alive_timeout = (
 )
 
 
+def _is_truthy_env_var(var_name: str) -> bool:
+  var_val = os.getenv(var_name, "").lower()
+  negative_choices = {'0', 'false', 'n', 'no', 'none', 'null', 'n/a'}
+  if var_val and var_val not in negative_choices:
+    return True
+  return False
+
+
 def should_halt_for_connection() -> bool:
   """Check if the workflow should wait, due to inputs, vars, and labels."""
 
   logging.info('Checking if the workflow should be halted for a connection...')
 
-  interactive_ci_var = os.getenv("INTERACTIVE_CI", "").lower()
-  if (not interactive_ci_var or
-    interactive_ci_var in {'0', 'false', 'no', 'none', 'null', 'n/a'}):
-    logging.info("INTERACTIVE_CI env var is not"
+  if not _is_truthy_env_var("INTERACTIVE_CI"):
+    logging.info("INTERACTIVE_CI env var is not "
                  "set, or is set to a falsy value in the workflow")
     return False
 
-  explicit_halt_requested = os.getenv("HALT_DISPATCH_INPUT")
+  explicit_halt_requested = _is_truthy_env_var("HALT_DISPATCH_INPUT")
   if explicit_halt_requested:
     logging.info("Halt for connection requested via "
                  "explicit `halt-dispatch-input` input")
@@ -66,10 +72,11 @@ def should_halt_for_connection() -> bool:
   # Check if any of the relevant labels are present
   labels = retrieve_labels(print_to_stdout=False)
 
+  # Note: there's always a small possibility these labels may change on the
+  # repo/org level, in which case, they'd need to be updated below as well.
+
   # TODO(belitskiy): Add the ability to halt on CI error.
 
-  # Note: there's always a small possibility these labels may change on the
-  # repo/org level, in which case, they'd need to be updated here as well.
   always_halt_label = "CI Connection Halt - Always"
   if always_halt_label in labels:
     logging.info(f"Halt for connection requested via presence "
