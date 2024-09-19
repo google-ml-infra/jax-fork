@@ -14,7 +14,7 @@
 # limitations under the License.
 # ==============================================================================
 # Source JAXCI environment variables.
-source "ci/utilities/setup_envs.sh"
+source "ci/utilities/setup_envs.sh" "$1"
 # Set up the build environment.
 source "ci/utilities/setup_build_environment.sh"
 

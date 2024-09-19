@@ -65,40 +65,6 @@ export JAXCI_DOCKER_IMAGE=""
 export JAXCI_DOCKER_ARGS=""
 
 # #############################################################################
-# Test specific environment variables.
-# #############################################################################
-
-# Used by envs inside ci/build_artifacts. When set to 1, we disable x64 mode
-# and clone XLA at HEAD.
-export JAXCI_SETUP_TEST_ENVIRONMENT=${JAXCI_SETUP_TEST_ENVIRONMENT:-0}
-
-# Set when running tests locally where we need the wheels to be installed on
-# the system.
-export JAXCI_INSTALL_WHEELS_LOCALLY=0
-
-# JAXCI_PYTHON is used to install the wheels locally. It needs to match the
-# version of the hermetic Python used by Bazel.
-export JAXCI_PYTHON=python${JAXCI_HERMETIC_PYTHON_VERSION}
-
-# Bazel test environment variables.
-export JAXCI_RUN_BAZEL_TEST_CPU=0
-export JAXCI_RUN_BAZEL_TEST_GPU_LOCAL=0
-export JAXCI_RUN_BAZEL_TEST_GPU_RBE=0
-
-# Pytest environment variables.
-export JAXCI_RUN_PYTEST_CPU=0
-export JAXCI_RUN_PYTEST_GPU=0
-export JAXCI_RUN_PYTEST_TPU=0
-export JAXCI_TPU_CORES=""
-
-# If set to 1, the script will clone the main XLA repository at HEAD, set its
-# path in JAXCI_XLA_GIT_DIR and use it to build the artifacts or run the tests.
-export JAXCI_CLONE_MAIN_XLA=${JAXCI_CLONE_MAIN_XLA:-0}
-
-# Enable this globally across all builds.
-export JAX_SKIP_SLOW_TESTS=true
-
-# #############################################################################
 # Variables that can be overridden by the user.
 # #############################################################################
 # Set JAXCI_XLA_GIT_DIR to the root of the XLA git repository if you want to

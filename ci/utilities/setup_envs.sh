@@ -17,13 +17,14 @@
 # Source JAXCI environment variables.
 
 # If the user has not passed in an JAXCI_ENV_FILE, exit.
-if [[ -z "${JAXCI_ENV_FILE}" ]]; then
-    echo "JAXCI_ENV_FILE is not set."
-    echo "setup_envs.sh requires that `JAXCI_ENV_FILE` be set."
-    echo "If you are looking to build JAX artifacts, please set JAXCI_ENV_FILE"
-    echo "to an env file in the ci/envs/build_artifacts directory."
-    echo "If you are looking to run JAX tests, please set JAXCI_ENV_FILE to an"
-    echo "env file in the ci/envs/run_tests directory."
+if [[ -z "$1" ]]; then
+    echo "ERROR: No argument passed."
+    echo "setup_envs.sh requires that a path to a JAX CI env file be passed as"
+    echo "an argument when invoking the build scripts."
+    echo "If you are looking to build JAX artifacts, please pass in a"
+    echo "corresponding env file from the ci/envs/build_artifacts directory."
+    echo "If you are looking to run JAX tests, please pass in a"
+    echo "corresponding env file from the ci/envs/run_tests directory."
     exit 1
 fi
 
@@ -45,4 +46,4 @@ env | grep ^JAXCI_ > "$user_set_jaxci_envs"
 # -o history: record shell history
 # -o allexport: export all functions and variables to be available to subscripts
 set -exuo pipefail -o history -o allexport
-source "$JAXCI_ENV_FILE"
+source "$1"
