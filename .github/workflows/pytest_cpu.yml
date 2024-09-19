@@ -38,9 +38,7 @@ jobs:
       - name: Wait For Connection
         uses: ./actions/ci_connection/
       - name: Build jaxlib
-        env:
-          JAXCI_ENV_FILE: ci/envs/build_artifacts/jaxlib
-        run: ./ci/build_artifacts.sh
+        run: ./ci/build_artifacts.sh "ci/envs/build_artifacts/jaxlib"
       - name: Install pytest
         env:
           JAXCI_PYTHON: python${{ matrix.python }}
@@ -50,6 +48,4 @@ jobs:
           JAXCI_PYTHON: python${{ matrix.python }}
         run: $JAXCI_PYTHON -m pip install -r build/test-requirements.txt
       - name: Run Pytest CPU tests
-        env:
-          JAXCI_ENV_FILE: ci/envs/run_tests/pytest_cpu
-        run: ./ci/run_pytest.sh
+        run: ./ci/run_pytest.sh "ci/envs/run_tests/pytest_cpu"
