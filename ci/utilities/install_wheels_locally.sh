@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright 2024 JAX Authors. All Rights Reserved.
+# Copyright 2024 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,19 +15,15 @@
 # ==============================================================================
 #
 # Install wheels stored in `JAXCI_OUTPUT_DIR` locally using the Python binary
-# set in JAXCI_PYTHON.
+# set in JAXCI_PYTHON. Use the absolute path to the `find` utility to avoid
+# using the Windows version of `find` on Windows.
+WHEELS=$(/usr/bin/find "$JAXCI_OUTPUT_DIR/" -type f \( -name "*jaxlib*" -o -name "*jax*cuda*pjrt*" -o -name "*jax*cuda*plugin*" \))
 
-# When running tests with Pytests, install wheels using the Python binary set
-# in JAXCI_PYTHON.
-if [[ $JAXCI_RUN_PYTEST_CPU == 1 ]] || [[ $JAXCI_RUN_PYTEST_GPU == 1 ]]; then
-  # Install the wheels inside the output directory. On Windows, the path needs
-  # to be in Linux format.
-  if [[ ! $(uname -s) =~ "MSYS_NT" ]]; then
-    bash -c "$JAXCI_PYTHON -m pip install $JAXCI_OUTPUT_DIR/*.whl"
-  else
-    bash -c "$JAXCI_PYTHON -m pip install $(cygpath $JAXCI_OUTPUT_DIR)/*.whl"
-  fi
+for wheel in "$WHEELS"; do
+  echo "Installing $(basename $wheel) ..."
+  "$JAXCI_PYTHON" -m pip install "$wheel"
+done
 
-  # Install JAX package at the current commit.
-  "$JAXCI_PYTHON" -m pip install -U -e .
-fi
+echo "Installing the JAX package in editable mode at the current commit..."
+# Install JAX package at the current commit.
+"$JAXCI_PYTHON" -m pip install -U -e .

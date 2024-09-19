@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright 2024 JAX Authors. All Rights Reserved.
+# Copyright 2024 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,7 +14,7 @@
 # limitations under the License.
 # ==============================================================================
 # Source JAXCI environment variables.
-source "ci/utilities/setup_envs.sh"
+source "ci/utilities/setup_envs.sh" "$1"
 # Set up the build environment.
 source "ci/utilities/setup_build_environment.sh"
 
@@ -40,13 +40,13 @@ fi
 if [[ $JAXCI_RUN_PYTEST_TPU == 1 ]]; then
   echo "Running TPU tests..."
   # Run single-accelerator tests in parallel
-  export JAX_ENABLE_TPU_XDIST=true 
+  export JAX_ENABLE_TPU_XDIST=true
   check_if_to_run_in_docker "$JAXCI_PYTHON" -m pytest -n="$JAXCI_TPU_CORES" --tb=short \
     --deselect=tests/pallas/tpu_pallas_test.py::PallasCallPrintTest \
     --maxfail=20 -m "not multiaccelerator" tests examples
- 
+
   # Run Pallas printing tests, which need to run with I/O capturing disabled.
-  export TPU_STDERR_LOG_LEVEL=0 
+  export TPU_STDERR_LOG_LEVEL=0
   check_if_to_run_in_docker "$JAXCI_PYTHON" -m pytest -s tests/pallas/tpu_pallas_test.py::PallasCallPrintTest
 
   # Run multi-accelerator across all chips
