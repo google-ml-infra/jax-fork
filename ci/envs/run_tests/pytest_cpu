@@ -26,3 +26,5 @@ export JAX_ENABLE_X64=0
 
 # Clone XLA at HEAD.
 export JAXCI_CLONE_MAIN_XLA=1
+
+export TF_CPP_MIN_LOG_LEVEL=0
