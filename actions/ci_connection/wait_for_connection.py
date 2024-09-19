@@ -30,12 +30,12 @@ from get_labels import retrieve_labels
 # https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/store-information-in-variables#default-environment-variables
 # https://docs.github.com/en/actions/monitoring-and-troubleshooting-workflows/troubleshooting-workflows/enabling-debug-logging#enabling-runner-diagnostic-logging
 _SHOW_DEBUG = bool(
-  os.getenv('WAIT_FOR_CONNECTION_DEBUG',
-            os.getenv('RUNNER_DEBUG',
-                      os.getenv('ACTIONS_RUNNER_DEBUG')))
+  os.getenv("WAIT_FOR_CONNECTION_DEBUG",
+            os.getenv("RUNNER_DEBUG",
+                      os.getenv("ACTIONS_RUNNER_DEBUG")))
 )
 logging.basicConfig(level=logging.INFO if not _SHOW_DEBUG else logging.DEBUG,
-                    format='%(levelname)s: %(message)s', stream=sys.stderr)
+                    format="%(levelname)s: %(message)s", stream=sys.stderr)
 
 
 last_time = time.time()
@@ -47,7 +47,7 @@ keep_alive_timeout = (
 
 def _is_truthy_env_var(var_name: str) -> bool:
   var_val = os.getenv(var_name, "").lower()
-  negative_choices = {'0', 'false', 'n', 'no', 'none', 'null', 'n/a'}
+  negative_choices = {"0", "false", "n", "no", "none", "null", "n/a"}
   if var_val and var_val not in negative_choices:
     return True
   return False
@@ -56,7 +56,7 @@ def _is_truthy_env_var(var_name: str) -> bool:
 def should_halt_for_connection() -> bool:
   """Check if the workflow should wait, due to inputs, vars, and labels."""
 
-  logging.info('Checking if the workflow should be halted for a connection...')
+  logging.info("Checking if the workflow should be halted for a connection...")
 
   if not _is_truthy_env_var("INTERACTIVE_CI"):
     logging.info("INTERACTIVE_CI env var is not "
@@ -173,8 +173,8 @@ def wait_for_connection():
 
 if __name__ == "__main__":
   if not should_halt_for_connection():
-    logging.info('No conditions for halting the workflow'
-                 'for connection were met')
+    logging.info("No conditions for halting the workflow"
+                 "for connection were met")
     exit()
 
   wait_for_connection()
