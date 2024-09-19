@@ -17,6 +17,8 @@ runs:
       INTERACTIVE_CI: 1
       PYTHONUNBUFFERED: 1
       HALT_DISPATCH_INPUT: ${{ inputs.halt-dispatch-input }}
+    # The calling workflow shouldn't fail in case this step does
+    continue-on-error: true
     run: |
       # Pick an existing Python alias
       python_bin=$(which python3 2>/dev/null || which python)
