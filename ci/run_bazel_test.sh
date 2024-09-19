@@ -49,7 +49,7 @@ if [[ $JAXCI_RUN_BAZEL_TEST_GPU_LOCAL == 1 ]]; then
       check_if_to_run_in_docker nvidia-smi
       echo "Running local GPU tests..."
 
-      check_if_to_run_in_docker "$JAXCI_PYTHON" -c "import jax; print(jax.default_backend()); print(jax.devices()); print(len(jax.devices()))"
+      #check_if_to_run_in_docker "$JAXCI_PYTHON" -c "import jax; print(jax.default_backend()); print(jax.devices()); print(len(jax.devices()))"
 
       # Only Linux x86 builds run GPU tests
       # Runs non-multiaccelerator tests with one GPU apiece.
