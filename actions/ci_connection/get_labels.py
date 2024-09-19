@@ -27,7 +27,7 @@ def retrieve_labels(print_to_stdout: bool = True) -> list[str]:
   github_ref = os.getenv('GITHUB_REF')
   # Outside a PR context - no labels to be found
   if not github_ref.startswith('refs/pull/'):
-    logging.info('Not a PR workflow run, returning an empty label list')
+    logging.debug('Not a PR workflow run, returning an empty label list')
     if print_to_stdout:
       print([])
     return []
