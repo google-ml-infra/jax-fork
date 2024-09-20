@@ -16,7 +16,6 @@ import logging
 import os
 from multiprocessing.connection import Listener
 import time
-import signal
 import threading
 import sys
 
@@ -38,11 +37,14 @@ logging.basicConfig(level=logging.INFO if not _SHOW_DEBUG else logging.DEBUG,
                     format="%(levelname)s: %(message)s", stream=sys.stderr)
 
 
-last_time = time.time()
-timeout = 600  # 10 minutes for initial connection
-keep_alive_timeout = (
-  900  # 30 minutes for keep-alive, if no closed message (allow for reconnects)
-)
+class WaitInfo:
+  wait_limit_reached = False
+  timeout = 20
+  # timeout = 600  # 10 minutes for initial connection
+  last_time = time.time()
+  # 30 minutes for keep-alive, if no closed message (allow for reconnects)
+  # keep_alive_timeout = 900
+  keep_alive_timeout = 20
 
 
 def _is_truthy_env_var(var_name: str) -> bool:
@@ -96,9 +98,10 @@ def should_halt_for_connection() -> bool:
 
 def wait_for_notification(address):
   """Waits for connection notification from the listener."""
-  # TODO(belitskiy): Get rid of globals?
-  global last_time, timeout
   while True:
+    time.sleep(0.05)
+    if WaitInfo.wait_limit_reached:
+      logging.info(f"No connection in {WaitInfo.timeout} seconds - exiting ")
     with Listener(address) as listener:
       logging.info("Waiting for connection...")
       with listener.accept() as conn:
@@ -111,15 +114,17 @@ def wait_for_notification(address):
           logging.info("Received message")
           if message == "keep_alive":
             logging.info("Keep-alive received")
-            last_time = time.time()
+            WaitInfo.last_time = time.time()
             continue  # Keep-alive received, continue waiting
           elif message == "closed":
             logging.info("Connection closed by the other process.")
             return  # Graceful exit
           elif message == "connected":
-            last_time = time.time()
-            timeout = keep_alive_timeout
+            WaitInfo.last_time = time.time()
+            WaitInfo.timeout = WaitInfo.keep_alive_timeout
             logging.info("Connected")
+          elif message == "wait_limit_reached":
+            logging.info("Finished waiting")
           else:
             logging.warning("Unknown message received:", message)
             continue
@@ -128,12 +133,12 @@ def wait_for_notification(address):
 def timer():
   while True:
     logging.info("Checking status")
-    time_elapsed = time.time() - last_time
-    if time_elapsed < timeout:
+    time_elapsed = time.time() - WaitInfo.last_time
+    if time_elapsed < WaitInfo.timeout:
       logging.info(f"Time since last keep-alive: {int(time_elapsed)}s")
     else:
-      logging.info("Timeout reached, exiting")
-      os.kill(os.getpid(), signal.SIGTERM)
+      WaitInfo.wait_limit_reached = True
+      return
     time.sleep(60)
 
 
