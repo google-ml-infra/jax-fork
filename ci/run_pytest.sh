@@ -41,6 +41,8 @@ if [[ $JAXCI_RUN_PYTEST_TPU == 1 ]]; then
   echo "Running TPU tests..."
   # Run single-accelerator tests in parallel
   export JAX_ENABLE_TPU_XDIST=true
+  
+  check_if_to_run_in_docker "$JAXCI_PYTHON" -c 'import jax; print("libtpu version:",jax.lib.xla_bridge.get_backend().platform_version)'
   check_if_to_run_in_docker "$JAXCI_PYTHON" -m pytest -n="$JAXCI_TPU_CORES" --tb=short \
     --deselect=tests/pallas/tpu_pallas_test.py::PallasCallPrintTest \
     --maxfail=20 -m "not multiaccelerator" tests examples
