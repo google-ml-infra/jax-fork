@@ -147,6 +147,7 @@ async def wait_for_connection(host: str = 'localhost',
                          timeout=60,
                          return_when=asyncio.FIRST_COMPLETED)
 
+      elapsed = time.time() - WaitInfo.last_time
       if WaitInfo.waiting_for_close:
         msg = "Connection was terminated."
         terminate = True
@@ -160,7 +161,6 @@ async def wait_for_connection(host: str = 'localhost',
         await server.wait_closed()
         break
 
-      elapsed = time.time() - WaitInfo.last_time
       logging.info(f"Time since last keep-alive: {int(elapsed)}s")
 
     logging.info("Waiting process terminated.")
