@@ -12,12 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Wait for an SSH connection from a user, if a wait was requested."""
+
+import asyncio
 import logging
 import os
-from multiprocessing.connection import Listener
-import time
-import threading
 import sys
+import time
 
 from get_labels import retrieve_labels
 
@@ -37,17 +38,7 @@ logging.basicConfig(level=logging.INFO if not _SHOW_DEBUG else logging.DEBUG,
                     format="%(levelname)s: %(message)s", stream=sys.stderr)
 
 
-class WaitInfo:
-  wait_limit_reached = False
-  timeout = 20
-  # timeout = 600  # 10 minutes for initial connection
-  last_time = time.time()
-  # 30 minutes for keep-alive, if no closed message (allow for reconnects)
-  # keep_alive_timeout = 900
-  keep_alive_timeout = 20
-
-
-def _is_truthy_env_var(var_name: str) -> bool:
+def _is_true_like_env_var(var_name: str) -> bool:
   var_val = os.getenv(var_name, "").lower()
   negative_choices = {"0", "false", "n", "no", "none", "null", "n/a"}
   if var_val and var_val not in negative_choices:
@@ -60,12 +51,12 @@ def should_halt_for_connection() -> bool:
 
   logging.info("Checking if the workflow should be halted for a connection...")
 
-  if not _is_truthy_env_var("INTERACTIVE_CI"):
+  if not _is_true_like_env_var("INTERACTIVE_CI"):
     logging.info("INTERACTIVE_CI env var is not "
-                 "set, or is set to a falsy value in the workflow")
+                 "set, or is set to a false-like value in the workflow")
     return False
 
-  explicit_halt_requested = _is_truthy_env_var("HALT_DISPATCH_INPUT")
+  explicit_halt_requested = _is_true_like_env_var("HALT_DISPATCH_INPUT")
   if explicit_halt_requested:
     logging.info("Halt for connection requested via "
                  "explicit `halt-dispatch-input` input")
@@ -96,57 +87,39 @@ def should_halt_for_connection() -> bool:
   return False
 
 
-def wait_for_notification(address):
-  """Waits for connection notification from the listener."""
-  while True:
-    time.sleep(0.05)
-    if WaitInfo.wait_limit_reached:
-      logging.info(f"No connection in {WaitInfo.timeout} seconds - exiting ")
-    with Listener(address) as listener:
-      logging.info("Waiting for connection...")
-      with listener.accept() as conn:
-        while True:
-          try:
-            message = conn.recv()
-          except EOFError as e:
-            logging.error("EOFError occurred:", e)
-            break
-          logging.info("Received message")
-          if message == "keep_alive":
-            logging.info("Keep-alive received")
-            WaitInfo.last_time = time.time()
-            continue  # Keep-alive received, continue waiting
-          elif message == "closed":
-            logging.info("Connection closed by the other process.")
-            return  # Graceful exit
-          elif message == "connected":
-            WaitInfo.last_time = time.time()
-            WaitInfo.timeout = WaitInfo.keep_alive_timeout
-            logging.info("Connected")
-          elif message == "wait_limit_reached":
-            logging.info("Finished waiting")
-          else:
-            logging.warning("Unknown message received:", message)
-            continue
+class WaitInfo:
+  pre_connect_timeout = 10 * 60  # 10 minutes for initial connection
+  # allow for reconnects, in case no 'closed' message is received
+  re_connect_timeout = 15 * 60  # 15 minutes for reconnects
+  # Dynamic, depending on whether a connection was established, or not
+  timeout = pre_connect_timeout
+  last_time = time.time()
+  waiting_for_close = False
+  stop_event = asyncio.Event()
 
 
-def timer():
-  while True:
-    logging.info("Checking status")
-    time_elapsed = time.time() - WaitInfo.last_time
-    if time_elapsed < WaitInfo.timeout:
-      logging.info(f"Time since last keep-alive: {int(time_elapsed)}s")
-    else:
-      WaitInfo.wait_limit_reached = True
-      return
-    time.sleep(60)
+async def process_message(reader, writer):
+  data = await reader.read(1024)
+  message = data.decode().strip()
+  if message == "keep_alive":
+    logging.info("Keep-alive received")
+    WaitInfo.last_time = time.time()
+  elif message == "connection_closed":
+    WaitInfo.waiting_for_close = True
+    WaitInfo.stop_event.set()
+  elif message == "connection_established":
+    WaitInfo.last_time = time.time()
+    WaitInfo.timeout = WaitInfo.re_connect_timeout
+    logging.info("SSH connection detected.")
+  else:
+    logging.warning(f"Unknown message received: {message!r}")
+  writer.close()
 
 
-def wait_for_connection():
-  address = ("localhost", 12455)  # Address and port to listen on
-
+async def wait_for_connection(host: str = 'localhost',
+                              port: int = 12455):
   # Print out the data required to connect to this VM
-  host = os.getenv("HOSTNAME")
+  runner_name = os.getenv("HOSTNAME")
   cluster = os.getenv("CONNECTION_CLUSTER")
   location = os.getenv("CONNECTION_LOCATION")
   ns = os.getenv("CONNECTION_NS")
@@ -156,24 +129,41 @@ def wait_for_connection():
                "See go/ml-github-actions:ssh for details")
   logging.info(
     f"Connection string: ml-actions-connect "
-    f"--runner={host} "
+    f"--runner={runner_name} "
     f"--ns={ns} "
     f"--loc={location} "
     f"--cluster={cluster} "
     f"--halt_directory={actions_path}"
   )
 
-  # Thread is running as a daemon, so it will quit when the
-  # main thread terminates.
-  timer_thread = threading.Thread(target=timer, daemon=True)
-  timer_thread.start()
+  server = await asyncio.start_server(process_message, host, port)
+  addr = server.sockets[0].getsockname()
+  terminate = False
 
-  # Wait for connection and get the connection object
-  wait_for_notification(address)
+  logging.info(f"Listening for connection notifications on {addr}...")
+  async with server:
+    while not WaitInfo.stop_event.is_set():
+      await asyncio.wait([asyncio.create_task(WaitInfo.stop_event.wait())],
+                         timeout=60,
+                         return_when=asyncio.FIRST_COMPLETED)
 
-  logging.info("Exiting connection wait loop.")
-  # Force a flush so we don't miss messages
-  sys.stdout.flush()
+      if WaitInfo.waiting_for_close:
+        msg = "Connection was terminated."
+        terminate = True
+      elif elapsed > WaitInfo.timeout:
+        terminate = True
+        msg = f"No connection for {WaitInfo.timeout} seconds."
+
+      if terminate:
+        logging.info(f"{msg} Shutting down the waiting process...")
+        server.close()
+        await server.wait_closed()
+        break
+
+      elapsed = time.time() - WaitInfo.last_time
+      logging.info(f"Time since last keep-alive: {int(elapsed)}s")
+
+    logging.info("Waiting process terminated.")
 
 
 if __name__ == "__main__":
@@ -181,5 +171,4 @@ if __name__ == "__main__":
     logging.info("No conditions for halting the workflow"
                  "for connection were met")
     exit()
-
-  wait_for_connection()
+  asyncio.run(wait_for_connection())
