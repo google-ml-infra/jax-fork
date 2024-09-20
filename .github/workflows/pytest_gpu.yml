@@ -1,9 +1,9 @@
 name: Run Pytest GPU tests
 
-# on:
-#   pull_request:
-#     branches:
-#       - main
+on:
+  pull_request:
+    branches:
+      - main
 
 jobs:
   build:
@@ -18,7 +18,7 @@ jobs:
 
     env:
       # GitHub actions run in Docker by defaut. Disable running the `setup_docker.sh` script.
-      JAXCI_SETUP_DOCKER: 0
+      JAXCI_RUN_DOCKER_CONTAINER: 0
       # Use RBE to build the artifacts.
       JAXCI_BUILD_ARTIFACT_WITH_RBE: 1
       # Setup the test environment (disable x64 mode and clone XLA at HEAD)
@@ -31,11 +31,11 @@ jobs:
       - name: Wait For Connection
         uses: ./actions/ci_connection/
       - name: Build jaxlib
-        run: ./ci/build_artifacts.sh jaxlib
+        run: ./ci/build_artifacts.sh "ci/envs/build_artifacts/jaxlib"
       - name: Build jax-cuda-plugin
-        run: ./ci/build_artifacts.sh jax-cuda-plugin
+        run: ./ci/build_artifacts.sh "ci/envs/build_artifacts/jax-cuda-plugin"
       - name: Build jax-cuda-pjrt
-        run: ./ci/build_artifacts.sh jax-cuda-pjrt
+        run: ./ci/build_artifacts.sh jax-cuda-pjrt "ci/envs/build_artifacts/jax-cuda-pjrt"
       - name: Install pytest
         env:
           JAXCI_PYTHON: python${{ matrix.python }}
@@ -45,6 +45,4 @@ jobs:
           JAXCI_PYTHON: python${{ matrix.python }}
         run: $JAXCI_PYTHON -m pip install -r build/test-requirements.txt
       - name: Run Pytest GPU tests
-        env:
-          ENV_FILE: ci/envs/run_tests/pytest_gpu
-        run: ./ci/run_pytest.sh
+        run: ./ci/run_pytest.sh "ci/envs/run_tests/pytest_gpu"
