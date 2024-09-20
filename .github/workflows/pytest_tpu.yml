@@ -43,6 +43,8 @@ jobs:
           $JAXCI_PYTHON -m pip install -r build/test-requirements.txt
           $JAXCI_PYTHON -m pip install -r build/collect-profile-requirements.txt
       - name: Install Libtpu
+        env:
+          JAXCI_PYTHON: python${{ matrix.python }}
         run: $JAXCI_PYTHON -m pip install --pre libtpu-nightly -f "https://storage.googleapis.com/jax-releases/libtpu_releases.html"
       - name: Run Pytest TPU tests
         run: ./ci/run_pytest.sh "ci/envs/run_tests/pytest_tpu"
