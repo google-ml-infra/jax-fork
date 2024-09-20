@@ -17,9 +17,15 @@
 # Install wheels stored in `JAXCI_OUTPUT_DIR` locally using the Python binary
 # set in JAXCI_PYTHON. Use the absolute path to the `find` utility to avoid
 # using the Windows version of `find` on Windows.
-WHEELS=$(/usr/bin/find "$JAXCI_OUTPUT_DIR/" -type f \( -name "*jaxlib*" -o -name "*jax*cuda*pjrt*" -o -name "*jax*cuda*plugin*" \))
+WHEELS=( $(/usr/bin/find "$JAXCI_OUTPUT_DIR/" -type f \( -name "*jaxlib*" -o -name "*jax*cuda*pjrt*" -o -name "*jax*cuda*plugin*" \)) )
 
-for wheel in "$WHEELS"; do
+echo $WHEELS
+if [[ -z "$WHEELS" ]]; then
+  echo "ERROR: No wheels found under $JAXCI_OUTPUT_DIR"
+  exit 1
+fi
+
+for wheel in "${WHEELS[@]}"; do
   echo "Installing $(basename $wheel) ..."
   "$JAXCI_PYTHON" -m pip install "$wheel"
 done
