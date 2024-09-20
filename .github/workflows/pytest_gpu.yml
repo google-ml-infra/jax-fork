@@ -35,7 +35,7 @@ jobs:
       - name: Build jax-cuda-plugin
         run: ./ci/build_artifacts.sh "ci/envs/build_artifacts/jax-cuda-plugin"
       - name: Build jax-cuda-pjrt
-        run: ./ci/build_artifacts.sh jax-cuda-pjrt "ci/envs/build_artifacts/jax-cuda-pjrt"
+        run: ./ci/build_artifacts.sh "ci/envs/build_artifacts/jax-cuda-pjrt"
       - name: Install pytest
         env:
           JAXCI_PYTHON: python${{ matrix.python }}
