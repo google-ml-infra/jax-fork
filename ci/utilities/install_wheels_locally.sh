@@ -19,16 +19,14 @@
 # using the Windows version of `find` on Windows.
 WHEELS=( $(/usr/bin/find "$JAXCI_OUTPUT_DIR/" -type f \( -name "*jaxlib*" -o -name "*jax*cuda*pjrt*" -o -name "*jax*cuda*plugin*" \)) )
 
-echo $WHEELS
 if [[ -z "$WHEELS" ]]; then
   echo "ERROR: No wheels found under $JAXCI_OUTPUT_DIR"
   exit 1
 fi
 
-for wheel in "${WHEELS[@]}"; do
-  echo "Installing $(basename $wheel) ..."
-  "$JAXCI_PYTHON" -m pip install "$wheel"
-done
+echo "Installing the following wheels:"
+echo "${WHEELS[@]}"
+"$JAXCI_PYTHON" -m pip install "${WHEELS[@]}"
 
 echo "Installing the JAX package in editable mode at the current commit..."
 # Install JAX package at the current commit.
