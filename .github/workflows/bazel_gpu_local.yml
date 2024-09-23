@@ -37,3 +37,5 @@ jobs:
         uses: ./actions/ci_connection/
       - name: Run Bazel GPU tests locally
         run: ./ci/run_bazel_test.sh "ci/envs/run_tests/bazel_gpu_local"
+      - name: Test if step runs
+        run: echo "This step ran!"
