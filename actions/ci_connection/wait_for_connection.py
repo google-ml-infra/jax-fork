@@ -21,21 +21,9 @@ import sys
 import time
 
 from get_labels import retrieve_labels
+from logging_setup import setup_logging
 
-# Check if debug logging should be enabled for the script:
-# WAIT_FOR_CONNECTION_DEBUG is a custom variable.
-# RUNNER_DEBUG and ACTIONS_RUNNER_DEBUG are GH env vars, which can be set
-# in various ways, one of them - enabling debug logging from the UI, when
-# triggering a run:
-# https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/store-information-in-variables#default-environment-variables
-# https://docs.github.com/en/actions/monitoring-and-troubleshooting-workflows/troubleshooting-workflows/enabling-debug-logging#enabling-runner-diagnostic-logging
-_SHOW_DEBUG = bool(
-  os.getenv("WAIT_FOR_CONNECTION_DEBUG",
-            os.getenv("RUNNER_DEBUG",
-                      os.getenv("ACTIONS_RUNNER_DEBUG")))
-)
-logging.basicConfig(level=logging.INFO if not _SHOW_DEBUG else logging.DEBUG,
-                    format="%(levelname)s: %(message)s", stream=sys.stderr)
+setup_logging()
 
 
 def _is_true_like_env_var(var_name: str) -> bool:
@@ -98,21 +86,23 @@ class WaitInfo:
   stop_event = asyncio.Event()
 
 
-async def process_message(reader, writer):
+async def process_messages(reader, writer):
   data = await reader.read(1024)
-  message = data.decode().strip()
-  if message == "keep_alive":
-    logging.info("Keep-alive received")
-    WaitInfo.last_time = time.time()
-  elif message == "connection_closed":
-    WaitInfo.waiting_for_close = True
-    WaitInfo.stop_event.set()
-  elif message == "connection_established":
-    WaitInfo.last_time = time.time()
-    WaitInfo.timeout = WaitInfo.re_connect_timeout
-    logging.info("SSH connection detected.")
-  else:
-    logging.warning(f"Unknown message received: {message!r}")
+  # Since this is a stream, multiple messages could come in at once
+  messages = [m for m in data.decode().strip().splitlines() if m]
+  for message in messages:
+    if message == "keep_alive":
+      logging.info("Keep-alive received")
+      WaitInfo.last_time = time.time()
+    elif message == "connection_closed":
+      WaitInfo.waiting_for_close = True
+      WaitInfo.stop_event.set()
+    elif message == "connection_established":
+      WaitInfo.last_time = time.time()
+      WaitInfo.timeout = WaitInfo.re_connect_timeout
+      logging.info("SSH connection detected.")
+    else:
+      logging.warning(f"Unknown message received: {message!r}")
   writer.close()
 
 
@@ -136,11 +126,10 @@ async def wait_for_connection(host: str = 'localhost',
     f"--halt_directory={actions_path}"
   )
 
-  server = await asyncio.start_server(process_message, host, port)
-  addr = server.sockets[0].getsockname()
+  server = await asyncio.start_server(process_messages, host, port)
   terminate = False
 
-  logging.info(f"Listening for connection notifications on {addr}...")
+  logging.info(f"Listening for connection notifications on {host}:{port}...")
   async with server:
     while not WaitInfo.stop_event.is_set():
       await asyncio.wait([asyncio.create_task(WaitInfo.stop_event.wait())],
