@@ -604,10 +604,6 @@ async def main():
     logging.debug("Disabling NCCL.")
     bazel_command.append("--config=nonccl")
 
-  if hasattr(args, "cuda_compute_capabilities"):
-    logging.debug("Setting CUDA compute capabilities to %s", args.cuda_compute_capabilities)
-    bazel_command.append(f"--repo_env HERMETIC_CUDA_COMPUTE_CAPABILITIES={args.cuda_compute_capabilities}")
-
   # Set Clang as the C++ compiler if requested. If Clang cannot be found, the
   # build will continue without Clang and instead use the system default.
   if args.use_clang or args.clang_path:
