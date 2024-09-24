@@ -654,6 +654,9 @@ async def main():
     if args.cudnn_version != "9.1.1":
       logging.debug("Setting Hermetic cuDNN version to %s", args.cudnn_version)
       bazel_command.append(f"--repo_env=HERMETIC_CUDNN_VERSION={args.cudnn_version}")
+    if args.cuda_compute_capabilities:
+      logging.debug("Setting CUDA compute capabilities to %s", args.cuda_compute_capabilities)
+      bazel_command.append(f"--repo_env HERMETIC_CUDA_COMPUTE_CAPABILITIES={args.cuda_compute_capabilities}")
 
   # If building ROCM packages, set the ROCm path and ROCm AMD GPU targets.
   if "rocm" in args.command:
