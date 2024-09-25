@@ -29,3 +29,6 @@ export JAX_ENABLE_X64=0
 
 # Clone XLA at HEAD.
 export JAXCI_CLONE_MAIN_XLA=1
+
+# Set per device memory limit to 20.5 GB
+export TF_PER_DEVICE_MEMORY_LIMIT_MB=20480
