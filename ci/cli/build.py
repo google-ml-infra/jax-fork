@@ -156,27 +156,23 @@ def set_clang_as_compiler(bazel_command: command.CommandBuilder, clang_path: str
   else:
     logger.debug("Could not find path to Clang. Continuing without Clang.")
 
-def adjust_paths_for_windows(wheel_binary: str, output_dir: str, arch: str) -> tuple[str, str, str]:
+def adjust_paths_for_windows(output_dir: str, arch: str) -> tuple[str, str, str]:
   """
   Adjusts the paths to be compatible with Windows.
   Args:
-    wheel_binary: The path to the wheel binary that was built by Bazel.
     output_dir: The output directory for the wheel.
     arch: The architecture of the host system.
   Returns:
     A tuple of the adjusted paths.
   """
   logger.debug("Adjusting paths for Windows...")
-  # On Windows, the wheel binary has a .exe extension. and the path needs
-  # to be adjusted to use backslashes.
-  wheel_binary = wheel_binary.replace("/", "\\") + ".exe"
   output_dir = output_dir.replace("/", "\\")
 
   # Change to upper case to match the case in
   # "jax/tools/build_utils.py" for Windows.
   arch = arch.upper()
 
-  return (wheel_binary, output_dir, arch)
+  return (output_dir, arch)
 
 def parse_and_append_bazel_options(bazel_command: command.CommandBuilder, bazel_options: str):
   """
@@ -590,7 +586,7 @@ async def main():
     await executor.run(bazel_command.command, args.dry_run)
     sys.exit(0)
 
-  bazel_command.append("build")
+  bazel_command.append("run")
 
   if args.enable_native_arch_features:
     logging.debug("Enabling native target CPU features.")
@@ -672,48 +668,42 @@ async def main():
   build_target, wheel_binary = ARTIFACT_BUILD_TARGET_DICT[args.command]
   bazel_command.append(build_target)
 
-  # Execute the Bazel command.
-  await executor.run(bazel_command.command, args.dry_run)
-
-  # Construct the wheel build command.
-  logger.info("Constructing wheel build command...")
-
   # Read output directory. Default is store the artifacts in the "dist/"
   # directory in JAX's GitHub repository root.
   output_dir = args.output_dir
 
   # If running on Windows, adjust the paths for compatibility.
   if os_name == "windows":
-    wheel_binary, output_dir, arch = adjust_paths_for_windows(
-        wheel_binary, output_dir, arch
+    output_dir, arch = adjust_paths_for_windows(
+          output_dir, arch
     )
 
   logger.debug("Storing artifacts in %s", output_dir)
 
-  run_wheel_binary = command.CommandBuilder(wheel_binary)
+  bazel_command.append("--")
 
   if args.editable:
     logger.debug("Building an editable build.")
     output_dir = os.path.join(output_dir, args.command)
-    run_wheel_binary.append("--editable")
+    bazel_command.append("--editable")
 
-  run_wheel_binary.append(f"--output_path={output_dir}")
-  run_wheel_binary.append(f"--cpu={arch}")
+  bazel_command.append(f"--output_path={output_dir}")
+  bazel_command.append(f"--cpu={arch}")
 
   if "cuda" in args.command:
-    run_wheel_binary.append("--enable-cuda=True")
+    bazel_command.append("--enable-cuda=True")
     major_cuda_version = args.cuda_version.split(".")[0]
-    run_wheel_binary.append(f"--platform_version={major_cuda_version}")
+    bazel_command.append(f"--platform_version={major_cuda_version}")
 
   if "rocm" in args.command:
-    run_wheel_binary.append("--enable-rocm=True")
-    run_wheel_binary.append(f"--platform_version={args.rocm_version}")
+    bazel_command.append("--enable-rocm=True")
+    bazel_command.append(f"--platform_version={args.rocm_version}")
 
   jaxlib_git_hash = get_jaxlib_git_hash()
-  run_wheel_binary.append(f"--jaxlib_git_hash={jaxlib_git_hash}")
+  bazel_command.append(f"--jaxlib_git_hash={jaxlib_git_hash}")
 
   # Execute the wheel build command.
-  await executor.run(run_wheel_binary.command, args.dry_run)
+  await executor.run(bazel_command.command, args.dry_run)
 
 if __name__ == "__main__":
   asyncio.run(main())
