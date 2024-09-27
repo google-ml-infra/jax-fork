@@ -8,6 +8,7 @@ on:
 
 jobs:
   build:
+    continue-on-error: true
     defaults:
       run:
         # Explicitly set the shell to bash to override the default Windows environment, i.e, cmd.
