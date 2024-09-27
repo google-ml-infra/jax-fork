@@ -635,7 +635,7 @@ async def main():
     # version is set. On the Linux Arm64 Docker image, the system default is
     # Python 3.9 which is not supported by JAX.
     # TODO(srnitin): Update the Docker images so that we can remove this.
-    bazel_command.append("--repo_env=HERMETIC_PYTHON_VERSION=3.12")
+    bazel_command.append("--repo_env=HERMETIC_PYTHON_VERSION=3.11")
 
   # Set the CUDA and cuDNN versions if they are not the default. Default values
   # are set in the .bazelrc.
