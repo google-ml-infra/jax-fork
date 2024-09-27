@@ -34,6 +34,7 @@ if [[ "$JAXCI_BUILD_PLUGIN" == 1 ]]; then
 fi
 
 # Build the jax-cuda-pjrt artifact
+
 if [[ "$JAXCI_BUILD_PJRT" == 1 ]]; then
   check_if_to_run_in_docker python3 ci/cli/build.py jax-cuda-pjrt --mode=$JAXCI_CLI_BUILD_MODE
 fi
