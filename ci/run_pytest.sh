@@ -29,7 +29,7 @@ if [[ $JAXCI_RUN_PYTEST_GPU == 1 ]]; then
   echo "Running GPU tests..."
   export XLA_PYTHON_CLIENT_ALLOCATOR=platform
   export XLA_FLAGS=--xla_gpu_force_compilation_parallelism=1
-  check_if_to_run_in_docker "$JAXCI_PYTHON" -m pytest -n 8 --tb=short --maxfail=20 \
+  check_if_to_run_in_docker "$JAXCI_PYTHON" -m pytest -n 4 --tb=short --maxfail=20 \
   tests examples \
   --deselect=tests/multi_device_test.py::MultiDeviceTest::test_computation_follows_data \
   --deselect=tests/xmap_test.py::XMapTest::testCollectivePermute2D \
