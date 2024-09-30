@@ -17,7 +17,6 @@
 import asyncio
 import logging
 import os
-import sys
 import time
 
 from get_labels import retrieve_labels
