@@ -38,7 +38,7 @@ jobs:
         uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # ratchet:actions/checkout@v4
         with:
           repository: google-ml-infra/actions
-          ref: polish_ssh_connection_action
+          ref: ssh_graceful_timeout
           path: cool_actions
       - name: Wait For Connection
         uses: ./cool_actions/ci_connection/
