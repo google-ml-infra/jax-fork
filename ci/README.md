@@ -1,4 +1,4 @@
-# JAX continuous integration.
+# JAX continuous integration..
 
 > **Warning** This folder is still under construction. It is part of an ongoing
 > effort to improve the structure of CI and build related files within the
