@@ -9,7 +9,7 @@ jobs:
   build:
     strategy:
       matrix:
-        runner: ["linux-x86-g2-48-l4-4gpu"]
+        runner: ["mike-x86-g2-48-l4-4gpu"]
         python: ["3.10"]
 
     runs-on: ${{ matrix.runner }}
