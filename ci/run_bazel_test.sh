@@ -57,14 +57,14 @@ if [[ $JAXCI_RUN_BAZEL_TEST_GPU_LOCAL == 1 ]]; then
       check_if_to_run_in_docker bazel --bazelrc=ci/.bazelrc test --config=ci_linux_x86_64_cuda \
             --config=non_multiaccelerator_local \
             --repo_env=HERMETIC_PYTHON_VERSION="$JAXCI_HERMETIC_PYTHON_VERSION" \
-            --run_under "${JAXCI_JAX_GIT_DIR}/build/parallel_accelerator_execute.sh" --test_timeout=3000 \
+            --run_under "${JAXCI_JAX_GIT_DIR}/build/parallel_accelerator_execute.sh" \
             //tests:gpu_tests //tests:backend_independent_tests //tests/pallas:gpu_tests //tests/pallas:backend_independent_tests || true
       echo "Finished running non-multiaccelerator tests..."
 
       # Runs multiaccelerator tests with all GPUs.
       check_if_to_run_in_docker bazel --bazelrc=ci/.bazelrc test --config=ci_linux_x86_64_cuda \
             --config=multiaccelerator_local \
-            --repo_env=HERMETIC_PYTHON_VERSION="$JAXCI_HERMETIC_PYTHON_VERSION" --test_timeout=3000 \
+            --repo_env=HERMETIC_PYTHON_VERSION="$JAXCI_HERMETIC_PYTHON_VERSION" \
             //tests:gpu_tests //tests/pallas:gpu_tests || true
       echo "Finished running multiaccelerator tests..."
 fi
