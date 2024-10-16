@@ -1,0 +1,29 @@
+name: Run Bazel GPU tests using RBE
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        runner: ["linux-x86-g2-48-l4-4gpu"]
+
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: "gcr.io/tensorflow-testing/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest"
+
+    env:
+      # Do not run Docker container for Linux runners. Linux runners already run in a Docker container.
+      JAXCI_RUN_DOCKER_CONTAINER: 0
+      JAXCI_HERMETIC_PYTHON_VERSION: 3.12
+
+    steps:
+      - uses: actions/checkout@v3
+      # Halt for testing
+      - name: Wait For Connection
+        uses: ./actions/ci_connection/
+      - name: Run Bazel GPU tests using RBE
+        run: ./ci/run_bazel_test.sh "ci/envs/run_tests/bazel_gpu_rbe"
