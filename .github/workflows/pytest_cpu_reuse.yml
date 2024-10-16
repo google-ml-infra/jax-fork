@@ -7,16 +7,6 @@ on:
 
 jobs:
   build_jaxlib_artifacts:
-    strategy:
-      matrix:
-        runner: ["windows-x86-n2-64", "linux-x86-n2-64", "linux-arm64-t2a-48"]
-        python: ["3.10"]
-        exclude:
-          # Only build the jaxlib artifact.
-          - artifact: "jax"
-          - artifact: "jax-cuda-plugin"
-          - artifact: "jax-cuda-pjrt"
-
     uses: ./.github/workflows/build_artifacts.yml
 
   run_pytest:
@@ -29,6 +19,7 @@ jobs:
     strategy:
       matrix:
         runner: ["windows-x86-n2-64", "linux-x86-n2-64", "linux-arm64-t2a-48"]
+        artifact: "jaxlib"
         python: ["3.10"]
 
     runs-on: ${{ matrix.runner }}
