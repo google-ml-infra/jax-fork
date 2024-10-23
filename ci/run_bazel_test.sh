@@ -22,6 +22,10 @@ if [[ $JAXCI_RUN_BAZEL_TEST_CPU == 1 ]]; then
       os=$(uname -s | awk '{print tolower($0)}')
       arch=$(uname -m)
 
+      if [[ $os ~= "msys" ]]; then
+        os="windows"
+      fi
+
       # If running on Mac or Linux Aarch64, we only build the test targets and
       # not run them. These platforms do not have native RBE support so we
       # cross-compile them on the Linux x86 RBE pool. As the tests still need
