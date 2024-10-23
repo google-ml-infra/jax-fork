@@ -1,0 +1,33 @@
+# Nightly Scale Test for self-hosted runners
+name: Self-hosted Runners Nightly Scale Test
+on:
+  schedule:
+    # Triggers at 6AM UTC, which is 11PM PST.
+    - cron: '0 06 * * *'
+  workflow_dispatch:
+# Cancel any previous iterations if a new commit is pushed.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  nightly-scale-test:
+    name: "Scale Test ${{ matrix.runners }} - ${{ matrix.instances }}"
+    strategy:
+      fail-fast: false # don't cancel all jobs on failure
+      matrix:
+        instances: [1, 2, 3, 4, 5]
+        runners: ["linux-x86-n2-64", "linux-x86-n2-128", "linux-arm64-t2a-48", "linux-x86-g2-96-l4-8gpu", "linux-x86-ct5lp-224-8tpu"]
+    # TODO: Needs final runs-on value
+    runs-on: ${{ matrix.runners }}
+    container:
+      image: ${{ (contains(matrix.runners, 't2a') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/build-arm64:jax-latest-multi-python') || 'index.docker.io/tensorflow/build@sha256:7fb38f0319bda36393cad7f40670aa22352b44421bb906f5cf34d543acd8e1d2' }}
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash -ex {0}
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # ratchet:actions/checkout@v4
+      - name: DEBUG HALT
+        run: |
+          echo "Halting"
+          sleep 5m
