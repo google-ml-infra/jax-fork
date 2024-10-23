@@ -24,6 +24,7 @@ if [[ $JAXCI_RUN_BAZEL_TEST_CPU == 1 ]]; then
 
       if [[ $os =~ "msys" ]]; then
         os="windows"
+        arch="amd64"
       fi
 
       # If running on Mac or Linux Aarch64, we only build the test targets and
