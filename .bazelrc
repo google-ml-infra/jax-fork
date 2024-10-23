@@ -4,10 +4,6 @@
 # Make Bazel print out all options from rc files.
 build --announce_rc
 
-# Required by OpenXLA
-# https://github.com/openxla/xla/issues/1323
-build --nocheck_visibility
-
 # By default, execute all actions locally.
 build --spawn_strategy=local
 
@@ -16,9 +12,6 @@ build --spawn_strategy=local
 build --enable_platform_specific_config
 
 build --experimental_cc_shared_library
-
-# Disable enabled-by-default TensorFlow features that we don't care about.
-build --define=no_gcp_support=true
 
 # Do not use C-Ares when building gRPC.
 build --define=grpc_no_ares=true
@@ -33,12 +26,9 @@ build --output_filter=DONT_MATCH_ANYTHING
 
 build --copt=-DMLIR_PYTHON_PACKAGE_PREFIX=jaxlib.mlir.
 
-build --verbose_failures=true
-
 # #############################################################################
 # Platform Specific configs below. These are automatically picked up by Bazel
-# depending on the platform that is running the build. If you would like to
-# disable this behavior, pass in `--noenable_platform_specific_config`
+# depending on the platform that is running the build.
 # #############################################################################
 build:linux --config=posix
 build:linux --copt=-Wno-unknown-warning-option
@@ -56,7 +46,7 @@ build:macos --apple_platform_type=macos
 build:windows --features=compiler_param_file
 build:windows --features=archive_param_file
 
-# Tensorflow uses M_* math constants that only get defined by MSVC headers if
+# XLA uses M_* math constants that only get defined by MSVC headers if
 # _USE_MATH_DEFINES is defined.
 build:windows --copt=/D_USE_MATH_DEFINES
 build:windows --host_copt=/D_USE_MATH_DEFINES
@@ -81,10 +71,10 @@ build:windows --host_linkopt=/OPT:ICF
 build:windows --incompatible_strict_action_env=true
 
 # #############################################################################
-# Feature-specific configurations. These are used by the Local and CI configs
-# below depending on the type of build. E.g. `local_linux_x86_64` inherits the
-# Linux x86 configs such as `avx_linux` and `mkl_open_source_only`,
-# `local_cuda_base` inherits `cuda` and `build_cuda_with_nvcc`, etc.
+# Feature-specific configurations. These are used by the CI configs below
+# depending on the type of build. E.g. `ci_linux_x86_64` inherits the Linux x86
+# configs such as `avx_linux` and `mkl_open_source_only`, `ci_linux_x86_64_cuda`
+# inherits `cuda` and `build_cuda_with_nvcc`, etc.
 # #############################################################################
 build:nonccl --define=no_nccl_support=true
 
@@ -158,83 +148,41 @@ build:win_clang --extra_toolchains=@local_config_cc//:cc-toolchain-x64_windows-c
 build:win_clang --extra_execution_platforms=//jax/tools/toolchains:x64_windows-clang-cl
 build:win_clang --compiler=clang-cl
 
-# Configs for building ROCM
-build:rocm --crosstool_top=@local_config_rocm//crosstool:toolchain
-build:rocm --define=using_rocm=true --define=using_rocm_hipcc=true
-build:rocm --repo_env TF_NEED_ROCM=1
-build:rocm --action_env TF_ROCM_AMDGPU_TARGETS="gfx900,gfx906,gfx908,gfx90a,gfx1030"
+build:rocm_base --crosstool_top=@local_config_rocm//crosstool:toolchain
+build:rocm_base --define=using_rocm=true --define=using_rocm_hipcc=true
+build:rocm_base --repo_env TF_NEED_ROCM=1
+build:rocm_base --action_env TF_ROCM_AMDGPU_TARGETS="gfx900,gfx906,gfx908,gfx90a,gfx940,gfx941,gfx942,gfx1030,gfx1100"
+
+# Build with hipcc for ROCm and clang for the host.
+build:rocm --config=rocm_base
+build:rocm --action_env=TF_ROCM_CLANG="1"
+build:rocm --action_env=CLANG_COMPILER_PATH="/usr/lib/llvm-18/bin/clang"
+build:rocm --copt=-Wno-gnu-offsetof-extensions
+build:rocm --copt=-Qunused-arguments
+build:rocm --action_env=TF_HIPCC_CLANG="1"
 
 # #############################################################################
 # Cache options below.
 # #############################################################################
-# Public read-only cache for macOS builds. The "oct2023" in the URL is just the
-# date when the bucket was created and can be disregarded. It still contains the
-# latest cache that is being used.
+# Public read-only cache for Mac builds. JAX uses a GCS bucket to store cache
+# from JAX's Mac CI build. By applying --config=macos_cache, any local Mac build
+# should be able to read from this cache and potentially see a speedup. The
+# "oct2023" in the URL is just the date when the bucket was created and can be
+# disregarded. It still contains the latest cache that is being used.
 build:macos_cache --remote_cache="https://storage.googleapis.com/tensorflow-macos-bazel-cache/oct2023" --remote_upload_local_results=false
-# Cache pushes are limited to Jax's CI system.
+
+# Cache pushes are limited to JAX's CI system.
 build:macos_cache_push --config=macos_cache --remote_upload_local_results=true --google_default_credentials
-
-# #############################################################################
-# Local Build config options below. Use these configs to build JAX locally.
-# #############################################################################
-# Set base CUDA configs. These are inherited by the Linux x86 and Linux Aarch64
-# CUDA configs.
-build:local_cuda_base --config=cuda
-
-# JAX uses NVCC to build CUDA targets. If you would like to build CUDA targets
-# with Clang, change this to `--config=build_cuda_with_clang`
-build:local_cuda_base --config=build_cuda_with_nvcc
-
-# Linux x86 Local configs
-build:local_linux_x86_64 --config=avx_linux
-build:local_linux_x86_64 --config=avx_posix
-build:local_linux_x86_64 --config=mkl_open_source_only
-
-build:local_linux_x86_64_cuda --config=local_linux_x86_64
-build:local_linux_x86_64_cuda --config=local_cuda_base
-
-# Linux Aarch64 Local configs
-# No custom config for Linux Aarch64. If building for CPU, run
-# `bazel build|test //path/to:target`. If building for CUDA, run
-# `bazel build|test --config=local_cuda_base //path/to:target`.
-build:local_linux_aarch64_cuda --config=local_cuda_base
-
-# Mac x86 Local configs
-# For Mac x86, we target compatibility with macOS 10.14.
-build:local_darwin_x86_64 --macos_minimum_os=10.14
-# Read-only cache to boost build times.
-build:local_darwin_x86_64 --config=macos_cache
-
-# Mac Arm64 CI configs
-# For Mac Arm64, we target compatibility with macOS 12.
-build:local_darwin_arm64 --macos_minimum_os=12.0
-# Read-only cache to boost build times.
-build:local_darwin_arm64 --config=macos_cache_push
-
-# Windows x86 Local configs
-build:local_windows_amd64 --config=avx_windows
 
 # #############################################################################
 # CI Build config options below.
 # JAX uses these configs in CI builds for building artifacts and when running
 # Bazel tests.
-#
-# These configs are pretty much the same as the local build configs above. The
-# difference is that, in CI, we build with Clang for and pass in a custom
-# non-hermetic toolchain to ensure manylinux compliance for Linux builds and
-# for using RBE on Windows. Because the toolchain is non-hermetic, it requires
-# specific versions of the compiler and other tools to be present on the system
-# in specific locations, which is why the Linux and Windows builds are run in a
-# Docker container.
 # #############################################################################
-
 # Linux x86 CI configs
-# Inherit the local Linux x86 configs.
-build:ci_linux_x86_64 --config=local_linux_x86_64
-
-# CI builds use Clang as the default compiler so we inherit Clang
-# specific configs
-build:ci_linux_x86_64 --config=clang
+build:ci_linux_x86_64 --config=avx_linux --config=avx_posix
+build:ci_linux_x86_64 --config=mkl_open_source_only
+build:ci_linux_x86_64 --config=clang --verbose_failures=true
 
 # TODO(b/356695103): We do not have a CPU only toolchain so we use the CUDA
 # toolchain for both CPU and GPU builds.
@@ -249,45 +197,42 @@ build:ci_linux_x86_64 --action_env=CLANG_CUDA_COMPILER_PATH="/usr/lib/llvm-18/bi
 # The toolchain in `--config=cuda` needs to be read before the toolchain in
 # `--config=ci_linux_x86_64`. Otherwise, we run into issues with manylinux
 # compliance.
-build:ci_linux_x86_64_cuda --config=local_cuda_base
+build:ci_linux_x86_64_cuda --config=cuda --config=build_cuda_with_nvcc
 build:ci_linux_x86_64_cuda --config=ci_linux_x86_64
 
 # Linux Aarch64 CI configs
-build:ci_linux_aarch64_base --config=clang
+build:ci_linux_aarch64_base --config=clang --verbose_failures=true
 build:ci_linux_aarch64_base --action_env=TF_SYSROOT="/dt10"
 
 build:ci_linux_aarch64 --config=ci_linux_aarch64_base
 build:ci_linux_aarch64 --host_crosstool_top="@ml2014_clang_aarch64_config_aarch64//crosstool:toolchain"
 build:ci_linux_aarch64 --crosstool_top="@ml2014_clang_aarch64_config_aarch64//crosstool:toolchain"
 
-# CUDA configs for Linux Aarch64 do not pass in the crosstool top flag from
+# CUDA configs for Linux Aarch64 do not pass in the crosstool_top flag from
 # above because the Aarch64 toolchain rule does not support building with NVCC.
 # Instead, we use `@local_config_cuda//crosstool:toolchain` from --config=cuda
 # and set `CLANG_CUDA_COMPILER_PATH` to define the toolchain so that we can
 # use Clang for the C++ targets and NVCC to build CUDA targets.
 build:ci_linux_aarch64_cuda --config=ci_linux_aarch64_base
-build:ci_linux_aarch64_cuda --config=local_cuda_base
+build:ci_linux_aarch64_cuda --config=cuda --config=build_cuda_with_nvcc
 build:ci_linux_aarch64_cuda --action_env=CLANG_CUDA_COMPILER_PATH="/usr/lib/llvm-18/bin/clang"
 
 # Mac x86 CI configs
-build:ci_darwin_x86_64 --config=local_darwin_x86_64
-# Mac CI builds read and push cache to/from GCS bucket.
+build:ci_darwin_x86_64 --macos_minimum_os=10.14
 build:ci_darwin_x86_64 --config=macos_cache_push
+build:ci_darwin_x86_64 --verbose_failures=true
 
 # Mac Arm64 CI configs
-build:ci_darwin_arm64 --config=local_darwin_arm64
-# CI builds read and push cache to/from GCS bucket.
+build:ci_darwin_arm64 --macos_minimum_os=11.0
 build:ci_darwin_arm64 --config=macos_cache_push
+build:ci_darwin_arm64 --verbose_failures=true
 
 # Windows x86 CI configs
-build:ci_windows_amd64 --config=local_windows_amd64
-build:ci_windows_amd64 --config=clang
-# Set the toolchains
+build:ci_windows_amd64 --config=avx_windows
+build:ci_windows_amd64 --compiler=clang-cl --config=clang --verbose_failures=true
 build:ci_windows_amd64 --crosstool_top="@xla//tools/toolchains/win/20240424:toolchain"
 build:ci_windows_amd64 --extra_toolchains="@xla//tools/toolchains/win/20240424:cc-toolchain-x64_windows-clang-cl"
-build:ci_windows_amd64 --compiler=clang-cl
-build:ci_windows_amd64 --linkopt=/FORCE:MULTIPLE
-build:ci_windows_amd64 --host_linkopt=/FORCE:MULTIPLE
+build:ci_windows_amd64 --host_linkopt=/FORCE:MULTIPLE --linkopt=/FORCE:MULTIPLE
 
 # #############################################################################
 # RBE config options below. These inherit the CI configs above and set the
@@ -333,9 +278,6 @@ build:rbe_linux_x86_64_base --host_platform="@ubuntu20.04-clang_manylinux2014-cu
 build:rbe_linux_x86_64_base --extra_execution_platforms="@ubuntu20.04-clang_manylinux2014-cuda12.3-cudnn9.1_config_platform//:platform"
 build:rbe_linux_x86_64_base --platforms="@ubuntu20.04-clang_manylinux2014-cuda12.3-cudnn9.1_config_platform//:platform"
 
-# Python config is the same across all containers because the binary is the same
-build:rbe_linux_x86_64_base --repo_env=TF_PYTHON_CONFIG_REPO="@ubuntu20.04-clang_manylinux2014-cuda12.3-cudnn9.1_config_python"
-
 build:rbe_linux_x86_64 --config=rbe_linux_x86_64_base
 build:rbe_linux_x86_64 --config=ci_linux_x86_64
 
@@ -365,7 +307,7 @@ build:rbe_windows_amd64 --config=ci_windows_amd64
 
 # #############################################################################
 # Cross-compile config options below. Native RBE support does not exist for
-# Linux Aarch64 and Mac x86. So, we use the cross-compile toolchain to build
+# Linux Aarch64 and Mac x86. So, we use a cross-compile toolchain to build
 # targets for Linux Aarch64 and Mac x86 on the Linux x86 RBE pool.
 # #############################################################################
 # Set execution platform to Linux x86
@@ -414,38 +356,6 @@ build:cross_compile_darwin_x86_64 --platform_mappings=platform_mappings
 # RBE cross-compile configs for Darwin x86
 build:rbe_cross_compile_darwin_x86_64 --config=cross_compile_darwin_x86_64
 build:rbe_cross_compile_darwin_x86_64 --config=rbe_cross_compile_base
-
-# #############################################################################
-# Test specific config options below. These are used when `bazel test` is run.
-# #############################################################################
-test --test_output=errors
-
-# Common configs for for running GPU tests.
-test:gpu --test_env=TF_CPP_MIN_LOG_LEVEL=0 --test_env=XLA_PYTHON_CLIENT_ALLOCATOR=platform
-
-# Non-multiaccelerator tests with one GPU apiece. These tests are run on RBE
-# and locally.
-test:non_multiaccelerator --config=gpu
-test:non_multiaccelerator --test_env=JAX_EXCLUDE_TEST_TARGETS=PmapTest.testSizeOverflow
-test:non_multiaccelerator --test_tag_filters=-multiaccelerator
-
-# Configs for running non-multiaccelerator tests locally
-test:non_multiaccelerator_local --config=non_multiaccelerator
-# Disable building jaxlib. Instead we depend on the local wheel.
-test:non_multiaccelerator_local --//jax:build_jaxlib=false
-
-# `JAX_ACCELERATOR_COUNT` needs to match the number of GPUs in the VM.
-test:non_multiaccelerator_local --test_env=JAX_TESTS_PER_ACCELERATOR=12 --test_env=JAX_ACCELERATOR_COUNT=4
-
-# The product of the `JAX_ACCELERATOR_COUNT`` and `JAX_TESTS_PER_ACCELERATOR`
-# should match the VM's CPU core count (set in `--local_test_jobs`).
-test:non_multiaccelerator_local --local_test_jobs=48
-
-# Multiaccelerator tests with all GPUs. These tests are only run locally
-# Disable building jaxlib. Instead we depend on the local wheel.
-test:multiaccelerator_local --config=gpu
-test:multiaccelerator_local --//jax:build_jaxlib=false
-test:multiaccelerator_local --jobs=8 --test_tag_filters=multiaccelerator
 
 #############################################################################
 # Some configs to make getting some forms of debug builds. In general, the
