@@ -10,11 +10,12 @@ jobs:
     continue-on-error: true
     strategy:
       matrix:
-        runner: ["linux-x86-n2-64", "linux-arm64-t2a-48"]
+        runner: ["windows-x86-n2-64", "linux-x86-n2-64", "linux-arm64-t2a-48"]
 
     runs-on: ${{ matrix.runner }}
     container: ${{ (contains(matrix.runner, 'linux-x86') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/build:670606426-python3.12') ||
-                   (contains(matrix.runner, 'linux-arm64') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/linux-arm64-arc-container:latest') }}
+                   (contains(matrix.runner, 'linux-arm64') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/linux-arm64-arc-container:latest') ||
+                   (contains(matrix.runner, 'windows-x86') && null) }}
 
     env:
       # Disable running `run_docker_container.sh`. JAX self-hosted runners already run in a Docker
