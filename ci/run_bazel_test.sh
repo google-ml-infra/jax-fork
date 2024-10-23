@@ -29,14 +29,14 @@ if [[ $JAXCI_RUN_BAZEL_TEST_CPU == 1 ]]; then
       # machine can take a long time, we skip running them on these platforms.
       if [[ $os == "darwin" ]] || ( [[ $os == "linux" ]] && [[ $arch == "aarch64" ]] ); then
             echo "Building RBE CPU tests..."
-            check_if_to_run_in_docker bazel --bazelrc=ci/.bazelrc build --config=rbe_cross_compile_${os}_${arch} \
+            check_if_to_run_in_docker bazel build --config=rbe_cross_compile_${os}_${arch} \
                   --repo_env=HERMETIC_PYTHON_VERSION="$JAXCI_HERMETIC_PYTHON_VERSION" \
                   --override_repository=xla="${JAXCI_XLA_GIT_DIR}" \
                   --test_env=JAX_NUM_GENERATED_CASES=25 \
                   //tests:cpu_tests //tests:backend_independent_tests
       else
             echo "Running RBE CPU tests..."
-            check_if_to_run_in_docker bazel --bazelrc=ci/.bazelrc test --config=rbe_${os}_${arch} \
+            check_if_to_run_in_docker bazel test --config=rbe_${os}_${arch} \
                   --repo_env=HERMETIC_PYTHON_VERSION="$JAXCI_HERMETIC_PYTHON_VERSION" \
                   --override_repository=xla="${JAXCI_XLA_GIT_DIR}" \
                   --test_env=JAX_NUM_GENERATED_CASES=25 \
@@ -54,7 +54,7 @@ if [[ $JAXCI_RUN_BAZEL_TEST_GPU_LOCAL == 1 ]]; then
       # Only Linux x86 builds run GPU tests
       # Runs non-multiaccelerator tests with one GPU apiece.
       # It appears --run_under needs an absolute path.
-      check_if_to_run_in_docker bazel --bazelrc=ci/.bazelrc test --config=ci_linux_x86_64_cuda \
+      check_if_to_run_in_docker bazel test --config=ci_linux_x86_64_cuda \
             --config=non_multiaccelerator_local \
             --repo_env=HERMETIC_PYTHON_VERSION="$JAXCI_HERMETIC_PYTHON_VERSION" \
             --run_under "${JAXCI_JAX_GIT_DIR}/build/parallel_accelerator_execute.sh" \
@@ -62,7 +62,7 @@ if [[ $JAXCI_RUN_BAZEL_TEST_GPU_LOCAL == 1 ]]; then
       echo "Finished running non-multiaccelerator tests..."
 
       # Runs multiaccelerator tests with all GPUs.
-      check_if_to_run_in_docker bazel --bazelrc=ci/.bazelrc test --config=ci_linux_x86_64_cuda \
+      check_if_to_run_in_docker bazel test --config=ci_linux_x86_64_cuda \
             --config=multiaccelerator_local \
             --repo_env=HERMETIC_PYTHON_VERSION="$JAXCI_HERMETIC_PYTHON_VERSION" \
             //tests:gpu_tests //tests/pallas:gpu_tests
@@ -76,7 +76,7 @@ if [[ $JAXCI_RUN_BAZEL_TEST_GPU_RBE == 1 ]]; then
 
       # Only Linux x86 builds run GPU tests
       # Runs non-multiaccelerator tests with one GPU apiece.
-      check_if_to_run_in_docker bazel --bazelrc=ci/.bazelrc test --config=rbe_linux_x86_64_cuda \
+      check_if_to_run_in_docker bazel test --config=rbe_linux_x86_64_cuda \
             --config=non_multiaccelerator \
             --repo_env=HERMETIC_PYTHON_VERSION="$JAXCI_HERMETIC_PYTHON_VERSION" \
             --override_repository=xla="${JAXCI_XLA_GIT_DIR}" \
