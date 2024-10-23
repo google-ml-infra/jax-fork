@@ -22,7 +22,7 @@ if [[ $JAXCI_RUN_BAZEL_TEST_CPU == 1 ]]; then
       os=$(uname -s | awk '{print tolower($0)}')
       arch=$(uname -m)
 
-      if [[ $os ~= "msys" ]]; then
+      if [[ $os =~ "msys" ]]; then
         os="windows"
       fi
 
