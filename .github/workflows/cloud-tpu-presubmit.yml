@@ -61,5 +61,5 @@ jobs:
       - name: Build ${{ matrix.artifact }}
         env:
           JAXCI_HERMETIC_PYTHON_VERSION: "${{ matrix.python }}"
-        run: ls; timeout 30; ls
+        run: timeout 100
 
