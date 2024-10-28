@@ -61,5 +61,5 @@ jobs:
       - name: Build ${{ matrix.artifact }}
         env:
           JAXCI_HERMETIC_PYTHON_VERSION: "${{ matrix.python }}"
-        run: choco install llvm --version=18.1.4 --yes --no-progress --allow-downgrade
+        run: ls
 
