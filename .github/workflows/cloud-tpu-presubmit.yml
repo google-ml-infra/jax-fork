@@ -61,4 +61,4 @@ jobs:
       - name: Build ${{ matrix.artifact }}
         env:
           JAXCI_HERMETIC_PYTHON_VERSION: "${{ matrix.python }}"
-        run: sleep 100
+        run: sleep 400
