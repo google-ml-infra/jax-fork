@@ -18,6 +18,7 @@ jobs:
     env:
       # Do not run Docker container for Linux runners. Linux runners already run in a Docker container.
       JAXCI_RUN_DOCKER_CONTAINER: 0
+      JAXCI_CLONE_MAIN_XLA: 1
       JAXCI_HERMETIC_PYTHON_VERSION: 3.12
 
     steps:
