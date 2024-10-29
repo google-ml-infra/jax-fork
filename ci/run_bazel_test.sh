@@ -14,18 +14,17 @@
 # limitations under the License.
 # ==============================================================================
 # Source JAXCI environment variables.
-source "ci/utilities/setup_envs.sh" "$1"
+source "ci/utilities/setup_jaxci_envs.sh" "$1"
 # Set up the build environment.
 source "ci/utilities/setup_build_environment.sh"
 
+export JAX_SKIP_SLOW_TESTS=true
+export JAX_ENABLE_X64=0
+
+# Run Bazel CPU tests with RBE.
 if [[ $JAXCI_RUN_BAZEL_TEST_CPU == 1 ]]; then
       os=$(uname -s | awk '{print tolower($0)}')
       arch=$(uname -m)
-
-      if [[ $os =~ "msys" ]]; then
-        os="windows"
-        arch="amd64"
-      fi
 
       # If running on Mac or Linux Aarch64, we only build the test targets and
       # not run them. These platforms do not have native RBE support so we
@@ -34,56 +33,80 @@ if [[ $JAXCI_RUN_BAZEL_TEST_CPU == 1 ]]; then
       # machine can take a long time, we skip running them on these platforms.
       if [[ $os == "darwin" ]] || ( [[ $os == "linux" ]] && [[ $arch == "aarch64" ]] ); then
             echo "Building RBE CPU tests..."
-            check_if_to_run_in_docker bazel build --config=rbe_cross_compile_${os}_${arch} \
+            bazel build --config=rbe_cross_compile_${os}_${arch} \
                   --repo_env=HERMETIC_PYTHON_VERSION="$JAXCI_HERMETIC_PYTHON_VERSION" \
                   --override_repository=xla="${JAXCI_XLA_GIT_DIR}" \
                   --test_env=JAX_NUM_GENERATED_CASES=25 \
+                  --test_output=errors \
                   //tests:cpu_tests //tests:backend_independent_tests
       else
             echo "Running RBE CPU tests..."
-            check_if_to_run_in_docker bazel test --config=rbe_${os}_${arch} \
+            bazel test --config=rbe_${os}_${arch} \
                   --repo_env=HERMETIC_PYTHON_VERSION="$JAXCI_HERMETIC_PYTHON_VERSION" \
                   --override_repository=xla="${JAXCI_XLA_GIT_DIR}" \
                   --test_env=JAX_NUM_GENERATED_CASES=25 \
+                  --test_output=errors \
                   //tests:cpu_tests //tests:backend_independent_tests
       fi
 fi
 
-# Run Bazel GPU tests locally.
-if [[ $JAXCI_RUN_BAZEL_TEST_GPU_LOCAL == 1 ]]; then
-      check_if_to_run_in_docker nvidia-smi
-      echo "Running local GPU tests..."
-
-      #check_if_to_run_in_docker "$JAXCI_PYTHON" -c "import jax; print(jax.default_backend()); print(jax.devices()); print(len(jax.devices()))"
-
-      # Only Linux x86 builds run GPU tests
-      # Runs non-multiaccelerator tests with one GPU apiece.
-      # It appears --run_under needs an absolute path.
-      check_if_to_run_in_docker bazel test --config=ci_linux_x86_64_cuda \
-            --config=non_multiaccelerator_local \
-            --repo_env=HERMETIC_PYTHON_VERSION="$JAXCI_HERMETIC_PYTHON_VERSION" \
-            --run_under "${JAXCI_JAX_GIT_DIR}/build/parallel_accelerator_execute.sh" \
-            //tests:gpu_tests //tests:backend_independent_tests //tests/pallas:gpu_tests //tests/pallas:backend_independent_tests
-      echo "Finished running non-multiaccelerator tests..."
-
-      # Runs multiaccelerator tests with all GPUs.
-      check_if_to_run_in_docker bazel test --config=ci_linux_x86_64_cuda \
-            --config=multiaccelerator_local \
-            --repo_env=HERMETIC_PYTHON_VERSION="$JAXCI_HERMETIC_PYTHON_VERSION" \
-            //tests:gpu_tests //tests/pallas:gpu_tests
-      echo "Finished running multiaccelerator tests..."
-fi
-
 # Run Bazel GPU tests with RBE.
 if [[ $JAXCI_RUN_BAZEL_TEST_GPU_RBE == 1 ]]; then
-      check_if_to_run_in_docker nvidia-smi
+      nvidia-smi
       echo "Running RBE GPU tests..."
 
       # Only Linux x86 builds run GPU tests
       # Runs non-multiaccelerator tests with one GPU apiece.
-      check_if_to_run_in_docker bazel test --config=rbe_linux_x86_64_cuda \
-            --config=non_multiaccelerator \
+      bazel test --config=rbe_linux_x86_64_cuda \
             --repo_env=HERMETIC_PYTHON_VERSION="$JAXCI_HERMETIC_PYTHON_VERSION" \
             --override_repository=xla="${JAXCI_XLA_GIT_DIR}" \
-            //tests:gpu_tests //tests:backend_independent_tests //tests/pallas:gpu_tests //tests/pallas:backend_independent_tests //docs/...
+            --test_env=XLA_PYTHON_CLIENT_ALLOCATOR=platform \
+            --test_output=errors \
+            --test_env=TF_CPP_MIN_LOG_LEVEL=0 \
+            --test_env=JAX_EXCLUDE_TEST_TARGETS=PmapTest.testSizeOverflow \
+            --test_tag_filters=-multiaccelerator \
+            //tests:gpu_tests //tests:backend_independent_tests //tests/pallas:gpu_tests //tests/pallas:backend_independent_tests
+fi
+
+# Run Bazel GPU tests locally.
+if [[ $JAXCI_RUN_BAZEL_TEST_GPU_NON_RBE == 1 ]]; then
+      export NCCL_DEBUG=WARN
+      nvidia-smi
+      echo "Running local GPU tests..."
+
+      # Runs non-multiaccelerator tests with one GPU apiece.
+      # It appears --run_under needs an absolute path.
+      # The product of the `JAX_ACCELERATOR_COUNT`` and `JAX_TESTS_PER_ACCELERATOR`
+      # should match the VM's CPU core count (set in `--local_test_jobs`).
+      # (Below if $1="python3.12" then ${1:6}="3.12")
+      bazel test --config=ci_linux_x86_64_cuda \
+            --repo_env=HERMETIC_PYTHON_VERSION="$JAXCI_HERMETIC_PYTHON_VERSION" \
+            --//jax:build_jaxlib=false \
+            --test_env=XLA_PYTHON_CLIENT_ALLOCATOR=platform \
+            --run_under "$(pwd)/build/parallel_accelerator_execute.sh" \
+            --test_output=errors \
+            --test_env=JAX_SKIP_SLOW_TESTS=1 \
+            --test_env=JAX_ACCELERATOR_COUNT=4 \
+            --test_env=JAX_TESTS_PER_ACCELERATOR=12 \
+            --local_test_jobs=48 \
+            --test_env=JAX_EXCLUDE_TEST_TARGETS=PmapTest.testSizeOverflow \
+            --test_tag_filters=-multiaccelerator \
+            --test_env=TF_CPP_MIN_LOG_LEVEL=0 \
+            //tests:gpu_tests //tests:backend_independent_tests \
+            //tests/pallas:gpu_tests //tests/pallas:backend_independent_tests
+
+
+      # Runs multiaccelerator tests with all GPUs.
+      # (Below if $1="python3.12" then ${1:6}="3.12")
+      bazel test --config=ci_linux_x86_64_cuda \
+            --repo_env=HERMETIC_PYTHON_VERSION="$JAXCI_HERMETIC_PYTHON_VERSION" \
+            --//jax:build_jaxlib=false \
+            --test_env=XLA_PYTHON_CLIENT_ALLOCATOR=platform \
+            --test_output=errors \
+            --jobs=8 \
+            --test_env=JAX_SKIP_SLOW_TESTS=1 \
+            --test_tag_filters=multiaccelerator \
+            --test_env=TF_CPP_MIN_LOG_LEVEL=0 \
+            //tests:gpu_tests \
+            //tests/pallas:gpu_tests 
 fi

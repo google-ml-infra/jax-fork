@@ -13,7 +13,7 @@
 # limitations under the License.
 # ==============================================================================
 # Inherit default JAXCI environment variables.
-source ci/envs/default
+source ci/envs/default.env
 
 # Enable jax-cuda-plugin build
 export JAXCI_BUILD_PLUGIN="1"

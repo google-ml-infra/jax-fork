@@ -1,3 +1,4 @@
+#!/bin/bash
 # Copyright 2024 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,12 +13,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-# Inherit default JAXCI environment variables.
-source ci/envs/default.env
+#
+# Source "JAXCI_" environment variables.
 
-# Build JAX artifact.
-export JAXCI_BUILD_JAX="1"
+# If a JAX CI env file has not been passed, exit.
+if [[ -z "$1" ]]; then
+    echo "ERROR: No JAX CI env file passed."
+    echo "source_jaxci_envs.sh requires that a path to a JAX CI env file to be"
+    echo "passed as an argument when invoking the build scripts."
+    echo "Pass in a corresponding env file from the ci/envs/run_tests"
+    echo "directory to continue."
+    exit 1
+fi
 
-# Note Python version of the container does not matter as `jax` is a pure
-# Python package.
-export JAXCI_DOCKER_IMAGE="us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/build:670606426-python3.12"
+# -e: abort script if one command fails
+# -x: log all commands
+# -o history: record shell history
+# -o allexport: export all functions and variables to be available to subscripts
+set -exu -o history -o allexport
+source "$1"

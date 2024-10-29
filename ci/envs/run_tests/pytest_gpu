@@ -13,7 +13,7 @@
 # limitations under the License.
 # ==============================================================================
 # Inherit default JAXCI environment variables.
-source ci/envs/default
+source ci/envs/default.env
 
 # Enable GPU Pytests
 export JAXCI_RUN_PYTEST_GPU=1

@@ -1,4 +1,4 @@
-name: Run Bazel CPU tests with RBE
+name: Run Bazel CPU tests (RBE)
 
 on:
   pull_request:
@@ -33,4 +33,4 @@ jobs:
       - name: Wait For Connection
         uses: ./actions/ci_connection/
       - name: Run Bazel CPU Tests
-        run: ./ci/run_bazel_test.sh "ci/envs/run_tests/bazel_cpu"
+        run: ./ci/run_bazel_test.sh "ci/envs/run_tests/bazel_cpu.env"

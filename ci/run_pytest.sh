@@ -14,22 +14,22 @@
 # limitations under the License.
 # ==============================================================================
 # Source JAXCI environment variables.
-source "ci/utilities/setup_envs.sh" "$1"
+source "ci/utilities/setup_jaxci_envs.sh" "$1"
 # Set up the build environment.
 source "ci/utilities/setup_build_environment.sh"
 
-check_if_to_run_in_docker "$JAXCI_PYTHON" -c "import jax; print(jax.default_backend()); print(jax.devices()); print(len(jax.devices()))"
+"$JAXCI_PYTHON" -c "import jax; print(jax.default_backend()); print(jax.devices()); print(len(jax.devices()))"
 
 if [[ $JAXCI_RUN_PYTEST_CPU == 1 ]]; then
   echo "Running CPU tests..."
-  check_if_to_run_in_docker "$JAXCI_PYTHON" -m pytest -n auto --tb=short --maxfail=20 tests examples
+  "$JAXCI_PYTHON" -m pytest -n auto --tb=short --maxfail=20 tests examples
 fi
 
 if [[ $JAXCI_RUN_PYTEST_GPU == 1 ]]; then
   echo "Running GPU tests..."
   export XLA_PYTHON_CLIENT_ALLOCATOR=platform
   export XLA_FLAGS=--xla_gpu_force_compilation_parallelism=1
-  check_if_to_run_in_docker "$JAXCI_PYTHON" -m pytest -n 8 --tb=short --maxfail=20 \
+  "$JAXCI_PYTHON" -m pytest -n 8 --tb=short --maxfail=20 \
   tests examples \
   --deselect=tests/multi_device_test.py::MultiDeviceTest::test_computation_follows_data \
   --deselect=tests/xmap_test.py::XMapTest::testCollectivePermute2D \
@@ -42,15 +42,15 @@ if [[ $JAXCI_RUN_PYTEST_TPU == 1 ]]; then
   # Run single-accelerator tests in parallel
   export JAX_ENABLE_TPU_XDIST=true
   
-  check_if_to_run_in_docker "$JAXCI_PYTHON" -c 'import jax; print("libtpu version:",jax.lib.xla_bridge.get_backend().platform_version)'
-  check_if_to_run_in_docker "$JAXCI_PYTHON" -m pytest -n="$JAXCI_TPU_CORES" --tb=short \
+  "$JAXCI_PYTHON" -c 'import jax; print("libtpu version:",jax.lib.xla_bridge.get_backend().platform_version)'
+  "$JAXCI_PYTHON" -m pytest -n="$JAXCI_TPU_CORES" --tb=short \
     --deselect=tests/pallas/tpu_pallas_test.py::PallasCallPrintTest \
     --maxfail=20 -m "not multiaccelerator" tests examples
 
   # Run Pallas printing tests, which need to run with I/O capturing disabled.
   export TPU_STDERR_LOG_LEVEL=0
-  check_if_to_run_in_docker "$JAXCI_PYTHON" -m pytest -s tests/pallas/tpu_pallas_test.py::PallasCallPrintTest
+  "$JAXCI_PYTHON" -m pytest -s tests/pallas/tpu_pallas_test.py::PallasCallPrintTest
 
   # Run multi-accelerator across all chips
-  check_if_to_run_in_docker "$JAXCI_PYTHON" -m pytest --tb=short --maxfail=20 -m "multiaccelerator" tests
+  "$JAXCI_PYTHON" -m pytest --tb=short --maxfail=20 -m "multiaccelerator" tests
 fi

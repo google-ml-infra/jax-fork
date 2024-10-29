@@ -1,4 +1,4 @@
-name: Run Bazel GPU tests using RBE
+name: Run Bazel GPU tests (RBE)
 
 on:
   pull_request:
@@ -26,4 +26,4 @@ jobs:
       - name: Wait For Connection
         uses: ./actions/ci_connection/
       - name: Run Bazel GPU tests using RBE
-        run: ./ci/run_bazel_test.sh "ci/envs/run_tests/bazel_gpu_rbe"
+        run: ./ci/run_bazel_test.sh "ci/envs/run_tests/bazel_gpu_rbe.env"

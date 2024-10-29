@@ -13,7 +13,7 @@
 # limitations under the License.
 # ==============================================================================
 # Inherit default JAXCI environment variables.
-source ci/envs/default
+source ci/envs/default.env
 
 # Enable jaxlib build.
 export JAXCI_BUILD_JAXLIB="1"
@@ -48,13 +48,4 @@ fi
 if [[ $os == "macos" ]]; then
   # Mac builds do not run in Docker.
   export JAXCI_RUN_DOCKER_CONTAINER=0
-fi
-
-# When building artifacts for running tests, we need to disable x64 mode and
-# clone XLA at HEAD.
-if [[ $JAXCI_SETUP_TEST_ENVIRONMENT == 1 ]]; then
-  # Disable x64 mode
-  export JAX_ENABLE_X64=0
-  # Clone XLA at HEAD.
-  export JAXCI_CLONE_MAIN_XLA=1
 fi
