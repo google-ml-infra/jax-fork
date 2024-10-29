@@ -36,12 +36,3 @@ fi
 if [[ $os == "linux" ]] && [[ $arch == "aarch64" ]]; then
   export JAXCI_DOCKER_IMAGE="us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/build-arm64:tf-2-18-multi-python"
 fi
-
-# When building artifacts for running tests, we need to disable x64 mode and
-# clone XLA at HEAD.
-if [[ $JAXCI_SETUP_TEST_ENVIRONMENT == 1 ]]; then
-  # Disable x64 mode
-  export JAX_ENABLE_X64=0
-  # Clone XLA at HEAD.
-  export JAXCI_CLONE_MAIN_XLA=1
-fi
