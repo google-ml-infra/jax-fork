@@ -268,7 +268,6 @@ def parse_and_append_bazel_options(bazel_command: command.CommandBuilder, bazel_
     bazel_command.append(option)
 
 async def main():
-  cwd = os.getcwd()
   parser = argparse.ArgumentParser(
       description=(
           "CLI for building one of the following packages from source: jaxlib, "
