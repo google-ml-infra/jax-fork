@@ -242,7 +242,7 @@ def add_artifact_subcommand_global_arguments(parser: argparse.ArgumentParser):
       "--enable_release_cpu_features",
       action="store_true",
       help="""
-        Eenables CPU features that should be enabled for a release build, which
+        Enables CPU features that should be enabled for a release build, which
         on x86-64 architectures enables AVX.
         """,
   )
