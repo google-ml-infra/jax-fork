@@ -59,4 +59,4 @@ jobs:
       - name: Build ${{ matrix.artifact }}
         env:
           JAXCI_HERMETIC_PYTHON_VERSION: "${{ matrix.python }}"
-        run: ./ci/build_artifacts.sh "ci/envs/build_artifacts/${{ matrix.artifact }}"
+        run: ./ci/build_artifacts.sh "ci/envs/build_artifacts/${{ matrix.artifact }}.env"

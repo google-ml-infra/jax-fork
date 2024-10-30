@@ -34,7 +34,7 @@ jobs:
       - name: Wait For Connection
         uses: ./actions/ci_connection/
       - name: Build jaxlib
-        run: ./ci/build_artifacts.sh "ci/envs/build_artifacts/jaxlib"
+        run: ./ci/build_artifacts.sh "ci/envs/build_artifacts/jaxlib.env"
       - name: Install pytest
         env:
           JAXCI_PYTHON: python${{ matrix.python }}
@@ -44,4 +44,4 @@ jobs:
           JAXCI_PYTHON: python${{ matrix.python }}
         run: $JAXCI_PYTHON -m pip install --upgrade     numpy=="2.0.0" scipy=="1.13.1"     wheel build pytest-xdist absl-py opt-einsum colorama portpicker     matplotlib 'importlib_metadata>=4.6' hypothesis flatbuffers filelock
       - name: Run Pytest CPU tests
-        run: ./ci/run_pytest.sh "ci/envs/run_tests/pytest_cpu"
+        run: ./ci/run_pytest.sh "ci/envs/run_tests/pytest_cpu.env"

@@ -27,7 +27,7 @@ jobs:
       - name: Wait For Connection
         uses: ./actions/ci_connection/
       - name: Build jaxlib
-        run: ./ci/build_artifacts.sh "ci/envs/build_artifacts/jaxlib"
+        run: ./ci/build_artifacts.sh "ci/envs/build_artifacts/jaxlib.env"
       - name: Install pytest
         env:
           JAXCI_PYTHON: python${{ matrix.python }}
@@ -43,4 +43,4 @@ jobs:
           JAXCI_PYTHON: python${{ matrix.python }}
         run: $JAXCI_PYTHON -m pip install --pre libtpu-nightly -f "https://storage.googleapis.com/jax-releases/libtpu_releases.html"
       - name: Run Pytest TPU tests
-        run: ./ci/run_pytest.sh "ci/envs/run_tests/pytest_tpu"
+        run: ./ci/run_pytest.sh "ci/envs/run_tests/pytest_tpu.env"
