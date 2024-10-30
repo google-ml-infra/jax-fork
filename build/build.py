@@ -22,7 +22,6 @@ import logging
 import os
 import platform
 import sys
-import textwrap
 
 from tools import command, utils
 
@@ -66,7 +65,7 @@ def add_python_version_argument(parser: argparse.ArgumentParser):
       type=str,
       choices=["3.10", "3.11", "3.12", "3.13"],
       default=f"{sys.version_info.major}.{sys.version_info.minor}",
-      help="Python version to use",
+      help="Hermetic Python version to use",
   )
 
 
@@ -75,7 +74,7 @@ def add_cuda_version_argument(parser: argparse.ArgumentParser):
       "--cuda_version",
       type=str,
       default="12.3.2",
-      help="CUDA version to use",
+      help="Hermetic CUDA version to use",
   )
 
 
@@ -84,7 +83,7 @@ def add_cudnn_version_argument(parser: argparse.ArgumentParser):
       "--cudnn_version",
       type=str,
       default="9.1.1",
-      help="cuDNN version to use",
+      help="Hermetic cuDNN version to use",
   )
 
 
@@ -92,7 +91,7 @@ def add_disable_nccl_argument(parser: argparse.ArgumentParser):
   parser.add_argument(
       "--disable_nccl",
       action="store_true",
-      help="Whether to disable NCCL for CUDA/ROCM builds.",
+      help="Should NCCL be disabled?",
   )
 
 
@@ -109,10 +108,10 @@ def add_build_cuda_with_clang_argument(parser: argparse.ArgumentParser):
   parser.add_argument(
       "--build_cuda_with_clang",
       action="store_true",
-      help=(
-          "Should we build CUDA code using Clang? The default value "
-          "is to build CUDA with NVCC."
-      ),
+      help="""
+        Should CUDA code be compiled using Clang? The default behavior is to
+        compile CUDA with NVCC.
+        """,
   )
 
 
@@ -147,11 +146,11 @@ def add_requirements_nightly_update_argument(parser: argparse.ArgumentParser):
   parser.add_argument(
       "--nightly_update",
       action="store_true",
-      help=(
-          "If true, updates requirements_lock.txt for a corresponding version"
-          " of Python and will consider dev, nightly and pre-release versions"
-          " of packages."
-      ),
+      help="""
+        If true, updates requirements_lock.txt for a corresponding version of
+        Python and will consider dev, nightly and pre-release versions of
+        packages.
+        """,
   )
 
 
@@ -171,21 +170,20 @@ def add_global_arguments(parser: argparse.ArgumentParser):
       "--bazel_startup_options",
       type=str,
       default="",
-      help=(
-          "Space separated list of additional startup options to pass to Bazel."
-          "E.g. --bazel_startup_options='--nobatch --noclient_debug'"
-      ),
+      help="""
+        Space separated list of additional startup options to pass to Bazel
+        E.g. --bazel_startup_options='--nobatch --noclient_debug'
+        """,
   )
 
   parser.add_argument(
       "--bazel_build_options",
       type=str,
       default="",
-      help=(
-          "Space separated list of additional build options to pass to"
-          " Bazel.E.g. --bazel_build_options='--local_resources=HOST_CPUS"
-          " --nosandbox_debug'"
-      ),
+      help="""
+        Space separated list of additional build options to pass to Bazel
+        E.g. --bazel_build_options='--local_resources=HOST_CPUS --nosandbox_debug'
+        """,
   )
 
   parser.add_argument(
@@ -207,18 +205,18 @@ def add_artifact_subcommand_global_arguments(parser: argparse.ArgumentParser):
       "--ci_mode",
       action="store_true",
       help="""
-          When set, the CLI will assume the build is being run in CI or CI
-          like environment and will use the "ci_" configs in the .bazelrc.
-          """,
+        When set, the CLI will assume the build is being run in CI or CI like
+        environment and will use the "ci_" configs in the .bazelrc.
+        """,
   )
 
   parser.add_argument(
       "--request_rbe",
       action="store_true",
       help="""
-        If set, the build will try to use RBE. Currently, only Linux x86
-        and Windows support RBE. RBE also requires GCP authentication set
-        up to work.
+        If set, the build will try to use RBE. Currently, only Linux x86 and
+        Windows support RBE. RBE also requires GCP authentication set up to
+        work.
         """,
   )
 
@@ -244,15 +242,14 @@ def add_artifact_subcommand_global_arguments(parser: argparse.ArgumentParser):
       "--target_cpu_features",
       choices=["release", "native", "default"],
       default="release",
-      help=(
-          "What CPU features should we target? 'release' enables CPU "
-          "features that should be enabled for a release build, which on "
-          "x86-64 architectures enables AVX. 'native' enables "
-          "-march=native, which generates code targeted to use all "
-          "features of the current machine. 'default' means don't opt-in "
-          "to any architectural features and use whatever the C compiler "
-          "generates by default."
-      ),
+      help="""
+        What CPU features should we target? 'release' enables CPU features that
+        should be enabled for a release build, which on x86-64 architectures
+        enables AVX. 'native' enables -march=native, which generates code
+        targeted to use all features of the current machine. 'default' means
+        don't opt-in to any architectural features and use whatever the C
+        compiler generates by default.
+        """,
   )
 
   parser.add_argument(
@@ -267,9 +264,9 @@ def add_artifact_subcommand_global_arguments(parser: argparse.ArgumentParser):
       type=str,
       default=os.environ.get("JAXCI_XLA_GIT_DIR", ""),
       help="""
-      Path to local XLA repository to use. If not set, Bazel uses the XLA
-      at the pinned version in workspace.bzl.
-      """,
+        Path to local XLA repository to use. If not set, Bazel uses the XLA at
+        the pinned version in workspace.bzl.
+        """,
   )
 
   parser.add_argument(
@@ -282,9 +279,7 @@ def add_artifact_subcommand_global_arguments(parser: argparse.ArgumentParser):
   )
 
 
-def parse_and_append_bazel_options(
-    bazel_command: command.CommandBuilder, bazel_options: str
-):
+def parse_and_append_bazel_options(bazel_command: command.CommandBuilder, bazel_options: str):
   """Parses the bazel options and appends them to the bazel command."""
   for option in bazel_options.split(" "):
     bazel_command.append(option)
@@ -292,11 +287,11 @@ def parse_and_append_bazel_options(
 
 async def main():
   parser = argparse.ArgumentParser(
-      description=(
-          "CLI for building one of the following packages from source: jaxlib, "
-          "jax-cuda-plugin, jax-cuda-pjrt, jax-rocm-plugin, jax-rocm-pjrt."
-          "and for updating the requirements_lock.txt files"
-      ),
+      description=r"""
+        CLI for building one of the following packages from source: jaxlib,
+        jax-cuda-plugin, jax-cuda-pjrt, jax-rocm-plugin, jax-rocm-pjrt and for 
+        updating the requirements_lock.txt files
+        """,
       epilog=EPILOG,
   )
 
