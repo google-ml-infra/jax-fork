@@ -238,16 +238,20 @@ def add_artifact_subcommand_global_arguments(parser: argparse.ArgumentParser):
   )
 
   parser.add_argument(
-      "--target_cpu_features",
-      choices=["release", "native", "default"],
-      default="release",
+      "--enable_release_cpu_features",
+      action="store_true",
       help="""
-        What CPU features should we target? 'release' enables CPU features that
-        should be enabled for a release build, which on x86-64 architectures
-        enables AVX. 'native' enables -march=native, which generates code
-        targeted to use all features of the current machine. 'default' means
-        don't opt-in to any architectural features and use whatever the C
-        compiler generates by default.
+        Eenables CPU features that should be enabled for a release build, which
+        on x86-64 architectures enables AVX.
+        """,
+  )
+
+  parser.add_argument(
+      "--enable_native_cpu_features",
+      action="store_true",
+      help="""
+        Enables -march=native, which generates code targeted to use all features
+        of the current machine.
         """,
   )
 
@@ -443,6 +447,8 @@ async def main():
     logging.debug("Using --config=%s from .bazelrc", bazelrc_config)
     bazel_command.append(f"--config={bazelrc_config}")
   else:
+    # If not running in CI mode, find out the path to the Clang binary and
+    # pass it to Bazel to use as the C++ compiler.
     clang_path = args.clang_path or utils.get_clang_path_or_exit()
     logging.debug("Using Clang as the compiler, clang path: %s", clang_path)
     bazel_command.append(f"--action_env CLANG_COMPILER_PATH={clang_path}")
@@ -450,86 +456,85 @@ async def main():
     bazel_command.append(f"--repo_env BAZEL_COMPILER={clang_path}")
     bazel_command.append("--config=clang")
 
-    if args.target_cpu:
-      logging.debug("Target CPU: %s", args.target_cpu)
-      bazel_command.append(f"--cpu={args.target_cpu}")
-
-    if args.enable_mkl_dnn:
-      logging.debug("Enabling MKL DNN")
-      bazel_command.append("--config=mkl_open_source_only")
-
-    if hasattr(args, "disable_nccl") and args.disable_nccl:
-      logging.debug("Disabling NCCL")
-      bazel_command.append("--config=nonccl")
-
-    if args.target_cpu_features == "release":
-      logging.debug(
-          "Using release cpu features: --config=avx_%s",
-          "windows" if utils.is_windows() else "posix",
-      )
-      if arch == "x86_64":
-        bazel_command.append(
-            "--config=avx_windows"
-            if utils.is_windows()
-            else "--config=avx_posix"
-        )
-    elif args.target_cpu_features == "native":
-      if utils.is_windows():
-        logger.warning(
-            "--target_cpu_features=native is not supported on Windows;"
-            " ignoring."
-        )
-      else:
-        logging.debug("Using native cpu features: --config=native_arch_posix")
-        bazel_command.append("--config=native_arch_posix")
-    else:
-      logging.debug("Using default cpu features")
-
     if "cuda" in args.command:
       bazel_command.append("--config=cuda")
-
-      if args.build_cuda_with_clang:
-        logging.debug("Building CUDA with Clang")
-        bazel_command.append("--config=build_cuda_with_clang")
-        bazel_command.append(
+      bazel_command.append(
             f"--action_env=CLANG_CUDA_COMPILER_PATH={clang_path}"
         )
-      else:
-        logging.debug("Building CUDA with NVCC")
-        bazel_command.append("--config=build_cuda_with_nvcc")
 
-      if args.cuda_version:
-        logging.debug("Hermetic CUDA version: %s", args.cuda_version)
-        bazel_command.append(
-            f"--repo_env=HERMETIC_CUDA_VERSION={args.cuda_version}"
-        )
-      if args.cudnn_version:
-        logging.debug("Hermetic cuDNN version: %s", args.cudnn_version)
-        bazel_command.append(
-            f"--repo_env=HERMETIC_CUDNN_VERSION={args.cudnn_version}"
-        )
-      if args.cuda_compute_capabilities:
-        logging.debug(
-            "Hermetic CUDA compute capabilities: %s",
-            args.cuda_compute_capabilities,
-        )
-        bazel_command.append(
-            "--repo_env"
-            f" HERMETIC_CUDA_COMPUTE_CAPABILITIES={args.cuda_compute_capabilities}"
-        )
+  if args.target_cpu:
+    logging.debug("Target CPU: %s", args.target_cpu)
+    bazel_command.append(f"--cpu={args.target_cpu}")
 
-    if "rocm" in args.command:
-      bazel_command.append("--config=rocm")
-      bazel_command.append("--action_env=CLANG_COMPILER_PATH={clang_path}")
+  if args.enable_mkl_dnn:
+    logging.debug("Enabling MKL DNN")
+    bazel_command.append("--config=mkl_open_source_only")
 
-      if args.rocm_path:
-        logging.debug("ROCm tookit path: %s", args.rocm_path)
-        bazel_command.append(f"--action_env ROCM_PATH='{args.rocm_path}'")
-      if args.rocm_amdgpu_targets:
-        logging.debug("ROCm AMD GPU targets: %s", args.rocm_amdgpu_targets)
-        bazel_command.append(
-            f"--action_env TF_ROCM_AMDGPU_TARGETS={args.rocm_amdgpu_targets}"
-        )
+  if hasattr(args, "disable_nccl") and args.disable_nccl:
+    logging.debug("Disabling NCCL")
+    bazel_command.append("--config=nonccl")
+
+  if args.enable_release_cpu_features:
+    logging.debug(
+        "Using release cpu features: --config=avx_%s",
+        "windows" if utils.is_windows() else "posix",
+    )
+    if arch == "x86_64":
+      bazel_command.append(
+          "--config=avx_windows"
+          if utils.is_windows()
+          else "--config=avx_posix"
+      )
+
+  if args.enable_native_cpu_features:
+    if utils.is_windows():
+      logger.warning(
+          "--target_cpu_features=native is not supported on Windows;"
+          " ignoring."
+      )
+    else:
+      logging.debug("Using native cpu features: --config=native_arch_posix")
+      bazel_command.append("--config=native_arch_posix")
+
+  if "cuda" in args.command:
+    if args.build_cuda_with_clang:
+      logging.debug("Building CUDA with Clang")
+      bazel_command.append("--config=build_cuda_with_clang")
+    else:
+      logging.debug("Building CUDA with NVCC")
+      bazel_command.append("--config=build_cuda_with_nvcc")
+
+    if args.cuda_version:
+      logging.debug("Hermetic CUDA version: %s", args.cuda_version)
+      bazel_command.append(
+          f"--repo_env=HERMETIC_CUDA_VERSION={args.cuda_version}"
+      )
+    if args.cudnn_version:
+      logging.debug("Hermetic cuDNN version: %s", args.cudnn_version)
+      bazel_command.append(
+          f"--repo_env=HERMETIC_CUDNN_VERSION={args.cudnn_version}"
+      )
+    if args.cuda_compute_capabilities:
+      logging.debug(
+          "Hermetic CUDA compute capabilities: %s",
+          args.cuda_compute_capabilities,
+      )
+      bazel_command.append(
+          "--repo_env"
+          f" HERMETIC_CUDA_COMPUTE_CAPABILITIES={args.cuda_compute_capabilities}"
+      )
+
+  if "rocm" in args.command:
+    bazel_command.append("--config=rocm")
+
+    if args.rocm_path:
+      logging.debug("ROCm tookit path: %s", args.rocm_path)
+      bazel_command.append(f"--action_env ROCM_PATH='{args.rocm_path}'")
+    if args.rocm_amdgpu_targets:
+      logging.debug("ROCm AMD GPU targets: %s", args.rocm_amdgpu_targets)
+      bazel_command.append(
+          f"--action_env TF_ROCM_AMDGPU_TARGETS={args.rocm_amdgpu_targets}"
+      )
 
   if args.local_xla_path:
     logging.debug("Local XLA path: %s", args.local_xla_path)
