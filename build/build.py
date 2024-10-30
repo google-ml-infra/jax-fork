@@ -214,9 +214,8 @@ def add_artifact_subcommand_global_arguments(parser: argparse.ArgumentParser):
       "--request_rbe",
       action="store_true",
       help="""
-        If set, the build will try to use RBE. Currently, only Linux x86 and
-        Windows support RBE. RBE also requires GCP authentication set up to
-        work.
+        If set, the build will try to use RBE if it is supported for the
+        platform. Requires --ci_mode to be set.
         """,
   )
 
