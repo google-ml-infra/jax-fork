@@ -22,7 +22,7 @@ export JAX_SKIP_SLOW_TESTS=true
 export JAX_ENABLE_X64=0
 
 # Run Bazel CPU tests with RBE.
-if [[ $JAXCI_RUN_BAZEL_TEST_CPU == 1 ]]; then
+if [[ $JAXCI_RUN_BAZEL_TEST_CPU_RBE == 1 ]]; then
       os=$(uname -s | awk '{print tolower($0)}')
       arch=$(uname -m)
 
