@@ -341,7 +341,7 @@ async def main():
 
   if args.verbose:
     logging.getLogger().setLevel(logging.DEBUG)
-    logger.info("Verbose logging enabled.")
+    logger.info("Verbose logging enabled")
 
   logger.info(
       "Building %s for %s %s...",
@@ -352,7 +352,8 @@ async def main():
 
   bazel_path, bazel_version = utils.get_bazel_path(args.bazel_path)
 
-  logging.debug("Running with Bazel version: %s", bazel_version)
+  logging.debug("Bazel path: %s", bazel_path)
+  logging.debug("Bazel version: %s", bazel_version)
 
   executor = command.SubprocessExecutor()
 
@@ -360,13 +361,13 @@ async def main():
   bazel_command = command.CommandBuilder(bazel_path)
 
   if args.bazel_startup_options:
-    logging.debug("Using additional Bazel startup options: %s", args.bazel_startup_options)
+    logging.debug("Additional Bazel startup options: %s", args.bazel_startup_options)
     parse_and_append_bazel_options(bazel_command, args.bazel_startup_options)
 
   bazel_command.append("run")
 
   if hasattr(args, "python_version"):
-    logging.debug("Setting Hermetic Python version to %s", args.python_version)
+    logging.debug("Hermetic Python version: %s", args.python_version)
     bazel_command.append(f"--repo_env=HERMETIC_PYTHON_VERSION={args.python_version}")
 
   if args.command == "requirements_update":
@@ -399,26 +400,26 @@ async def main():
     bazel_command.append(f"--config={bazelrc_config}")
   else:
     clang_path = args.clang_path or utils.get_clang_path_or_exit()
-    logging.debug("Setting the default compiler to be Clang, clang path: %s", clang_path)
+    logging.debug("Using Clang as the compiler, clang path: %s", clang_path)
     bazel_command.append(f"--action_env CLANG_COMPILER_PATH={clang_path}")
     bazel_command.append(f"--repo_env CC={clang_path}")
     bazel_command.append(f"--repo_env BAZEL_COMPILER={clang_path}")
     bazel_command.append(f"--config=clang")
 
     if args.target_cpu:
-      logging.debug("Setting target CPU to %s", args.target_cpu)
+      logging.debug("Target CPU: %s", args.target_cpu)
       bazel_command.append(f"--cpu={args.target_cpu}")
 
     if args.enable_mkl_dnn:
-      logging.debug("Enabling MKL DNN.")
+      logging.debug("Enabling MKL DNN")
       bazel_command.append("--config=mkl_open_source_only")
 
     if hasattr(args, "disable_nccl") and args.disable_nccl:
-      logging.debug("Disabling NCCL.")
+      logging.debug("Disabling NCCL")
       bazel_command.append("--config=nonccl")
 
     if args.target_cpu_features == "release":
-      logging.debug("Using release cpu features: --config=avx_windows on Windows and --config=avx_posix otherwise")
+      logging.debug("Using release cpu features: --config=avx_%s", "windows" if utils.is_windows() else "posix")
       if arch == "x86_64":
         bazel_command.append("--config=avx_windows" if utils.is_windows() else "--config=avx_posix")
     elif args.target_cpu_features == "native":
@@ -428,7 +429,7 @@ async def main():
         logging.debug("Using native cpu features: --config=native_arch_posix")
         bazel_command.append("--config=native_arch_posix")
     else:
-      logging.debug("Using default cpu features.")
+      logging.debug("Using default cpu features")
     
     if "cuda" in args.command:
       bazel_command.append("--config=cuda")
@@ -442,13 +443,13 @@ async def main():
         bazel_command.append("--config=build_cuda_with_nvcc")
 
       if args.cuda_version:
-        logging.debug("Setting Hermetic CUDA version to %s", args.cuda_version)
+        logging.debug("Hermetic CUDA version: %s", args.cuda_version)
         bazel_command.append(f"--repo_env=HERMETIC_CUDA_VERSION={args.cuda_version}")
       if args.cudnn_version:
-        logging.debug("Setting Hermetic cuDNN version to %s", args.cudnn_version)
+        logging.debug("Hermetic cuDNN version: %s", args.cudnn_version)
         bazel_command.append(f"--repo_env=HERMETIC_CUDNN_VERSION={args.cudnn_version}")
       if args.cuda_compute_capabilities:
-        logging.debug("Setting CUDA compute capabilities to %s", args.cuda_compute_capabilities)
+        logging.debug("Hermetic CUDA compute capabilities: %s", args.cuda_compute_capabilities)
         bazel_command.append(f"--repo_env HERMETIC_CUDA_COMPUTE_CAPABILITIES={args.cuda_compute_capabilities}")
 
     if "rocm" in args.command:
@@ -456,18 +457,18 @@ async def main():
       bazel_command.append("--action_env=CLANG_COMPILER_PATH={clang_path}")
 
       if args.rocm_path:
-        logging.debug("Setting ROCm path to %s", args.rocm_path)
+        logging.debug("ROCm tookit path: %s", args.rocm_path)
         bazel_command.append(f"--action_env ROCM_PATH='{args.rocm_path}'")
       if args.rocm_amdgpu_targets:
-        logging.debug("Setting ROCm AMD GPU targets to %s", args.rocm_amdgpu_targets)
+        logging.debug("ROCm AMD GPU targets: %s", args.rocm_amdgpu_targets)
         bazel_command.append(f"--action_env TF_ROCM_AMDGPU_TARGETS={args.rocm_amdgpu_targets}")
 
   if args.local_xla_path:
-    logging.debug("Setting local XLA path to %s", args.local_xla_path)
+    logging.debug("Local XLA path: %s", args.local_xla_path)
     bazel_command.append(f"--override_repository=xla={args.local_xla_path}")
 
   if args.bazel_build_options:
-    logging.debug("Using additional Bazel build options: %s", args.bazel_build_options)
+    logging.debug("Additional Bazel build options: %s", args.bazel_build_options)
     parse_and_append_bazel_options(bazel_command, args.bazel_build_options)
 
   # Append the build target to the Bazel command.
@@ -482,12 +483,12 @@ async def main():
   if os_name == "windows":
     output_path, target_cpu = utils.adjust_paths_for_windows(output_path, target_cpu)
 
-  logger.debug("Storing artifacts in %s", output_path)
+  logger.debug("Artifacts output directory: %s", output_path)
 
   bazel_command.append("--")
 
   if args.editable:
-    logger.debug("Building an editable build.")
+    logger.debug("Building an editable build")
     output_path = os.path.join(output_path, args.command)
     bazel_command.append("--editable")
 
