@@ -259,7 +259,10 @@ def add_artifact_subcommand_global_arguments(parser: argparse.ArgumentParser):
       "--clang_path",
       type=str,
       default="",
-      help="Path to the Clang binary to use.",
+      help="""
+        Path to the Clang binary to use. Ignored if --ci_mode is set as we use
+        a custom C++ toolchain in that case.
+        """,
   )
 
   parser.add_argument(
