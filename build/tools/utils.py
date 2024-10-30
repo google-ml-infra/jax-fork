@@ -31,21 +31,6 @@ logger = logging.getLogger(__name__)
 def is_windows():
   return sys.platform.startswith("win32")
 
-def shell(cmd):
-  try:
-    logger.info("shell(): %s", cmd)
-    output = subprocess.check_output(cmd)
-  except subprocess.CalledProcessError as e:
-    logger.info("subprocess raised: %s", e)
-    if e.output:
-      print(e.output)
-    raise
-  except Exception as e:
-    logger.info("subprocess raised: %s", e)
-    raise
-  return output.decode("UTF-8").strip()
-
-
 # Bazel
 BAZEL_BASE_URI = "https://github.com/bazelbuild/bazel/releases/download/6.5.0/"
 BazelPackage = collections.namedtuple(
@@ -180,7 +165,7 @@ def get_bazel_path(bazel_path_flag):
 
 def get_bazel_version(bazel_path):
   try:
-    version_output = shell([bazel_path, "--version"])
+    version_output = subprocess.run([bazel_path, "--version"], encoding="utf-8", capture_output=True).stdout.strip()
   except (subprocess.CalledProcessError, OSError):
     return None
   match = re.search(r"bazel *([0-9\\.]+)", version_output)
