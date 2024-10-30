@@ -81,14 +81,6 @@ if [[ $(uname -s) =~ "MSYS_NT" ]]; then
   source <(python3 ./ci/utilities/convert_msys_paths_to_win_paths.py)
 fi
 
-# Set up and and run the Docker container if needed.
-# Jobs running on GitHub actions do not invoke this script. They define the
-# Docker image via the `container` field in the workflow file.
-if [[ "$JAXCI_RUN_DOCKER_CONTAINER" == 1 ]]; then
-  echo "Setting up the Docker container..."
-  source ./ci/utilities/run_docker_container.sh
-fi
-
 # When running Pytests, we need to install the wheels locally.
 if [[ "$JAXCI_INSTALL_WHEELS_LOCALLY" == 1 ]]; then
    echo "Installing wheels locally..."

@@ -18,6 +18,9 @@ source "ci/utilities/setup_jaxci_envs.sh" "$1"
 # Set up the build environment.
 source "ci/utilities/setup_build_environment.sh"
 
+export JAX_SKIP_SLOW_TESTS=true
+export JAX_ENABLE_X64=0
+
 "$JAXCI_PYTHON" -c "import jax; print(jax.default_backend()); print(jax.devices()); print(len(jax.devices()))"
 
 if [[ $JAXCI_RUN_PYTEST_CPU == 1 ]]; then

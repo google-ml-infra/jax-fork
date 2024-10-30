@@ -15,6 +15,7 @@
 # ==============================================================================
 #
 # Set up the Docker container and start it for JAX CI jobs.
+source ci/envs/docker_images.env
 
 # Keep the existing "jax" container if it's already present.
 if ! docker container inspect jax >/dev/null 2>&1 ; then
@@ -79,10 +80,6 @@ if ! docker container inspect jax >/dev/null 2>&1 ; then
   fi
 fi
 
-# Update `check_if_to_run_in_docker` to execute the commands inside the Docker
-# container.
-check_if_to_run_in_docker() { docker exec jax "$@"; }
-
 # Update `JAXCI_OUTPUT_DIR`, `JAXCI_JAX_GIT_DIR` and `JAXCI_XLA_GIT_DIR` with
 # the new Docker path on the host shell environment. This is needed because when
 # running in Docker with `docker exec`, the commands are run on the host shell
@@ -92,4 +89,4 @@ export JAXCI_OUTPUT_DIR=$JAXCI_DOCKER_WORK_DIR/dist
 export JAXCI_JAX_GIT_DIR=$JAXCI_DOCKER_WORK_DIR
 export JAXCI_XLA_GIT_DIR=$JAXCI_DOCKER_WORK_DIR/xla
 
-check_if_to_run_in_docker git config --global --add safe.directory $JAXCI_DOCKER_WORK_DIR
+git config --global --add safe.directory $JAXCI_DOCKER_WORK_DIR
