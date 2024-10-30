@@ -193,7 +193,7 @@ def get_clang_path_or_exit():
     sys.exit(-1)
 
 
-def get_bazelrc_config(os_name: str, arch: str, artifact: str, use_rbe: bool):
+def get_bazelrc_config(os_name: str, arch: str, artifact: str, request_rbe: bool):
   """Returns the bazelrc config for the given architecture and OS.
 
   Used in CI builds to retrieve either the "ci_"/"rbe_" configs from the
@@ -202,9 +202,9 @@ def get_bazelrc_config(os_name: str, arch: str, artifact: str, use_rbe: bool):
 
   bazelrc_config = f"{os_name}_{arch}"
 
-  # If a build is requesting RBE, the CLI will use RBE if the host system supports
-  # it, otherwise it will use the "ci_" (non RBE) config.
-  if use_rbe:
+  # If a build is requesting RBE, the CLI will use RBE if the host system
+  # supports it, otherwise it will use the "ci_" (non RBE) config.
+  if request_rbe:
     if (os_name == "linux" and arch == "x86_64") or (
         os_name == "windows" and arch == "amd64"
     ):

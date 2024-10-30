@@ -213,7 +213,7 @@ def add_artifact_subcommand_global_arguments(parser: argparse.ArgumentParser):
   )
 
   parser.add_argument(
-      "--use_rbe",
+      "--request_rbe",
       action="store_true",
       help="""
         If set, the build will try to use RBE. Currently, only Linux x86
@@ -444,7 +444,7 @@ async def main():
         " this means."
     )
     bazelrc_config = utils.get_bazelrc_config(
-        os_name, arch, args.command, args.use_rbe
+        os_name, arch, args.command, args.request_rbe
     )
     logging.debug("Using --config=%s from .bazelrc", bazelrc_config)
     bazel_command.append(f"--config={bazelrc_config}")
