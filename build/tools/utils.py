@@ -192,6 +192,16 @@ def get_clang_path_or_exit():
     )
     sys.exit(-1)
 
+def get_cuda_major_version():
+  """Extract the CUDA major version from the .bazelrc"""
+  with open(".bazelrc", "r") as f:
+    for line in f:
+      match = re.search(r'HERMETIC_CUDA_VERSION="([^"]+)"', line)
+      if match:
+        cuda_version=match.group(1)
+        return cuda_version.split(".")[0]
+  return None
+
 
 def get_bazelrc_config(os_name: str, arch: str, artifact: str, request_rbe: bool):
   """Returns the bazelrc config for the given architecture and OS.
@@ -202,8 +212,8 @@ def get_bazelrc_config(os_name: str, arch: str, artifact: str, request_rbe: bool
 
   bazelrc_config = f"{os_name}_{arch}"
 
-  # If a build is requesting RBE, the CLI will use RBE if the host system
-  # supports it, otherwise it will use the "ci_" (non RBE) config.
+  # If a build is requesting RBE, the CLI will use RBE if the host system supports
+  # it, otherwise it will use the "ci_" (non RBE) config.
   if request_rbe:
     if (os_name == "linux" and arch == "x86_64") or (
         os_name == "windows" and arch == "amd64"

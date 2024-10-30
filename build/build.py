@@ -73,7 +73,7 @@ def add_cuda_version_argument(parser: argparse.ArgumentParser):
   parser.add_argument(
       "--cuda_version",
       type=str,
-      default="12.3.2",
+      default=None,
       help="Hermetic CUDA version to use",
   )
 
@@ -82,7 +82,7 @@ def add_cudnn_version_argument(parser: argparse.ArgumentParser):
   parser.add_argument(
       "--cudnn_version",
       type=str,
-      default="9.1.1",
+      default=None,
       help="Hermetic cuDNN version to use",
   )
 
@@ -577,7 +577,10 @@ async def main():
 
   if "cuda" in args.command:
     bazel_command.append("--enable-cuda=True")
-    cuda_major_version = args.cuda_version.split(".")[0]
+    if args.cuda_version:
+      cuda_major_version = args.cuda_version.split(".")[0]
+    else:
+      cuda_major_version = utils.get_cuda_major_version()
     bazel_command.append(f"--platform_version={cuda_major_version}")
 
   if "rocm" in args.command:
