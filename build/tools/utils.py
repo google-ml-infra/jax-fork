@@ -165,7 +165,12 @@ def get_bazel_path(bazel_path_flag):
 
 def get_bazel_version(bazel_path):
   try:
-    version_output = subprocess.run([bazel_path, "--version"], encoding="utf-8", capture_output=True).stdout.strip()
+    version_output = subprocess.run(
+        [bazel_path, "--version"],
+        encoding="utf-8",
+        capture_output=True,
+        check=True,
+    ).stdout.strip()
   except (subprocess.CalledProcessError, OSError):
     return None
   match = re.search(r"bazel *([0-9\\.]+)", version_output)
@@ -187,17 +192,12 @@ def get_clang_path_or_exit():
     )
     sys.exit(-1)
 
-def get_githash():
-  try:
-    return subprocess.run(
-        ["git", "rev-parse", "HEAD"], encoding="utf-8", capture_output=True
-    ).stdout.strip()
-  except OSError:
-    return ""
 
 def get_bazelrc_config(os_name: str, arch: str, artifact: str, use_rbe: bool):
   """Returns the bazelrc config for the given architecture and OS.
-  Used in CI builds to retrive either the "ci_"/"rbe_" configs from the .bazelrc
+
+  Used in CI builds to retrieve either the "ci_"/"rbe_" configs from the
+  .bazelrc
   """
 
   bazelrc_config = f"{os_name}_{arch}"
@@ -205,11 +205,19 @@ def get_bazelrc_config(os_name: str, arch: str, artifact: str, use_rbe: bool):
   # If a build is requesting RBE, the CLI will use RBE if the host system supports
   # it, otherwise it will use the "ci_" (non RBE) config.
   if use_rbe:
-    if (os_name == "linux" and arch == "x86_64") \
-      or (os_name == "windows" and arch == "amd64"):
+    if (os_name == "linux" and arch == "x86_64") or (
+        os_name == "windows" and arch == "amd64"
+    ):
       bazelrc_config = "rbe_" + bazelrc_config
     else:
-      logger.warning("RBE is not supported on %s_%s. Using the non RBE, ci_%s_%s, config instead.", os_name, arch)
+      logger.warning(
+          "RBE is not supported on %s_%s. Using the non RBE, ci_%s_%s, config"
+          " instead.",
+          os_name,
+          arch,
+          os_name,
+          arch,
+      )
       bazelrc_config = "ci_" + bazelrc_config
   else:
     bazelrc_config = "ci_" + bazelrc_config
@@ -221,6 +229,7 @@ def get_bazelrc_config(os_name: str, arch: str, artifact: str, use_rbe: bool):
 
   return bazelrc_config
 
+
 def adjust_paths_for_windows(output_dir: str, arch: str) -> tuple[str, str]:
   """Adjusts the paths to be compatible with Windows."""
   logger.debug("Adjusting paths for Windows...")
@@ -231,3 +240,15 @@ def adjust_paths_for_windows(output_dir: str, arch: str) -> tuple[str, str]:
   arch = arch.upper()
 
   return (output_dir, arch)
+
+
+def get_githash():
+  try:
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        encoding="utf-8",
+        capture_output=True,
+        check=True,
+    ).stdout.strip()
+  except OSError:
+    return ""
