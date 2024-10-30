@@ -72,7 +72,7 @@ def add_cuda_version_argument(parser: argparse.ArgumentParser):
   parser.add_argument(
       "--cuda_version",
       type=str,
-      default="",
+      default="12.3.2",
       help="CUDA version to use",
   )
 
@@ -80,7 +80,7 @@ def add_cudnn_version_argument(parser: argparse.ArgumentParser):
   parser.add_argument(
       "--cudnn_version",
       type=str,
-      default="",
+      default="9.1.1",
       help="cuDNN version to use",
   )
 
@@ -365,10 +365,11 @@ async def main():
 
   bazel_command.append("run")
 
-  if args.command == "requirements_update":
+  if hasattr(args, "python_version"):
     logging.debug("Setting Hermetic Python version to %s", args.python_version)
     bazel_command.append(f"--repo_env=HERMETIC_PYTHON_VERSION={args.python_version}")
 
+  if args.command == "requirements_update":
     if args.bazel_build_options:
       logging.debug("Using additional build options: %s", args.bazel_build_options)
       parse_and_append_bazel_options(bazel_command, args.bazel_build_options)
@@ -465,10 +466,6 @@ async def main():
     logging.debug("Setting local XLA path to %s", args.local_xla_path)
     bazel_command.append(f"--override_repository=xla={args.local_xla_path}")
 
-  if hasattr(args, "python_version"):
-    logging.debug("Setting Hermetic Python version to %s", args.python_version)
-    bazel_command.append(f"--repo_env=HERMETIC_PYTHON_VERSION={args.python_version}")
-
   if args.bazel_build_options:
     logging.debug("Using additional Bazel build options: %s", args.bazel_build_options)
     parse_and_append_bazel_options(bazel_command, args.bazel_build_options)
@@ -499,8 +496,8 @@ async def main():
 
   if "cuda" in args.command:
     bazel_command.append("--enable-cuda=True")
-    major_cuda_version = args.cuda_version.split(".")[0]
-    bazel_command.append(f"--platform_version={major_cuda_version}")
+    cuda_major_version = args.cuda_version.split(".")[0]
+    bazel_command.append(f"--platform_version={cuda_major_version}")
 
   if "rocm" in args.command:
     bazel_command.append("--enable-rocm=True")
