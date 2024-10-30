@@ -110,7 +110,8 @@ def add_build_cuda_with_clang_argument(parser: argparse.ArgumentParser):
       action="store_true",
       help="""
         Should CUDA code be compiled using Clang? The default behavior is to
-        compile CUDA with NVCC.
+        compile CUDA with NVCC. Ignored if --ci_mode is set, we always build
+        CUDA with NVCC in CI builds.
         """,
   )
 
@@ -439,6 +440,11 @@ async def main():
       wheel_cpus[args.target_cpu] if args.target_cpu is not None else arch
   )
 
+  # If running in CI mode, we use the "ci_"/"rbe_" configs in the .bazelrc.
+  # These set a custom C++ Clang toolchain and the CUDA compiler to NVCC
+  # When not running in CI mode, we detec the path to Clang binary and pass it
+  # to Bazel to use as the C++ compiler. NVCC is used as the CUDA compiler
+  # unless the user explicitly sets --config=build_cuda_with_clang.
   if args.ci_mode:
     logging.debug(
         "Running in CI mode. Run the CLI with --help for more details on what"
@@ -450,8 +456,6 @@ async def main():
     logging.debug("Using --config=%s from .bazelrc", bazelrc_config)
     bazel_command.append(f"--config={bazelrc_config}")
   else:
-    # If not running in CI mode, find out the path to the Clang binary and
-    # pass it to Bazel to use as the C++ compiler.
     clang_path = args.clang_path or utils.get_clang_path_or_exit()
     logging.debug("Using Clang as the compiler, clang path: %s", clang_path)
     bazel_command.append(f"--action_env CLANG_COMPILER_PATH={clang_path}")
@@ -464,6 +468,12 @@ async def main():
       bazel_command.append(
             f"--action_env=CLANG_CUDA_COMPILER_PATH={clang_path}"
         )
+      if args.build_cuda_with_clang:
+        logging.debug("Building CUDA with Clang")
+        bazel_command.append("--config=build_cuda_with_clang")
+      else:
+        logging.debug("Building CUDA with NVCC")
+        bazel_command.append("--config=build_cuda_with_nvcc")
 
   if args.target_cpu:
     logging.debug("Target CPU: %s", args.target_cpu)
@@ -500,13 +510,6 @@ async def main():
       bazel_command.append("--config=native_arch_posix")
 
   if "cuda" in args.command:
-    if args.build_cuda_with_clang:
-      logging.debug("Building CUDA with Clang")
-      bazel_command.append("--config=build_cuda_with_clang")
-    else:
-      logging.debug("Building CUDA with NVCC")
-      bazel_command.append("--config=build_cuda_with_nvcc")
-
     if args.cuda_version:
       logging.debug("Hermetic CUDA version: %s", args.cuda_version)
       bazel_command.append(
