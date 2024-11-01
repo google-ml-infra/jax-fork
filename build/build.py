@@ -262,7 +262,7 @@ def add_artifact_subcommand_global_arguments(parser: argparse.ArgumentParser):
       default="",
       help="""
         Path to the Clang binary to use. Ignored if --ci_mode is set as we use
-        a custom C++ toolchain in that case.
+        a custom Clang toolchain in that case.
         """,
   )
 
@@ -296,7 +296,7 @@ async def main():
   parser = argparse.ArgumentParser(
       description=r"""
         CLI for building one of the following packages from source: jaxlib,
-        jax-cuda-plugin, jax-cuda-pjrt, jax-rocm-plugin, jax-rocm-pjrt and for 
+        jax-cuda-plugin, jax-cuda-pjrt, jax-rocm-plugin, jax-rocm-pjrt and for
         updating the requirements_lock.txt files
         """,
       epilog=EPILOG,
@@ -442,7 +442,7 @@ async def main():
 
   # If running in CI mode, we use the "ci_"/"rbe_" configs in the .bazelrc.
   # These set a custom C++ Clang toolchain and the CUDA compiler to NVCC
-  # When not running in CI mode, we detec the path to Clang binary and pass it
+  # When not running in CI mode, we detect the path to Clang binary and pass it
   # to Bazel to use as the C++ compiler. NVCC is used as the CUDA compiler
   # unless the user explicitly sets --config=build_cuda_with_clang.
   if args.ci_mode:
