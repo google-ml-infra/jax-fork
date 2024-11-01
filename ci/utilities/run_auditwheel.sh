@@ -28,7 +28,7 @@ fi
 for wheel in $WHEELS; do
     printf "\nRunning auditwheel on the following wheel:"
     ls $wheel
-    OUTPUT_FULL=$(python3 -m auditwheel show $wheel)
+    OUTPUT_FULL=$(python -m auditwheel show $wheel)
     # Remove the wheel name from the output to avoid false positives.
     wheel_name=$(basename $wheel)
     OUTPUT=${OUTPUT_FULL//${wheel_name}/}

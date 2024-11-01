@@ -20,22 +20,22 @@ source "ci/utilities/setup_build_environment.sh"
 
 # Build the jax artifact
 if [[ "$JAXCI_BUILD_JAX" == 1 ]]; then
-  python3 -m build --outdir $JAXCI_OUTPUT_DIR
+  python -m build --outdir $JAXCI_OUTPUT_DIR
 fi
 
 # Build the jaxlib CPU artifact
 if [[ "$JAXCI_BUILD_JAXLIB" == 1 ]]; then
-  python3 build/build.py jaxlib --ci_mode --request_rbe --python_version=$JAXCI_HERMETIC_PYTHON_VERSION --verbose
+  python build/build.py jaxlib --ci_mode --request_rbe --python_version=$JAXCI_HERMETIC_PYTHON_VERSION --verbose
 fi
 
 # Build the jax-cuda-plugin artifact
 if [[ "$JAXCI_BUILD_PLUGIN" == 1 ]]; then
-  python3 build/build.py jax-cuda-plugin --ci_mode --request_rbe --python_version=$JAXCI_HERMETIC_PYTHON_VERSION --verbose
+  python build/build.py jax-cuda-plugin --ci_mode --request_rbe --python_version=$JAXCI_HERMETIC_PYTHON_VERSION --verbose
 fi
 
 # Build the jax-cuda-pjrt artifact
 if [[ "$JAXCI_BUILD_PJRT" == 1 ]]; then
-  python3 build/build.py jax-cuda-pjrt --ci_mode --request_rbe --verbose
+  python build/build.py jax-cuda-pjrt --ci_mode --request_rbe --verbose
 fi
 
 # After building `jaxlib`, `jaxcuda-plugin`, and `jax-cuda-pjrt`, we run
