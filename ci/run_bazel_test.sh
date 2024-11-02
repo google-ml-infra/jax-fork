@@ -68,13 +68,13 @@ if [[ $JAXCI_RUN_BAZEL_TEST_GPU_RBE == 1 ]]; then
             //tests:gpu_tests //tests:backend_independent_tests //tests/pallas:gpu_tests //tests/pallas:backend_independent_tests
 fi
 
-# Run Bazel GPU tests locally.
+# Run Non-RBE Bazel GPU tests (single accelerator and multiaccelerator tetsts).
 if [[ $JAXCI_RUN_BAZEL_TEST_GPU_NON_RBE == 1 ]]; then
       export NCCL_DEBUG=WARN
       nvidia-smi
-      echo "Running local GPU tests..."
+      echo "Running (non-RBE) GPU tests..."
 
-      # Runs non-multiaccelerator tests with one GPU apiece.
+      # Runs single accelerator tests with one GPU apiece.
       # It appears --run_under needs an absolute path.
       # The product of the `JAX_ACCELERATOR_COUNT`` and `JAX_TESTS_PER_ACCELERATOR`
       # should match the VM's CPU core count (set in `--local_test_jobs`).

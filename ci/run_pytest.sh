@@ -29,6 +29,10 @@ if [[ $JAXCI_RUN_PYTEST_CPU == 1 ]]; then
 fi
 
 if [[ $JAXCI_RUN_PYTEST_GPU == 1 ]]; then
+  nvidia-smi
+  export NCCL_DEBUG=WARN
+  export TF_CPP_MIN_LOG_LEVEL=0
+
   echo "Running GPU tests..."
   export XLA_PYTHON_CLIENT_ALLOCATOR=platform
   export XLA_FLAGS=--xla_gpu_force_compilation_parallelism=1
@@ -41,11 +45,17 @@ if [[ $JAXCI_RUN_PYTEST_GPU == 1 ]]; then
 fi
 
 if [[ $JAXCI_RUN_PYTEST_TPU == 1 ]]; then
+
+  "$JAXCI_PYTHON" -c 'import sys; print("python version:", sys.version)'
+  "$JAXCI_PYTHON" -c 'import jax; print("jax version:", jax.__version__)'
+  "$JAXCI_PYTHON" -c 'import jaxlib; print("jaxlib version:", jaxlib.__version__)'
+  strings $HOME/.local/lib/"$JAXCI_PYTHON"/site-packages/libtpu/libtpu.so | grep 'Built on'
+  "$JAXCI_PYTHON" -c 'import jax; print("libtpu version:",jax.lib.xla_bridge.get_backend().platform_version)'
+
   echo "Running TPU tests..."
   # Run single-accelerator tests in parallel
   export JAX_ENABLE_TPU_XDIST=true
   
-  "$JAXCI_PYTHON" -c 'import jax; print("libtpu version:",jax.lib.xla_bridge.get_backend().platform_version)'
   "$JAXCI_PYTHON" -m pytest -n="$JAXCI_TPU_CORES" --tb=short \
     --deselect=tests/pallas/tpu_pallas_test.py::PallasCallPrintTest \
     --maxfail=20 -m "not multiaccelerator" tests examples
