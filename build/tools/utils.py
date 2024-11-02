@@ -203,7 +203,7 @@ def get_cuda_major_version():
   return None
 
 
-def get_bazelrc_config(os_name: str, arch: str, artifact: str, request_rbe: bool):
+def get_ci_bazelrc_config(os_name: str, arch: str, artifact: str):
   """Returns the bazelrc config for the given architecture and OS.
 
   Used in CI builds to retrieve either the "ci_"/"rbe_" configs from the
@@ -212,23 +212,13 @@ def get_bazelrc_config(os_name: str, arch: str, artifact: str, request_rbe: bool
 
   bazelrc_config = f"{os_name}_{arch}"
 
-  # If a build is requesting RBE, the CLI will use RBE if the host system supports
-  # it, otherwise it will use the "ci_" (non RBE) config.
-  if request_rbe:
-    if (os_name == "linux" and arch == "x86_64") or (
-        os_name == "windows" and arch == "amd64"
-    ):
-      bazelrc_config = "rbe_" + bazelrc_config
-    else:
-      logger.warning(
-          "RBE is not supported on %s_%s. Using the non RBE, ci_%s_%s, config"
-          " instead.",
-          os_name,
-          arch,
-          os_name,
-          arch,
-      )
-      bazelrc_config = "ci_" + bazelrc_config
+  # If building on Linux x86 or Windows, use the "rbe_" flags otherwise use
+  # the "ci_" (non-rbe) flags
+  if (os_name == "linux" and arch == "x86_64") or (
+      os_name == "windows" and arch == "amd64"
+  ):
+    
+    bazelrc_config = "rbe_" + bazelrc_config
   else:
     bazelrc_config = "ci_" + bazelrc_config
 

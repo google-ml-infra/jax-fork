@@ -110,7 +110,7 @@ def add_build_cuda_with_clang_argument(parser: argparse.ArgumentParser):
       action="store_true",
       help="""
         Should CUDA code be compiled using Clang? The default behavior is to
-        compile CUDA with NVCC. Ignored if --ci_mode is set, we always build
+        compile CUDA with NVCC. Ignored if --use_ci_bazelrc_flags is set, we always build
         CUDA with NVCC in CI builds.
         """,
   )
@@ -203,20 +203,11 @@ def add_global_arguments(parser: argparse.ArgumentParser):
 def add_artifact_subcommand_global_arguments(parser: argparse.ArgumentParser):
   """Adds all the global arguments that applies to the artifact subcommands."""
   parser.add_argument(
-      "--ci_mode",
+      "--use_ci_bazelrc_flags",
       action="store_true",
       help="""
         When set, the CLI will assume the build is being run in CI or CI like
-        environment and will use the "ci_" configs in the .bazelrc.
-        """,
-  )
-
-  parser.add_argument(
-      "--request_rbe",
-      action="store_true",
-      help="""
-        If set, the build will try to use RBE if it is supported for the
-        platform. Requires --ci_mode to be set.
+        environment and will use the "rbe_/ci_" configs in the .bazelrc.
         """,
   )
 
@@ -261,7 +252,7 @@ def add_artifact_subcommand_global_arguments(parser: argparse.ArgumentParser):
       type=str,
       default="",
       help="""
-        Path to the Clang binary to use. Ignored if --ci_mode is set as we use
+        Path to the Clang binary to use. Ignored if --use_ci_bazelrc_flags is set as we use
         a custom Clang toolchain in that case.
         """,
   )
@@ -440,16 +431,12 @@ async def main():
       wheel_cpus[args.target_cpu] if args.target_cpu is not None else arch
   )
 
-  # If running in CI mode, we use the "ci_"/"rbe_" configs in the .bazelrc.
+  # If running in CI, we use the "ci_"/"rbe_" configs in the .bazelrc.
   # These set a custom C++ Clang toolchain and the CUDA compiler to NVCC
-  # When not running in CI mode, we detect the path to Clang binary and pass it
+  # When not running in CI, we detect the path to Clang binary and pass it
   # to Bazel to use as the C++ compiler. NVCC is used as the CUDA compiler
   # unless the user explicitly sets --config=build_cuda_with_clang.
-  if args.ci_mode:
-    logging.debug(
-        "Running in CI mode. Run the CLI with --help for more details on what"
-        " this means."
-    )
+  if args.use_ci_bazelrc_flags:
     bazelrc_config = utils.get_bazelrc_config(
         os_name, arch, args.command, args.request_rbe
     )
