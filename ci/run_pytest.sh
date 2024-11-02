@@ -49,7 +49,7 @@ if [[ $JAXCI_RUN_PYTEST_TPU == 1 ]]; then
   "$JAXCI_PYTHON" -c 'import sys; print("python version:", sys.version)'
   "$JAXCI_PYTHON" -c 'import jax; print("jax version:", jax.__version__)'
   "$JAXCI_PYTHON" -c 'import jaxlib; print("jaxlib version:", jaxlib.__version__)'
-  strings $HOME/.local/lib/"$JAXCI_PYTHON"/site-packages/libtpu/libtpu.so | grep 'Built on'
+  strings /usr/local/lib/"$JAXCI_PYTHON"/site-packages/libtpu/libtpu.so | grep 'Built on'
   "$JAXCI_PYTHON" -c 'import jax; print("libtpu version:",jax.lib.xla_bridge.get_backend().platform_version)'
 
   echo "Running TPU tests..."
