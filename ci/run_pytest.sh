@@ -18,12 +18,13 @@ source "ci/utilities/setup_jaxci_envs.sh" "$1"
 # Set up the build environment.
 source "ci/utilities/setup_build_environment.sh"
 
+export PY_COLORS=1
 export JAX_SKIP_SLOW_TESTS=true
-export JAX_ENABLE_X64=0
 
 "$JAXCI_PYTHON" -c "import jax; print(jax.default_backend()); print(jax.devices()); print(len(jax.devices()))"
 
 if [[ $JAXCI_RUN_PYTEST_CPU == 1 ]]; then
+  export TF_CPP_MIN_LOG_LEVEL=0
   echo "Running CPU tests..."
   "$JAXCI_PYTHON" -m pytest -n auto --tb=short --maxfail=20 tests examples
 fi
@@ -32,6 +33,7 @@ if [[ $JAXCI_RUN_PYTEST_GPU == 1 ]]; then
   nvidia-smi
   export NCCL_DEBUG=WARN
   export TF_CPP_MIN_LOG_LEVEL=0
+  export JAX_ENABLE_X64=0
 
   echo "Running GPU tests..."
   export XLA_PYTHON_CLIENT_ALLOCATOR=platform
@@ -53,6 +55,7 @@ if [[ $JAXCI_RUN_PYTEST_TPU == 1 ]]; then
   "$JAXCI_PYTHON" -c 'import jax; print("libtpu version:",jax.lib.xla_bridge.get_backend().platform_version)'
 
   echo "Running TPU tests..."
+  export JAX_PLATFORMS=tpu,cpu
   # Run single-accelerator tests in parallel
   export JAX_ENABLE_TPU_XDIST=true
   

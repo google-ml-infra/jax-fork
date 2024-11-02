@@ -44,6 +44,4 @@ jobs:
         run: $JAXCI_PYTHON -m pip install --pre libtpu-nightly -f "https://storage.googleapis.com/jax-releases/libtpu_releases.html"
       - name: Run Pytest TPU tests
         env:
-          JAX_PLATFORMS: tpu,cpu
-          PY_COLORS: 1
         run: ./ci/run_pytest.sh "ci/envs/run_tests/pytest_tpu.env"
