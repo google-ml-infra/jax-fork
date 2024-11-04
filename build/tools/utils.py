@@ -192,6 +192,7 @@ def get_clang_path_or_exit():
     )
     sys.exit(-1)
 
+
 def get_cuda_major_version():
   """Extract the CUDA major version from the .bazelrc"""
   with open(".bazelrc", "r") as f:
@@ -217,7 +218,6 @@ def get_ci_bazelrc_config(os_name: str, arch: str, artifact: str):
   if (os_name == "linux" and arch == "x86_64") or (
       os_name == "windows" and arch == "amd64"
   ):
-    
     bazelrc_config = "rbe_" + bazelrc_config
   else:
     bazelrc_config = "ci_" + bazelrc_config
