@@ -437,9 +437,7 @@ async def main():
   # to Bazel to use as the C++ compiler. NVCC is used as the CUDA compiler
   # unless the user explicitly sets --config=build_cuda_with_clang.
   if args.use_ci_bazelrc_flags:
-    bazelrc_config = utils.get_bazelrc_config(
-        os_name, arch, args.command, args.request_rbe
-    )
+    bazelrc_config = utils.get_ci_bazelrc_config(os_name, arch, args.command)
     logging.debug("Using --config=%s from .bazelrc", bazelrc_config)
     bazel_command.append(f"--config={bazelrc_config}")
   else:
@@ -477,17 +475,17 @@ async def main():
   if args.enable_release_cpu_features:
     logging.debug(
         "Using release cpu features: --config=avx_%s",
-        "windows" if utils.is_windows() else "posix",
+        "windows" if os_name == "windows" else "posix",
     )
     if arch == "x86_64":
       bazel_command.append(
           "--config=avx_windows"
-          if utils.is_windows()
+          if os_name == "windows"
           else "--config=avx_posix"
       )
 
   if args.enable_native_cpu_features:
-    if utils.is_windows():
+    if os_name == "windows":
       logger.warning(
           "--target_cpu_features=native is not supported on Windows;"
           " ignoring."

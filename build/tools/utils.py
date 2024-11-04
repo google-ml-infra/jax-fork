@@ -28,9 +28,6 @@ import urllib.request
 
 logger = logging.getLogger(__name__)
 
-def is_windows():
-  return sys.platform.startswith("win32")
-
 # Bazel
 BAZEL_BASE_URI = "https://github.com/bazelbuild/bazel/releases/download/6.5.0/"
 BazelPackage = collections.namedtuple(
