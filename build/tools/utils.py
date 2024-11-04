@@ -28,6 +28,9 @@ import urllib.request
 
 logger = logging.getLogger(__name__)
 
+def is_windows():
+  return sys.platform.startswith("win32")
+
 # Bazel
 BAZEL_BASE_URI = "https://github.com/bazelbuild/bazel/releases/download/6.5.0/"
 BazelPackage = collections.namedtuple(
@@ -227,16 +230,11 @@ def get_ci_bazelrc_config(os_name: str, arch: str, artifact: str):
   return bazelrc_config
 
 
-def adjust_paths_for_windows(output_dir: str, arch: str) -> tuple[str, str]:
+def adjust_paths_for_windows(output_dir: str) -> tuple[str, str]:
   """Adjusts the paths to be compatible with Windows."""
   logger.debug("Adjusting paths for Windows...")
   output_dir = output_dir.replace("/", "\\")
-
-  # Change to upper case to match the case in
-  # "jax/tools/build_utils.py" for Windows.
-  arch = arch.upper()
-
-  return (output_dir, arch)
+  return output_dir
 
 
 def get_githash():

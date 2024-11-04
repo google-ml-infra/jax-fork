@@ -110,8 +110,8 @@ def add_build_cuda_with_clang_argument(parser: argparse.ArgumentParser):
       action="store_true",
       help="""
         Should CUDA code be compiled using Clang? The default behavior is to
-        compile CUDA with NVCC. Ignored if --use_ci_bazelrc_flags is set, we always build
-        CUDA with NVCC in CI builds.
+        compile CUDA with NVCC. Ignored if --use_ci_bazelrc_flags is set, we
+        always build CUDA with NVCC in CI builds.
         """,
   )
 
@@ -252,8 +252,8 @@ def add_artifact_subcommand_global_arguments(parser: argparse.ArgumentParser):
       type=str,
       default="",
       help="""
-        Path to the Clang binary to use. Ignored if --use_ci_bazelrc_flags is set as we use
-        a custom Clang toolchain in that case.
+        Path to the Clang binary to use. Ignored if --use_ci_bazelrc_flags is
+        set as we use a custom Clang toolchain in that case.
         """,
   )
 
@@ -360,7 +360,9 @@ async def main():
   add_artifact_subcommand_global_arguments(rocm_pjrt_parser)
   add_global_arguments(rocm_pjrt_parser)
 
-  arch = platform.machine().lower()
+  arch = platform.machine()
+  # Switch to lower case to match the case for the "ci_"/"rbe_" configs in the
+  # .bazelrc.
   os_name = platform.system().lower()
 
   args = parser.parse_args()
@@ -437,7 +439,7 @@ async def main():
   # to Bazel to use as the C++ compiler. NVCC is used as the CUDA compiler
   # unless the user explicitly sets --config=build_cuda_with_clang.
   if args.use_ci_bazelrc_flags:
-    bazelrc_config = utils.get_ci_bazelrc_config(os_name, arch, args.command)
+    bazelrc_config = utils.get_ci_bazelrc_config(os_name, arch.lower(), args.command)
     logging.debug("Using --config=%s from .bazelrc", bazelrc_config)
     bazel_command.append(f"--config={bazelrc_config}")
   else:
@@ -477,7 +479,7 @@ async def main():
         "Using release cpu features: --config=avx_%s",
         "windows" if os_name == "windows" else "posix",
     )
-    if arch == "x86_64":
+    if arch in ["x86_64", "AMD64"]:
       bazel_command.append(
           "--config=avx_windows"
           if os_name == "windows"
@@ -547,9 +549,7 @@ async def main():
 
   # If running on Windows, adjust the paths for compatibility.
   if os_name == "windows":
-    output_path, target_cpu = utils.adjust_paths_for_windows(
-        output_path, target_cpu
-    )
+    output_path = utils.adjust_paths_for_windows(output_path)
 
   logger.debug("Artifacts output directory: %s", output_path)
 
