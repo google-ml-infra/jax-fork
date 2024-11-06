@@ -227,6 +227,7 @@ def add_artifact_subcommand_global_arguments(parser: argparse.ArgumentParser):
         When set, the CLI will assume the build is being run in CI or CI like
         environment and will use the "rbe_/ci_" configs in the .bazelrc. These
         configs apply release features and set a custom C++ Clang toolchain.
+        Only supported for jaxlib and CUDA builds.
         """,
   )
 
@@ -460,10 +461,11 @@ async def main():
   # When not running in CI, we detect the path to Clang binary and pass it
   # to Bazel to use as the C++ compiler. NVCC is used as the CUDA compiler
   # unless the user explicitly sets --config=build_cuda_with_clang.
-  if args.use_ci_bazelrc_flags:
+  if args.use_ci_bazelrc_flags and "rocm" not in args.command:
     bazelrc_config = utils.get_ci_bazelrc_config(os_name, arch.lower(), args.command)
     logging.debug("Using --config=%s from .bazelrc", bazelrc_config)
     bazel_command.append(f"--config={bazelrc_config}")
+    bazel_command.append("--color=yes")
   else:
     clang_path = args.clang_path or utils.get_clang_path_or_exit()
     logging.debug("Using Clang as the compiler, clang path: %s", clang_path)
