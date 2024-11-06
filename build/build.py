@@ -463,7 +463,7 @@ async def main():
   # unless the user explicitly sets --config=build_cuda_with_clang.
   if args.use_ci_bazelrc_flags and "rocm" not in args.command:
     bazelrc_config = utils.get_ci_bazelrc_config(os_name, arch.lower(), args.command)
-    logging.debug("Using --config=%s from .bazelrc", bazelrc_config)
+    logging.debug("--use_ci_bazelrc_flags is set, using --config=%s from .bazelrc", bazelrc_config)
     bazel_command.append(f"--config={bazelrc_config}")
     bazel_command.append("--color=yes")
   else:
