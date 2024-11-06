@@ -457,6 +457,9 @@ async def main():
       wheel_cpus[args.target_cpu] if args.target_cpu is not None else arch
   )
 
+  # Enable color in the Bazel output.
+  bazel_command.append("--color=yes")
+
   # If running in CI, we use the "ci_"/"rbe_" configs in the .bazelrc.
   # These set a custom C++ Clang toolchain and the CUDA compiler to NVCC
   # When not running in CI, we detect the path to Clang binary and pass it
@@ -466,7 +469,6 @@ async def main():
     bazelrc_config = utils.get_ci_bazelrc_config(os_name, arch.lower(), args.command)
     logging.debug("--use_ci_bazelrc_flags is set, using --config=%s from .bazelrc", bazelrc_config)
     bazel_command.append(f"--config={bazelrc_config}")
-    bazel_command.append("--color=yes")
   else:
     clang_path = args.clang_path or utils.get_clang_path_or_exit()
     logging.debug("Using Clang as the compiler, clang path: %s", clang_path)
