@@ -28,10 +28,6 @@ import urllib.request
 
 logger = logging.getLogger(__name__)
 
-def is_windows():
-  return sys.platform.startswith("win32")
-
-# Bazel
 BAZEL_BASE_URI = "https://github.com/bazelbuild/bazel/releases/download/6.5.0/"
 BazelPackage = collections.namedtuple(
     "BazelPackage", ["base_uri", "file", "sha256"]
@@ -230,11 +226,24 @@ def get_ci_bazelrc_config(os_name: str, arch: str, artifact: str):
   return bazelrc_config
 
 
-def adjust_paths_for_windows(output_dir: str) -> tuple[str, str]:
-  """Adjusts the paths to be compatible with Windows."""
-  logger.debug("Adjusting paths for Windows...")
-  output_dir = output_dir.replace("/", "\\")
-  return output_dir
+def get_jax_configure_bazel_options(bazel_command: str):
+  """Returns the bazel options to be written to .jax_configure.bazelrc."""
+  bazel_command = bazel_command.split(". ")
+  jax_configure_bazel_options = ''
+  try:
+    start = bazel_command.index("run")
+    for i in range(start+1, len(bazel_command)):
+      # Adjust paths on Windows to avoid Python treating "\" as an escape
+      # character.
+      if platform.system() == "Windows":
+        bazel_flag = bazel_command[i].replace("\\", "\\\\")
+      else:
+        bazel_flag = bazel_command[i]
+      jax_configure_bazel_options += f'build "{bazel_flag}"\n'
+    return jax_configure_bazel_options
+  except ValueError:
+    logging.error("Unable to find index for 'run' in the Bazel command")
+    return ""
 
 
 def get_githash():

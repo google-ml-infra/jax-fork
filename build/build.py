@@ -65,7 +65,11 @@ def add_python_version_argument(parser: argparse.ArgumentParser):
       type=str,
       choices=["3.10", "3.11", "3.12", "3.13"],
       default=f"{sys.version_info.major}.{sys.version_info.minor}",
-      help="Hermetic Python version to use",
+      help=
+        """
+        Hermetic Python version to use. Default is to use the version of the
+        Python binary that executed the CLI.
+        """,
   )
 
 
@@ -74,7 +78,11 @@ def add_cuda_version_argument(parser: argparse.ArgumentParser):
       "--cuda_version",
       type=str,
       default=None,
-      help="Hermetic CUDA version to use",
+      help=
+        """
+        Hermetic CUDA version to use. Default is to use the version specified
+        in the .bazelrc.
+        """,
   )
 
 
@@ -83,7 +91,11 @@ def add_cudnn_version_argument(parser: argparse.ArgumentParser):
       "--cudnn_version",
       type=str,
       default=None,
-      help="Hermetic cuDNN version to use",
+      help=
+        """
+        Hermetic cuDNN version to use. Default is to use the version specified
+        in the .bazelrc.
+        """,
   )
 
 
@@ -100,7 +112,11 @@ def add_cuda_compute_capabilities_argument(parser: argparse.ArgumentParser):
       "--cuda_compute_capabilities",
       type=str,
       default=None,
-      help="A comma-separated list of CUDA compute capabilities to support.",
+      help=
+        """
+        A comma-separated list of CUDA compute capabilities to support. Default
+        is to use the values specified in the .bazelrc.
+        """,
   )
 
 
@@ -110,8 +126,8 @@ def add_build_cuda_with_clang_argument(parser: argparse.ArgumentParser):
       action="store_true",
       help="""
         Should CUDA code be compiled using Clang? The default behavior is to
-        compile CUDA with NVCC. Ignored if --use_ci_bazelrc_flags is set, we
-        always build CUDA with NVCC in CI builds.
+        compile CUDA with NVCC. Ignored if --use_ci_bazelrc_flags is set, CI
+        builds always build CUDA with NVCC in CI builds.
         """,
   )
 
@@ -169,21 +185,23 @@ def add_global_arguments(parser: argparse.ArgumentParser):
 
   parser.add_argument(
       "--bazel_startup_options",
-      type=str,
-      default="",
+      action="append",
+      default=[],
       help="""
-        Space separated list of additional startup options to pass to Bazel
-        E.g. --bazel_startup_options='--nobatch --noclient_debug'
+        Additional startup options to pass to Bazel, can be specified multiple
+        times to pass multiple options.
+        E.g. --bazel_startup_options='--nobatch'
         """,
   )
 
   parser.add_argument(
       "--bazel_build_options",
-      type=str,
-      default="",
+      action="append",
+      default=[],
       help="""
-        Space separated list of additional build options to pass to Bazel
-        E.g. --bazel_build_options='--local_resources=HOST_CPUS --nosandbox_debug'
+        Additional build options to pass to Bazel, can be specified multiple
+        times to pass multiple options.
+        E.g. --bazel_build_options='--local_resources=HOST_CPUS'
         """,
   )
 
@@ -207,7 +225,8 @@ def add_artifact_subcommand_global_arguments(parser: argparse.ArgumentParser):
       action="store_true",
       help="""
         When set, the CLI will assume the build is being run in CI or CI like
-        environment and will use the "rbe_/ci_" configs in the .bazelrc.
+        environment and will use the "rbe_/ci_" configs in the .bazelrc. These
+        configs apply release features and set a custom C++ Clang toolchain.
         """,
   )
 
@@ -218,9 +237,12 @@ def add_artifact_subcommand_global_arguments(parser: argparse.ArgumentParser):
   )
 
   parser.add_argument(
-      "--enable_mkl_dnn",
+      "--disable_mkl_dnn",
       action="store_true",
-      help="Enables MKL-DNN.",
+      help="""
+        Disables MKL-DNN. Ignored if --use_ci_bazelrc_flags is set, CI bazelrc
+        flags enable MKL-DNN as default.
+        """,
   )
 
   parser.add_argument(
@@ -230,20 +252,17 @@ def add_artifact_subcommand_global_arguments(parser: argparse.ArgumentParser):
   )
 
   parser.add_argument(
-      "--enable_release_cpu_features",
-      action="store_true",
+      "--target_cpu_features",
+      choices=["release", "native", "default"],
+      default="release",
       help="""
-        Enables CPU features that should be enabled for a release build, which
-        on x86-64 architectures enables AVX.
-        """,
-  )
-
-  parser.add_argument(
-      "--enable_native_cpu_features",
-      action="store_true",
-      help="""
-        Enables -march=native, which generates code targeted to use all features
-        of the current machine.
+        What CPU features should we target? Release enables CPU features that
+        should be enabled for a release build, which on x86-64 architectures
+        enables AVX. Native enables -march=native, which generates code targeted
+        to use all features of the current machine. Default means don't opt-in
+        to any architectural features and use whatever the C compiler generates
+        by default. Ignored if --use_ci_bazelrc_flags is set, CI bazelrc flags
+        enable release CPU features as default.
         """,
   )
 
@@ -252,8 +271,8 @@ def add_artifact_subcommand_global_arguments(parser: argparse.ArgumentParser):
       type=str,
       default="",
       help="""
-        Path to the Clang binary to use. Ignored if --use_ci_bazelrc_flags is
-        set as we use a custom Clang toolchain in that case.
+        Path to the Clang binary to use. Ignored if --use_ci_bazelrc_flags, CI
+        bazelrc flags set a custom Clang toolchain.
         """,
   )
 
@@ -270,17 +289,18 @@ def add_artifact_subcommand_global_arguments(parser: argparse.ArgumentParser):
   parser.add_argument(
       "--output_path",
       type=str,
-      default=os.environ.get(
-          "JAXCI_OUTPUT_DIR", os.path.join(os.getcwd(), "dist")
-      ),
+      default=os.path.join(os.getcwd(), "dist"),
       help="Directory to which the JAX wheel packages should be written.",
   )
 
-
-def parse_and_append_bazel_options(bazel_command: command.CommandBuilder, bazel_options: str):
-  """Parses the bazel options and appends them to the bazel command."""
-  for option in bazel_options.split(" "):
-    bazel_command.append(option)
+  parser.add_argument(
+    "--configure_only",
+    action="store_true",
+    help="""
+      If true, writes the Bazel options to the .jax_configure.bazelrc file but
+      does not build the artifacts. Ignored if --use_ci_bazelrc_flags is set.
+      """,
+  )
 
 
 async def main():
@@ -394,7 +414,8 @@ async def main():
     logging.debug(
         "Additional Bazel startup options: %s", args.bazel_startup_options
     )
-    parse_and_append_bazel_options(bazel_command, args.bazel_startup_options)
+    for option in args.bazel_startup_options:
+      bazel_command.append(option)
 
   bazel_command.append("run")
 
@@ -409,7 +430,8 @@ async def main():
       logging.debug(
           "Using additional build options: %s", args.bazel_build_options
       )
-      parse_and_append_bazel_options(bazel_command, args.bazel_build_options)
+      for option in args.bazel_build_options:
+        bazel_command.append(option)
 
     if args.nightly_update:
       logging.debug(
@@ -445,15 +467,20 @@ async def main():
   else:
     clang_path = args.clang_path or utils.get_clang_path_or_exit()
     logging.debug("Using Clang as the compiler, clang path: %s", clang_path)
-    bazel_command.append(f"--action_env CLANG_COMPILER_PATH={clang_path}")
-    bazel_command.append(f"--repo_env CC={clang_path}")
-    bazel_command.append(f"--repo_env BAZEL_COMPILER={clang_path}")
+    # Use double quotes around clang path to avoid path issues on Windows.
+    bazel_command.append(f'--action_env=CLANG_COMPILER_PATH="{clang_path}"')
+    bazel_command.append(f'--repo_env=CC="{clang_path}"')
+    bazel_command.append(f'--repo_env=BAZEL_COMPILER="{clang_path}"')
     bazel_command.append("--config=clang")
+
+    if not args.disable_mkl_dnn:
+      logging.debug("Enabling MKL DNN")
+      bazel_command.append("--config=mkl_open_source_only")
 
     if "cuda" in args.command:
       bazel_command.append("--config=cuda")
       bazel_command.append(
-            f"--action_env=CLANG_CUDA_COMPILER_PATH={clang_path}"
+            f'--action_env=CLANG_CUDA_COMPILER_PATH="{clang_path}"'
         )
       if args.build_cuda_with_clang:
         logging.debug("Building CUDA with Clang")
@@ -462,39 +489,36 @@ async def main():
         logging.debug("Building CUDA with NVCC")
         bazel_command.append("--config=build_cuda_with_nvcc")
 
+    if args.target_cpu_features == "release":
+      logging.debug(
+          "Using release cpu features: --config=avx_%s",
+          "windows" if os_name == "windows" else "posix",
+      )
+      if arch in ["x86_64", "AMD64"]:
+        bazel_command.append(
+            "--config=avx_windows"
+            if os_name == "windows"
+            else "--config=avx_posix"
+        )
+    elif args.target_cpu_features == "native":
+      if os_name == "windows":
+        logger.warning(
+            "--target_cpu_features=native is not supported on Windows;"
+            " ignoring."
+        )
+      else:
+        logging.debug("Using native cpu features: --config=native_arch_posix")
+        bazel_command.append("--config=native_arch_posix")
+    else:
+      logging.debug("Using default cpu features")
+
   if args.target_cpu:
     logging.debug("Target CPU: %s", args.target_cpu)
     bazel_command.append(f"--cpu={args.target_cpu}")
 
-  if args.enable_mkl_dnn:
-    logging.debug("Enabling MKL DNN")
-    bazel_command.append("--config=mkl_open_source_only")
-
   if hasattr(args, "disable_nccl") and args.disable_nccl:
     logging.debug("Disabling NCCL")
     bazel_command.append("--config=nonccl")
-
-  if args.enable_release_cpu_features:
-    logging.debug(
-        "Using release cpu features: --config=avx_%s",
-        "windows" if os_name == "windows" else "posix",
-    )
-    if arch in ["x86_64", "AMD64"]:
-      bazel_command.append(
-          "--config=avx_windows"
-          if os_name == "windows"
-          else "--config=avx_posix"
-      )
-
-  if args.enable_native_cpu_features:
-    if os_name == "windows":
-      logger.warning(
-          "--target_cpu_features=native is not supported on Windows;"
-          " ignoring."
-      )
-    else:
-      logging.debug("Using native cpu features: --config=native_arch_posix")
-      bazel_command.append("--config=native_arch_posix")
 
   if "cuda" in args.command:
     if args.cuda_version:
@@ -513,8 +537,7 @@ async def main():
           args.cuda_compute_capabilities,
       )
       bazel_command.append(
-          "--repo_env"
-          f" HERMETIC_CUDA_COMPUTE_CAPABILITIES={args.cuda_compute_capabilities}"
+          f"--repo_env=HERMETIC_CUDA_COMPUTE_CAPABILITIES={args.cuda_compute_capabilities}"
       )
 
   if "rocm" in args.command:
@@ -522,45 +545,48 @@ async def main():
 
     if args.rocm_path:
       logging.debug("ROCm tookit path: %s", args.rocm_path)
-      bazel_command.append(f"--action_env ROCM_PATH='{args.rocm_path}'")
+      bazel_command.append(f'--action_env=ROCM_PATH="{args.rocm_path}"')
     if args.rocm_amdgpu_targets:
       logging.debug("ROCm AMD GPU targets: %s", args.rocm_amdgpu_targets)
       bazel_command.append(
-          f"--action_env TF_ROCM_AMDGPU_TARGETS={args.rocm_amdgpu_targets}"
+          f"--action_env=TF_ROCM_AMDGPU_TARGETS={args.rocm_amdgpu_targets}"
       )
 
   if args.local_xla_path:
     logging.debug("Local XLA path: %s", args.local_xla_path)
-    bazel_command.append(f"--override_repository=xla={args.local_xla_path}")
+    bazel_command.append(f'--override_repository=xla="{args.local_xla_path}"')
 
   if args.bazel_build_options:
     logging.debug(
         "Additional Bazel build options: %s", args.bazel_build_options
     )
-    parse_and_append_bazel_options(bazel_command, args.bazel_build_options)
+    for option in args.bazel_build_options:
+      bazel_command.append(option)
+
+  if not args.use_ci_bazelrc_flags:
+    with open(".jax_configure.bazelrc", "w") as f:
+      jax_configure_options = utils.get_jax_configure_bazel_options(bazel_command.command)
+      f.write(jax_configure_options)
+      logging.debug("Bazel options written to .jax_configure.bazelrc")
+    if args.configure_only:
+      logging.debug("--configure_only is set, exiting without running any Bazel commands.")
+      sys.exit(0)
 
   # Append the build target to the Bazel command.
   build_target = ARTIFACT_BUILD_TARGET_DICT[args.command]
   bazel_command.append(build_target)
 
-  # Read output directory. Default is store the artifacts in the "dist/"
-  # directory in JAX's GitHub repository root.
-  output_path = args.output_path
-
-  # If running on Windows, adjust the paths for compatibility.
-  if os_name == "windows":
-    output_path = utils.adjust_paths_for_windows(output_path)
-
-  logger.debug("Artifacts output directory: %s", output_path)
-
   bazel_command.append("--")
+
+  output_path = args.output_path
+  logger.debug("Artifacts output directory: %s", output_path)
 
   if args.editable:
     logger.debug("Building an editable build")
     output_path = os.path.join(output_path, args.command)
     bazel_command.append("--editable")
 
-  bazel_command.append(f"--output_path={output_path}")
+  bazel_command.append(f'--output_path="{output_path}"')
   bazel_command.append(f"--cpu={target_cpu}")
 
   if "cuda" in args.command:

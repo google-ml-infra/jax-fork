@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-# Helper script for running subprocess commands.
+# Helper script for the JAX build CLI for running subprocess commands.
 import asyncio
 import dataclasses
 import datetime
@@ -27,7 +27,9 @@ class CommandBuilder:
     self.command = base_command
 
   def append(self, parameter: str):
-    self.command += " {}".format(parameter)
+    # Use 2 spaces to easily distinguish the individual parameters. Useful
+    # for systems like on Windows that can have a space in file paths.
+    self.command += "  {}".format(parameter)
     return self
 
 @dataclasses.dataclass
