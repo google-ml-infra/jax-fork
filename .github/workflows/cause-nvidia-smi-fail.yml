@@ -1,0 +1,32 @@
+name: Run Nvidia-SMI
+
+on:
+  pull_request:
+    branches:
+      - main
+defaults:
+  run:
+    # The default `sh` shell doesn't have the ERR trap status
+    shell: bash
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+jobs:
+  smi:
+    strategy:
+      matrix:
+        runner: ["linux-x86-g2-16-l4-1gpu"]
+        someOther: ["1","2","3","4"]
+
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest"
+    steps:
+      - uses: actions/checkout@v3
+      # Halt for testing
+      - name: Wait For Connection
+        uses: google-ml-infra/actions/ci_connection@output-halt-location
+        id: wait-for-connection
+      - name: Nvidia smi
+        run: |
+          nvidia-smi
