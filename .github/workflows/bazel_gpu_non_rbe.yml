@@ -4,7 +4,10 @@ on:
   pull_request:
     branches:
       - main
-
+defaults:
+  run:
+    # The default `sh` shell doesn't have the ERR trap status
+    shell: bash
 jobs:
   build:
     strategy:
@@ -26,6 +29,10 @@ jobs:
       # Halt for testing
       - name: Wait For Connection
         uses: google-ml-infra/actions/ci_connection@main
+      - name: Nvidia smi
+        run: |
+          trap 'PYTHONUNBUFFERED=1 python ci_connection/wait_on_error.py --shell-command "$BASH_COMMAND"; exit $?' ERR
+          nvidia-smi
       - name: Build jaxlib
         run: ./ci/build_artifacts.sh "ci/envs/build_artifacts/jaxlib.env"
       - name: Build jax-cuda-plugin
