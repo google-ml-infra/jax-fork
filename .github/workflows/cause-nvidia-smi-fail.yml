@@ -29,5 +29,5 @@ jobs:
         id: wait-for-connection
       - name: Nvidia smi
         run: |
-          ls /run/nvidia/driver
           nvidia-smi
+          which nvidia-smi
