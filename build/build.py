@@ -14,7 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Helper script for building JAX's libjax easily.
+# CLI for building jaxlib, jax-cuda-plugin, jax-cuda-pjrt, jax-rocm-plugin,
+# jax-rocm-pjrt and for updating the requirements_lock.txt files.
 
 import argparse
 import asyncio
