@@ -25,11 +25,11 @@ logger = logging.getLogger(__name__)
 class CommandBuilder:
   def __init__(self, base_command: str):
     self.command = base_command
+    self.parameters = [base_command]
 
   def append(self, parameter: str):
-    # Use 2 spaces to easily distinguish the individual parameters. Useful
-    # for systems like on Windows that can have a space in file paths.
-    self.command += "  {}".format(parameter)
+    self.command += " {}".format(parameter)
+    self.parameters.append(parameter)
     return self
 
 @dataclasses.dataclass

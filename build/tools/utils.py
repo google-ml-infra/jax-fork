@@ -226,20 +226,20 @@ def get_ci_bazelrc_config(os_name: str, arch: str, artifact: str):
   return bazelrc_config
 
 
-def get_jax_configure_bazel_options(bazel_command: str):
+def get_jax_configure_bazel_options(bazel_command: list[str]):
   """Returns the bazel options to be written to .jax_configure.bazelrc."""
-  bazel_command = bazel_command.split(". ")
-  jax_configure_bazel_options = ''
+  # Get the index of the "run" parameter. Build options will come after "run" so
+  # we find the index of "run" and filter everything after it.
+  start = bazel_command.index("run")
+  jax_configure_bazel_options = ""
   try:
-    start = bazel_command.index("run")
-    for i in range(start+1, len(bazel_command)):
-      # Adjust paths on Windows to avoid Python treating "\" as an escape
-      # character.
+    for i in range(start + 1, len(bazel_command)):
+      bazel_flag = bazel_command[i]
+      # Replace all backslashes with double backslashes to avoid escaping issues
+      # when running on Windows.
       if platform.system() == "Windows":
-        bazel_flag = bazel_command[i].replace("\\", "\\\\")
-      else:
-        bazel_flag = bazel_command[i]
-      jax_configure_bazel_options += f'build "{bazel_flag}"\n'
+        bazel_flag = bazel_flag.replace("\\", "\\\\")
+      jax_configure_bazel_options += f"build {bazel_flag}\n"
     return jax_configure_bazel_options
   except ValueError:
     logging.error("Unable to find index for 'run' in the Bazel command")

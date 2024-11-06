@@ -570,7 +570,10 @@ async def main():
 
   if not args.use_ci_bazelrc_flags:
     with open(".jax_configure.bazelrc", "w") as f:
-      jax_configure_options = utils.get_jax_configure_bazel_options(bazel_command.command)
+      jax_configure_options = utils.get_jax_configure_bazel_options(bazel_command.parameters)
+      if not jax_configure_options:
+        logging.error("Error retrieving the Bazel options to be written to .jax_configure.bazelrc, exiting.")
+        sys.exit(1)
       f.write(jax_configure_options)
       logging.debug("Bazel options written to .jax_configure.bazelrc")
     if args.configure_only:
