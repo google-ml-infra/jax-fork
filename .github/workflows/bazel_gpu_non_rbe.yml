@@ -15,7 +15,7 @@ jobs:
   build:
     strategy:
       matrix:
-        runner: ["linux-x86-g2-48-l4-4gpu"]
+        runner: ["linux-x86-g2-16-l4-1gpu"]
 
     runs-on: ${{ matrix.runner }}
     container:
