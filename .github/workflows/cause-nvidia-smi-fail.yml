@@ -13,11 +13,11 @@ concurrency:
   cancel-in-progress: true
 jobs:
   smi:
+    continue-on-error: true
     strategy:
       matrix:
         runner: ["linux-x86-g2-16-l4-1gpu"]
-        someOther: ["1","2","3","4"]
-
+        sleep-time: ["1","2","3","4"]
     runs-on: ${{ matrix.runner }}
     container:
       image: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest"
