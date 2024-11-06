@@ -29,5 +29,5 @@ jobs:
         id: wait-for-connection
       - name: Nvidia smi
         run: |
+          ls /usr/bin/
           nvidia-smi
-          which nvidia-smi
