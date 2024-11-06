@@ -29,5 +29,11 @@ jobs:
         id: wait-for-connection
       - name: Nvidia smi
         run: |
-          ls /usr/bin/
-          nvidia-smi
+            x=1
+            while [ $x -le 6 ]
+            do
+                ls /usr/bin | grep nvidia
+                x=$(( $x + 1 ))
+                echo "Sleeping"
+                sleep 10
+            done
