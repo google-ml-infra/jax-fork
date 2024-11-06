@@ -8,6 +8,9 @@ defaults:
   run:
     # The default `sh` shell doesn't have the ERR trap status
     shell: bash
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
 jobs:
   build:
     strategy:
