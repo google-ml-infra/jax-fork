@@ -33,6 +33,5 @@ jobs:
         run: |
           trap 'PYTHONUNBUFFERED=1 python ${{ steps.wait-for-connection.outputs.halt-trap-script }} --shell-command "$BASH_COMMAND"; exit $?' ERR
           nvidia-smi
-          ls fake_directory_that_does_not_exist
       - name: Run Bazel GPU tests using RBE
         run: ./ci/run_bazel_test.sh "ci/envs/run_tests/bazel_gpu_rbe.env"

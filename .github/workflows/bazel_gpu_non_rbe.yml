@@ -16,6 +16,7 @@ jobs:
     strategy:
       matrix:
         runner: ["linux-x86-g2-16-l4-1gpu"]
+        someOther: ["1","2"]
 
     runs-on: ${{ matrix.runner }}
     container:
@@ -32,10 +33,12 @@ jobs:
       # Halt for testing
       - name: Wait For Connection
         uses: google-ml-infra/actions/ci_connection@main
+        id: wait-for-connection
       - name: Nvidia smi
         run: |
-          trap 'PYTHONUNBUFFERED=1 python ci_connection/wait_on_error.py --shell-command "$BASH_COMMAND"; exit $?' ERR
+          trap 'PYTHONUNBUFFERED=1 python ${{ steps.wait-for-connection.outputs.halt-trap-script }} --shell-command "$BASH_COMMAND"; exit $?' ERR
           nvidia-smi
+          ls fake_directory_that_does_not_exist
       - name: Build jaxlib
         run: ./ci/build_artifacts.sh "ci/envs/build_artifacts/jaxlib.env"
       - name: Build jax-cuda-plugin
