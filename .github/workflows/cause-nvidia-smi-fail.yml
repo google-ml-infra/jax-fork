@@ -32,7 +32,7 @@ jobs:
             x=1
             while [ $x -le 6 ]
             do
-                ls /usr/bin | grep nvidia
+                ls /usr/bin | grep nvidia || true
                 x=$(( $x + 1 ))
                 echo "Sleeping"
                 sleep 10
