@@ -16,7 +16,7 @@ jobs:
     continue-on-error: true
     strategy:
       matrix:
-        runner: ["linux-x86-g2-16-l4-1gpu"]
+        runner: ["linux-x86-g2-16-l4-1gpu", "ubuntu-latest"]
         sleep-time: ["1","2","3","4"]
     runs-on: ${{ matrix.runner }}
     container:
@@ -31,7 +31,7 @@ jobs:
         run: |
             set +e  # revert the default `set -e` 
             x=1
-            while [ $x -le 10 ]
+            while [ $x -le 15 ]
             do
                 ls /usr/bin | grep nvidia || true
                 x=$(( $x + 1 ))
