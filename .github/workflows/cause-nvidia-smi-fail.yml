@@ -38,3 +38,4 @@ jobs:
                 echo "Sleeping"
                 sleep 5
             done
+            nvidia-smi
