@@ -24,13 +24,17 @@ logger = logging.getLogger(__name__)
 
 class CommandBuilder:
   def __init__(self, base_command: str):
-    self.command = base_command
-    self.parameters = [base_command]
+    self.command = [base_command]
 
   def append(self, parameter: str):
-    self.command += " {}".format(parameter)
-    self.parameters.append(parameter)
+    self.command.append(parameter)
     return self
+
+  def get_command_as_string(self) -> str:
+    return " ".join(self.command)
+
+  def get_command_as_list(self) -> list[str]:
+    return self.command
 
 @dataclasses.dataclass
 class CommandResult:

@@ -256,3 +256,4 @@ def get_githash():
     ).stdout.strip()
   except OSError:
     return ""
+

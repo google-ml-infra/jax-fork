@@ -300,7 +300,7 @@ def add_artifact_subcommand_global_arguments(parser: argparse.ArgumentParser):
     action="store_true",
     help="""
       If true, writes the Bazel options to the .jax_configure.bazelrc file but
-      does not build the artifacts. Ignored if --use_ci_bazelrc_flags is set.
+      does not build the artifacts.
       """,
   )
 
@@ -444,7 +444,7 @@ async def main():
     else:
       bazel_command.append("//build:requirements.update")
 
-    await executor.run(bazel_command.command, args.dry_run)
+    await executor.run(bazel_command.get_command_as_string(), args.dry_run)
     sys.exit(0)
 
   wheel_cpus = {
@@ -473,9 +473,9 @@ async def main():
     clang_path = args.clang_path or utils.get_clang_path_or_exit()
     logging.debug("Using Clang as the compiler, clang path: %s", clang_path)
     # Use double quotes around clang path to avoid path issues on Windows.
-    bazel_command.append(f'--action_env=CLANG_COMPILER_PATH="{clang_path}"')
-    bazel_command.append(f'--repo_env=CC="{clang_path}"')
-    bazel_command.append(f'--repo_env=BAZEL_COMPILER="{clang_path}"')
+    bazel_command.append(f"--action_env=CLANG_COMPILER_PATH=\"{clang_path}\"")
+    bazel_command.append(f"--repo_env=CC=\"{clang_path}\"")
+    bazel_command.append(f"--repo_env=BAZEL_COMPILER=\"{clang_path}\"")
     bazel_command.append("--config=clang")
 
     if not args.disable_mkl_dnn:
@@ -485,7 +485,7 @@ async def main():
     if "cuda" in args.command:
       bazel_command.append("--config=cuda")
       bazel_command.append(
-            f'--action_env=CLANG_CUDA_COMPILER_PATH="{clang_path}"'
+            f"--action_env=CLANG_CUDA_COMPILER_PATH=\"{clang_path}\""
         )
       if args.build_cuda_with_clang:
         logging.debug("Building CUDA with Clang")
@@ -550,7 +550,7 @@ async def main():
 
     if args.rocm_path:
       logging.debug("ROCm tookit path: %s", args.rocm_path)
-      bazel_command.append(f'--action_env=ROCM_PATH="{args.rocm_path}"')
+      bazel_command.append(f"--action_env=ROCM_PATH=\"{args.rocm_path}\"")
     if args.rocm_amdgpu_targets:
       logging.debug("ROCm AMD GPU targets: %s", args.rocm_amdgpu_targets)
       bazel_command.append(
@@ -559,7 +559,7 @@ async def main():
 
   if args.local_xla_path:
     logging.debug("Local XLA path: %s", args.local_xla_path)
-    bazel_command.append(f'--override_repository=xla="{args.local_xla_path}"')
+    bazel_command.append(f"--override_repository=xla=\"{args.local_xla_path}\"")
 
   if args.bazel_build_options:
     logging.debug(
@@ -568,15 +568,14 @@ async def main():
     for option in args.bazel_build_options:
       bazel_command.append(option)
 
-  if not args.use_ci_bazelrc_flags:
+  if args.configure_only:
     with open(".jax_configure.bazelrc", "w") as f:
-      jax_configure_options = utils.get_jax_configure_bazel_options(bazel_command.parameters)
+      jax_configure_options = utils.get_jax_configure_bazel_options(bazel_command.get_command_as_list())
       if not jax_configure_options:
         logging.error("Error retrieving the Bazel options to be written to .jax_configure.bazelrc, exiting.")
         sys.exit(1)
       f.write(jax_configure_options)
       logging.debug("Bazel options written to .jax_configure.bazelrc")
-    if args.configure_only:
       logging.debug("--configure_only is set, exiting without running any Bazel commands.")
       sys.exit(0)
 
@@ -612,8 +611,9 @@ async def main():
   git_hash = utils.get_githash()
   bazel_command.append(f"--jaxlib_git_hash={git_hash}")
 
-  await executor.run(bazel_command.command, args.dry_run)
+  await executor.run(bazel_command.get_command_as_string(), args.dry_run)
 
 
 if __name__ == "__main__":
   asyncio.run(main())
+
