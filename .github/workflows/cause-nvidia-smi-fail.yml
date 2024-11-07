@@ -29,11 +29,12 @@ jobs:
         id: wait-for-connection
       - name: Nvidia smi
         run: |
+            set +e  # revert the default `set -e` 
             x=1
-            while [ $x -le 6 ]
+            while [ $x -le 10 ]
             do
                 ls /usr/bin | grep nvidia || true
                 x=$(( $x + 1 ))
                 echo "Sleeping"
-                sleep 10
+                sleep 5
             done
