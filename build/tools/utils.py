@@ -235,8 +235,8 @@ def get_jax_configure_bazel_options(bazel_command: list[str]):
   try:
     for i in range(start + 1, len(bazel_command)):
       bazel_flag = bazel_command[i]
-      # Replace all backslashes with double backslashes to avoid escaping issues
-      # when running on Windows.
+      # On Windows, replace all backslashes with double backslashes to avoid
+      # unintended escape sequences.
       if platform.system() == "Windows":
         bazel_flag = bazel_flag.replace("\\", "\\\\")
       jax_configure_bazel_options += f"build {bazel_flag}\n"
