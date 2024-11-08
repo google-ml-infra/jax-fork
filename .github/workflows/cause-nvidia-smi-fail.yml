@@ -16,7 +16,7 @@ jobs:
     continue-on-error: true
     strategy:
       matrix:
-        runner: ["mike-x86-g2-16-l4-1gpu", "ubuntu-latest"]
+        runner: ["mike-x86-g2-16-l4-1gpu"]
         sleep-time: ["1","2","3","4"]
     runs-on: ${{ matrix.runner }}
     container:
