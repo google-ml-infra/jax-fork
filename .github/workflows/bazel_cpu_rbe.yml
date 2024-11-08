@@ -4,6 +4,16 @@ on:
   pull_request:
     branches:
       - main
+  workflow_dispatch:
+    inputs:
+      halt-for-connection:
+        description: 'Should this workflow run wait for a remote connection?'
+        type: choice
+        required: true
+        default: 'no'
+        options:
+        - 'yes'
+        - 'no'
 
 jobs:
   run_bazel_rbe_cpu_tests:
@@ -31,6 +41,8 @@ jobs:
       - uses: actions/checkout@v3
       # Halt for testing
       - name: Wait For Connection
-        uses: ./actions/ci_connection/
+        uses: google-ml-infra/actions/ci_connection@main
+        with:
+          halt-dispatch-input: ${{ inputs.halt-for-connection }}
       - name: Run Bazel CPU Tests
         run: ./ci/run_bazel_test_cpu_rbe.sh
