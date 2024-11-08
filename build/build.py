@@ -209,7 +209,7 @@ def add_global_arguments(parser: argparse.ArgumentParser):
   parser.add_argument(
       "--dry_run",
       action="store_true",
-      help="Prints the Bazel command that is going will be executed.",
+      help="Prints the Bazel command that is going to be executed.",
   )
 
   parser.add_argument(
@@ -476,7 +476,10 @@ async def main():
     bazel_command.append(f"--action_env=CLANG_COMPILER_PATH=\"{clang_path}\"")
     bazel_command.append(f"--repo_env=CC=\"{clang_path}\"")
     bazel_command.append(f"--repo_env=BAZEL_COMPILER=\"{clang_path}\"")
-    bazel_command.append("--config=clang")
+    # Do not apply --config=clang on Mac as these settings do not apply to
+    # Apple Clang.
+    if os_name != "darwin":
+      bazel_command.append("--config=clang")
 
     if not args.disable_mkl_dnn:
       logging.debug("Enabling MKL DNN")
@@ -616,4 +619,3 @@ async def main():
 
 if __name__ == "__main__":
   asyncio.run(main())
-
