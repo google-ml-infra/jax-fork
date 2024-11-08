@@ -27,4 +27,4 @@ jobs:
       - name: Wait For Connection
         uses: ./actions/ci_connection/
       - name: Run Bazel GPU tests using RBE
-        run: ./ci/run_bazel_test.sh "ci/envs/run_tests/bazel_gpu_rbe.env"
+        run: ./ci/run_bazel_test_gpu_rbe.sh

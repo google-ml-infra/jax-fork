@@ -1,3 +1,4 @@
+#!/bin/bash
 # Copyright 2024 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,8 +16,18 @@
 # Inherit default JAXCI environment variables.
 source ci/envs/default.env
 
-# Enable CPU Pytests
-export JAXCI_RUN_PYTEST_CPU=1
-
-# Install jaxlib wheel locally.
+# Install jaxlib wheel on the system. Requires a jaxlib wheel to be present
+# inside $JAXCI_OUTPUT_DIR (by default, ../dist)
 export JAXCI_INSTALL_WHEELS_LOCALLY=1
+
+# Set up the build environment.
+source "ci/utilities/setup_build_environment.sh"
+
+export PY_COLORS=1
+export JAX_SKIP_SLOW_TESTS=true
+
+"$JAXCI_PYTHON" -c "import jax; print(jax.default_backend()); print(jax.devices()); print(len(jax.devices()))"
+
+export TF_CPP_MIN_LOG_LEVEL=0
+echo "Running CPU tests..."
+"$JAXCI_PYTHON" -m pytest -n auto --tb=short --maxfail=20 tests examples

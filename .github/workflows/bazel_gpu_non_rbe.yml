@@ -33,6 +33,4 @@ jobs:
       - name: Build jax-cuda-pjrt
         run: ./ci/build_artifacts.sh "ci/envs/build_artifacts/jax-cuda-pjrt.env"
       - name: Run Bazel GPU tests locally
-        run: ./ci/run_bazel_test.sh "ci/envs/run_tests/bazel_gpu_non_rbe.env"
-      - name: Test if step runs
-        run: echo "This step ran!"
+        run: ./ci/run_bazel_test_gpu_non_rbe.sh 

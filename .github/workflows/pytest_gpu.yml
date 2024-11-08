@@ -41,4 +41,4 @@ jobs:
           JAXCI_PYTHON: python${{ matrix.python }}
         run: $JAXCI_PYTHON -m pip install -r build/test-requirements.txt
       - name: Run Pytest GPU tests
-        run: ./ci/run_pytest.sh "ci/envs/run_tests/pytest_gpu.env"
+        run: ./ci/run_pytest_gpu.sh
