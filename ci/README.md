@@ -4,6 +4,6 @@
 > effort to improve the structure of CI and build related files within the
 > JAX repo. This warning will be removed when the contents of this
 > directory are stable and appropriate documentation around its usage is in
-> place.
+> place..
 
 ********************************************************************************
