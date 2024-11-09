@@ -13,17 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-#
-# Set up the build environment for JAX CI jobs. This script depends on the
-# environment variables set in `setup_envs.sh`.
-# -e: abort script if one command fails
-# -u: error if undefined variable used
-# -x: log all commands
-# -o pipefail: entire command fails if pipe fails. watch out for yes | ...
-# -o history: record shell history
-# -o allexport: export all functions and variables to be available to subscripts
-set -exuo pipefail -o history -o allexport
-
 # Pre-emptively mark the JAX git directory as safe. This is necessary for JAX CI
 # jobs running on Linux runners in GitHub Actions. Without this, git complains
 # that the directory has dubious ownership and refuses to run any commands.
