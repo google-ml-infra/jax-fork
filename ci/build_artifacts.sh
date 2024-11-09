@@ -13,8 +13,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
+# Build JAX artifacts. Requires an env file from the ci/envs/build_artifacts to
+# be passed as an argument
+#
+# -e: abort script if one command fails
+# -u: error if undefined variable used
+# -x: log all commands
+# -o history: record shell history
+# -o allexport: export all functions and variables to be available to subscripts
+set -exu -o history -o allexport
+
+# If a JAX CI env file has not been passed, exit.
+if [[ -z "$1" ]]; then
+    echo "ERROR: No JAX CI env file passed."
+    echo "build_artifacts.sh requires that a path to a JAX CI env file to be"
+    echo "passed as an argument when invoking the build scripts."
+    echo "Pass in a corresponding env file from the ci/envs/build_artifacts"
+    echo "directory to continue."
+    exit 1
+fi
+
 # Source JAXCI environment variables.
-source "ci/utilities/setup_jaxci_envs.sh" "$1"
+source "$1"
 # Set up the build environment.
 source "ci/utilities/setup_build_environment.sh"
 

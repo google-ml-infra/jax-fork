@@ -17,6 +17,13 @@
 # tests with one GPU a piece, multiaccelerator tests with all GPUS.
 # Requires that jaxlib, jax-cuda-plugin, and jax-cuda-pjrt wheels are stored
 # inside the $JAXCI_OUTPUT_DIR folder (../dist)
+#
+# -e: abort script if one command fails
+# -u: error if undefined variable used
+# -x: log all commands
+# -o history: record shell history
+# -o allexport: export all functions and variables to be available to subscripts
+set -exu -o history -o allexport
 
 # Inherit default JAXCI environment variables.
 source ci/envs/default.env

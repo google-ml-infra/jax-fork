@@ -15,6 +15,13 @@
 # ==============================================================================
 # Runs Bazel GPU tests with RBE. This runs single accelerator tests with one
 # GPU apiece on RBE.
+#
+# -e: abort script if one command fails
+# -u: error if undefined variable used
+# -x: log all commands
+# -o history: record shell history
+# -o allexport: export all functions and variables to be available to subscripts
+set -exu -o history -o allexport
 
 # Inherit default JAXCI environment variables.
 source ci/envs/default.env
