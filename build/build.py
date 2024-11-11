@@ -25,6 +25,12 @@ import textwrap
 from tools import utils
 
 
+from tools import command, utils
+
+
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger(__name__)
 
 def write_bazelrc(*, remote_build,
@@ -112,258 +118,397 @@ BANNER = r"""
 """
 
 EPILOG = """
+From the root directory of the JAX repository, run
+  python build/build.py [jaxlib | jax-cuda-plugin | jax-cuda-pjrt | jax-rocm-plugin | jax-rocm-pjrt]
 
-From the 'build' directory in the JAX repository, run
-    python build.py
+  to build one of: jaxlib, jax-cuda-plugin, jax-cuda-pjrt, jax-rocm-plugin, jax-rocm-pjrt
 or
-    python3 build.py
-to download and build JAX's XLA (jaxlib) dependency.
+  python build/build.py requirements_update to update the requirements_lock.txt
 """
 
-
-def _parse_string_as_bool(s):
-  """Parses a string as a boolean argument."""
-  lower = s.lower()
-  if lower == "true":
-    return True
-  elif lower == "false":
-    return False
-  else:
-    raise ValueError(f"Expected either 'true' or 'false'; got {s}")
+# Define the build target for each artifact.
+ARTIFACT_BUILD_TARGET_DICT = {
+    "jaxlib": "//jaxlib/tools:build_wheel",
+    "jax-cuda-plugin": "//jaxlib/tools:build_gpu_kernels_wheel",
+    "jax-cuda-pjrt": "//jaxlib/tools:build_gpu_plugin_wheel",
+    "jax-rocm-plugin": "//jaxlib/tools:build_gpu_kernels_wheel",
+    "jax-rocm-pjrt": "//jaxlib/tools:build_gpu_plugin_wheel",
+}
 
 
-def add_boolean_argument(parser, name, default=False, help_str=None):
-  """Creates a boolean flag."""
-  group = parser.add_mutually_exclusive_group()
-  group.add_argument(
-      "--" + name,
-      nargs="?",
-      default=default,
-      const=True,
-      type=_parse_string_as_bool,
-      help=help_str)
-  group.add_argument("--no" + name, dest=name, action="store_false")
-
-
-def _get_editable_output_paths(output_path):
-  """Returns the paths to the editable wheels."""
-  return (
-      os.path.join(output_path, "jaxlib"),
-      os.path.join(output_path, "jax_gpu_pjrt"),
-      os.path.join(output_path, "jax_gpu_plugin"),
+def add_python_version_argument(parser: argparse.ArgumentParser):
+  parser.add_argument(
+      "--python_version",
+      type=str,
+      choices=["3.10", "3.11", "3.12", "3.13"],
+      default=f"{sys.version_info.major}.{sys.version_info.minor}",
+      help="Hermetic Python version to use",
   )
 
 
-def main():
-  cwd = os.getcwd()
-  parser = argparse.ArgumentParser(
-      description="Builds jaxlib from source.", epilog=EPILOG)
-  add_boolean_argument(
-      parser,
-      "verbose",
-      default=False,
-      help_str="Should we produce verbose debugging output?")
-  parser.add_argument(
-      "--bazel_path",
-      help="Path to the Bazel binary to use. The default is to find bazel via "
-      "the PATH; if none is found, downloads a fresh copy of bazel from "
-      "GitHub.")
-  parser.add_argument(
-      "--python_bin_path",
-      help="Path to Python binary whose version to match while building with "
-      "hermetic python. The default is the Python interpreter used to run the "
-      "build script. DEPRECATED: use --python_version instead.")
-  parser.add_argument(
-      "--target_cpu_features",
-      choices=["release", "native", "default"],
-      default="release",
-      help="What CPU features should we target? 'release' enables CPU "
-           "features that should be enabled for a release build, which on "
-           "x86-64 architectures enables AVX. 'native' enables "
-           "-march=native, which generates code targeted to use all "
-           "features of the current machine. 'default' means don't opt-in "
-           "to any architectural features and use whatever the C compiler "
-           "generates by default.")
-  add_boolean_argument(
-      parser,
-      "use_clang",
-      default = "true",
-      help_str=(
-          "DEPRECATED: This flag is redundant because clang is "
-          "always used as default compiler."
-      ),
-  )
-  parser.add_argument(
-      "--clang_path",
-      help=(
-          "Path to clang binary to use. The default is "
-          "to find clang via the PATH."
-      ),
-  )
-  add_boolean_argument(
-      parser,
-      "enable_mkl_dnn",
-      default=True,
-      help_str="Should we build with MKL-DNN enabled?",
-  )
-  add_boolean_argument(
-      parser,
-      "enable_cuda",
-      help_str="Should we build with CUDA enabled? Requires CUDA and CuDNN."
-  )
-  add_boolean_argument(
-      parser,
-      "use_cuda_nvcc",
-      default=True,
-      help_str=(
-          "Should we build CUDA code using NVCC compiler driver? The default value "
-          "is true. If --nouse_cuda_nvcc flag is used then CUDA code is built "
-          "by clang compiler."
-      ),
-  )
-  add_boolean_argument(
-      parser,
-      "build_gpu_plugin",
-      default=False,
-      help_str=(
-          "Are we building the gpu plugin in addition to jaxlib? The GPU "
-          "plugin is still experimental and is not ready for use yet."
-      ),
-  )
-  parser.add_argument(
-      "--build_gpu_kernel_plugin",
-      choices=["cuda", "rocm"],
-      default="",
-      help=(
-          "Specify 'cuda' or 'rocm' to build the respective kernel plugin."
-          " When this flag is set, jaxlib will not be built."
-      ),
-  )
-  add_boolean_argument(
-      parser,
-      "build_gpu_pjrt_plugin",
-      default=False,
-      help_str=(
-          "Are we building the cuda/rocm pjrt plugin? jaxlib will not be built "
-          "when this flag is True."
-      ),
-  )
-  parser.add_argument(
-      "--gpu_plugin_cuda_version",
-      choices=["12"],
-      default="12",
-      help="Which CUDA major version the gpu plugin is for.")
-  parser.add_argument(
-      "--gpu_plugin_rocm_version",
-      choices=["60"],
-      default="60",
-      help="Which ROCM major version the gpu plugin is for.")
-  add_boolean_argument(
-      parser,
-      "enable_rocm",
-      help_str="Should we build with ROCm enabled?")
-  add_boolean_argument(
-      parser,
-      "enable_nccl",
-      default=True,
-      help_str="Should we build with NCCL enabled? Has no effect for non-CUDA "
-               "builds.")
-  add_boolean_argument(
-      parser,
-      "remote_build",
-      default=False,
-      help_str="Should we build with RBE (Remote Build Environment)?")
+def add_cuda_version_argument(parser: argparse.ArgumentParser):
   parser.add_argument(
       "--cuda_version",
+      type=str,
       default=None,
-      help="CUDA toolkit version, e.g., 12.3.2")
+      help="Hermetic CUDA version to use",
+  )
+
+
+def add_cudnn_version_argument(parser: argparse.ArgumentParser):
   parser.add_argument(
       "--cudnn_version",
+      type=str,
       default=None,
-      help="CUDNN version, e.g., 8.9.7.29")
-  # Caution: if changing the default list of CUDA capabilities, you should also
-  # update the list in .bazelrc, which is used for wheel builds.
+      help="Hermetic cuDNN version to use",
+  )
+
+
+def add_disable_nccl_argument(parser: argparse.ArgumentParser):
+  parser.add_argument(
+      "--disable_nccl",
+      action="store_true",
+      help="Should NCCL be disabled?",
+  )
+
+
+def add_cuda_compute_capabilities_argument(parser: argparse.ArgumentParser):
   parser.add_argument(
       "--cuda_compute_capabilities",
+      type=str,
       default=None,
-      help="A comma-separated list of CUDA compute capabilities to support.")
+      help="A comma-separated list of CUDA compute capabilities to support.",
+  )
+
+
+def add_build_cuda_with_clang_argument(parser: argparse.ArgumentParser):
+  parser.add_argument(
+      "--build_cuda_with_clang",
+      action="store_true",
+      help="""
+        Should CUDA code be compiled using Clang? The default behavior is to
+        compile CUDA with NVCC. Ignored if --use_ci_bazelrc_flags is set, we
+        always build CUDA with NVCC in CI builds.
+        """,
+  )
+
+
+def add_rocm_version_argument(parser: argparse.ArgumentParser):
+  parser.add_argument(
+      "--rocm_version",
+      type=str,
+      default="60",
+      help="ROCm version to use",
+  )
+
+
+def add_rocm_amdgpu_targets_argument(parser: argparse.ArgumentParser):
   parser.add_argument(
       "--rocm_amdgpu_targets",
-      default="gfx900,gfx906,gfx908,gfx90a,gfx940,gfx941,gfx942,gfx1030,gfx1100",
-      help="A comma-separated list of ROCm amdgpu targets to support.")
+      type=str,
+      default="gfx900,gfx906,gfx908,gfx90a,gfx1030",
+      help="A comma-separated list of ROCm amdgpu targets to support.",
+  )
+
+
+def add_rocm_path_argument(parser: argparse.ArgumentParser):
   parser.add_argument(
       "--rocm_path",
-      default=None,
-      help="Path to the ROCm toolkit.")
+      type=str,
+      default="",
+      help="Path to the ROCm toolkit.",
+  )
+
+
+def add_requirements_nightly_update_argument(parser: argparse.ArgumentParser):
+  parser.add_argument(
+      "--nightly_update",
+      action="store_true",
+      help="""
+        If true, updates requirements_lock.txt for a corresponding version of
+        Python and will consider dev, nightly and pre-release versions of
+        packages.
+        """,
+  )
+
+
+def add_global_arguments(parser: argparse.ArgumentParser):
+  """Adds all the global arguments that applies to all the CLI subcommands."""
+  parser.add_argument(
+      "--bazel_path",
+      type=str,
+      default="",
+      help="""
+        Path to the Bazel binary to use. The default is to find bazel via the
+        PATH; if none is found, downloads a fresh copy of Bazel from GitHub.
+        """,
+  )
+
   parser.add_argument(
       "--bazel_startup_options",
-      action="append", default=[],
-      help="Additional startup options to pass to bazel.")
+      type=str,
+      default="",
+      help="""
+        Space separated list of additional startup options to pass to Bazel
+        E.g. --bazel_startup_options='--nobatch --noclient_debug'
+        """,
+  )
+
   parser.add_argument(
-      "--bazel_options",
-      action="append", default=[],
-      help="Additional options to pass to the main Bazel command to be "
-           "executed, e.g. `run`.")
+      "--bazel_build_options",
+      type=str,
+      default="",
+      help="""
+        Space separated list of additional build options to pass to Bazel
+        E.g. --bazel_build_options='--local_resources=HOST_CPUS --nosandbox_debug'
+        """,
+  )
+
   parser.add_argument(
-      "--output_path",
-      default=os.path.join(cwd, "dist"),
-      help="Directory to which the jaxlib wheel should be written")
+      "--dry_run",
+      action="store_true",
+      help="Prints the Bazel command that is going will be executed.",
+  )
+
   parser.add_argument(
-      "--target_cpu",
-      default=None,
-      help="CPU platform to target. Default is the same as the host machine. "
-           "Currently supported values are 'darwin_arm64' and 'darwin_x86_64'.")
+      "--verbose",
+      action="store_true",
+      help="Produce verbose output for debugging.",
+  )
+
+
+def add_artifact_subcommand_global_arguments(parser: argparse.ArgumentParser):
+  """Adds all the global arguments that applies to the artifact subcommands."""
+  parser.add_argument(
+      "--use_ci_bazelrc_flags",
+      action="store_true",
+      help="""
+        When set, the CLI will assume the build is being run in CI or CI like
+        environment and will use the "rbe_/ci_" configs in the .bazelrc.
+        """,
+  )
+
   parser.add_argument(
       "--editable",
       action="store_true",
-      help="Create an 'editable' jaxlib build instead of a wheel.")
+      help="Create an 'editable' build instead of a wheel.",
+  )
+
   parser.add_argument(
-      "--python_version",
+      "--enable_mkl_dnn",
+      action="store_true",
+      help="Enables MKL-DNN.",
+  )
+
+  parser.add_argument(
+      "--target_cpu",
       default=None,
-      help="hermetic python version, e.g., 3.10")
-  add_boolean_argument(
-      parser,
-      "configure_only",
-      default=False,
-      help_str="If true, writes a .bazelrc file but does not build jaxlib.")
-  add_boolean_argument(
-      parser,
-      "requirements_update",
-      default=False,
-      help_str="If true, writes a .bazelrc and updates requirements_lock.txt "
-               "for a corresponding version of Python but does not build "
-               "jaxlib.")
-  add_boolean_argument(
-      parser,
-      "requirements_nightly_update",
-      default=False,
-      help_str="Same as update_requirements, but will consider dev, nightly "
-               "and pre-release versions of packages.")
+      help="CPU platform to target. Default is the same as the host machine. ",
+  )
+
+  parser.add_argument(
+      "--enable_release_cpu_features",
+      action="store_true",
+      help="""
+        Enables CPU features that should be enabled for a release build, which
+        on x86-64 architectures enables AVX.
+        """,
+  )
+
+  parser.add_argument(
+      "--enable_native_cpu_features",
+      action="store_true",
+      help="""
+        Enables -march=native, which generates code targeted to use all features
+        of the current machine.
+        """,
+  )
+
+  parser.add_argument(
+      "--clang_path",
+      type=str,
+      default="",
+      help="""
+        Path to the Clang binary to use. Ignored if --use_ci_bazelrc_flags is
+        set as we use a custom Clang toolchain in that case.
+        """,
+  )
+
+  parser.add_argument(
+      "--local_xla_path",
+      type=str,
+      default=os.environ.get("JAXCI_XLA_GIT_DIR", ""),
+      help="""
+        Path to local XLA repository to use. If not set, Bazel uses the XLA at
+        the pinned version in workspace.bzl.
+        """,
+  )
+
+  parser.add_argument(
+      "--output_path",
+      type=str,
+      default=os.environ.get(
+          "JAXCI_OUTPUT_DIR", os.path.join(os.getcwd(), "dist")
+      ),
+      help="Directory to which the JAX wheel packages should be written.",
+  )
+
+
+def parse_and_append_bazel_options(bazel_command: command.CommandBuilder, bazel_options: str):
+  """Parses the bazel options and appends them to the bazel command."""
+  for option in bazel_options.split(" "):
+    bazel_command.append(option)
+
+
+async def main():
+  parser = argparse.ArgumentParser(
+      description=r"""
+        CLI for building one of the following packages from source: jaxlib,
+        jax-cuda-plugin, jax-cuda-pjrt, jax-rocm-plugin, jax-rocm-pjrt and for
+        updating the requirements_lock.txt files
+        """,
+      epilog=EPILOG,
+  )
+
+  # Create subparsers for jax, jaxlib, plugin, pjrt and requirements_update
+  subparsers = parser.add_subparsers(dest="command", required=True)
+
+  # requirements_update subcommand
+  requirements_update_parser = subparsers.add_parser(
+      "requirements_update", help="Updates the requirements_lock.txt files"
+  )
+  add_python_version_argument(requirements_update_parser)
+  add_requirements_nightly_update_argument(requirements_update_parser)
+  add_global_arguments(requirements_update_parser)
+
+  # jaxlib subcommand
+  jaxlib_parser = subparsers.add_parser(
+      "jaxlib", help="Builds the jaxlib package."
+  )
+  add_python_version_argument(jaxlib_parser)
+  add_artifact_subcommand_global_arguments(jaxlib_parser)
+  add_global_arguments(jaxlib_parser)
+
+  # jax-cuda-plugin subcommand
+  cuda_plugin_parser = subparsers.add_parser(
+      "jax-cuda-plugin", help="Builds the jax-cuda-plugin package."
+  )
+  add_python_version_argument(cuda_plugin_parser)
+  add_build_cuda_with_clang_argument(cuda_plugin_parser)
+  add_cuda_version_argument(cuda_plugin_parser)
+  add_cudnn_version_argument(cuda_plugin_parser)
+  add_cuda_compute_capabilities_argument(cuda_plugin_parser)
+  add_disable_nccl_argument(cuda_plugin_parser)
+  add_artifact_subcommand_global_arguments(cuda_plugin_parser)
+  add_global_arguments(cuda_plugin_parser)
+
+  # jax-cuda-pjrt subcommand
+  cuda_pjrt_parser = subparsers.add_parser(
+      "jax-cuda-pjrt", help="Builds the jax-cuda-pjrt package."
+  )
+  add_build_cuda_with_clang_argument(cuda_pjrt_parser)
+  add_cuda_version_argument(cuda_pjrt_parser)
+  add_cudnn_version_argument(cuda_pjrt_parser)
+  add_cuda_compute_capabilities_argument(cuda_pjrt_parser)
+  add_disable_nccl_argument(cuda_pjrt_parser)
+  add_artifact_subcommand_global_arguments(cuda_pjrt_parser)
+  add_global_arguments(cuda_pjrt_parser)
+
+  # jax-rocm-plugin subcommand
+  rocm_plugin_parser = subparsers.add_parser(
+      "jax-rocm-plugin", help="Builds the jax-rocm-plugin package."
+  )
+  add_python_version_argument(rocm_plugin_parser)
+  add_rocm_version_argument(rocm_plugin_parser)
+  add_rocm_amdgpu_targets_argument(rocm_plugin_parser)
+  add_rocm_path_argument(rocm_plugin_parser)
+  add_disable_nccl_argument(rocm_plugin_parser)
+  add_artifact_subcommand_global_arguments(rocm_plugin_parser)
+  add_global_arguments(rocm_plugin_parser)
+
+  # jax-rocm-pjrt subcommand
+  rocm_pjrt_parser = subparsers.add_parser(
+      "jax-rocm-pjrt", help="Builds the jax-rocm-pjrt package."
+  )
+  add_rocm_version_argument(rocm_pjrt_parser)
+  add_rocm_amdgpu_targets_argument(rocm_pjrt_parser)
+  add_rocm_path_argument(rocm_pjrt_parser)
+  add_disable_nccl_argument(rocm_pjrt_parser)
+  add_artifact_subcommand_global_arguments(rocm_pjrt_parser)
+  add_global_arguments(rocm_pjrt_parser)
+
+  arch = platform.machine()
+  # Switch to lower case to match the case for the "ci_"/"rbe_" configs in the
+  # .bazelrc.
+  os_name = platform.system().lower()
 
   args = parser.parse_args()
 
-  logging.basicConfig()
+  logger.info("%s", BANNER)
+
   if args.verbose:
-    logger.setLevel(logging.DEBUG)
+    logging.getLogger().setLevel(logging.DEBUG)
+    logger.info("Verbose logging enabled")
 
-  if args.enable_cuda and args.enable_rocm:
-    parser.error("--enable_cuda and --enable_rocm cannot be enabled at the same time.")
+  logger.info(
+      "Building %s for %s %s...",
+      args.command,
+      os_name,
+      arch,
+  )
 
-  print(BANNER)
+  bazel_path, bazel_version = utils.get_bazel_path(args.bazel_path)
 
-  output_path = os.path.abspath(args.output_path)
-  os.chdir(os.path.dirname(__file__ or args.prog) or '.')
+  logging.debug("Bazel path: %s", bazel_path)
+  logging.debug("Bazel version: %s", bazel_version)
 
-  host_cpu = platform.machine()
+  executor = command.SubprocessExecutor()
+
+  # Start constructing the Bazel command
+  bazel_command = command.CommandBuilder(bazel_path)
+
+  if args.bazel_startup_options:
+    logging.debug(
+        "Additional Bazel startup options: %s", args.bazel_startup_options
+    )
+    parse_and_append_bazel_options(bazel_command, args.bazel_startup_options)
+
+  bazel_command.append("run")
+
+  if hasattr(args, "python_version"):
+    logging.debug("Hermetic Python version: %s", args.python_version)
+    bazel_command.append(
+        f"--repo_env=HERMETIC_PYTHON_VERSION={args.python_version}"
+    )
+
+  if args.command == "requirements_update":
+    if args.bazel_build_options:
+      logging.debug(
+          "Using additional build options: %s", args.bazel_build_options
+      )
+      parse_and_append_bazel_options(bazel_command, args.bazel_build_options)
+
+    if args.nightly_update:
+      logging.debug(
+          "--nightly_update is set. Bazel will run"
+          " //build:requirements_nightly.update"
+      )
+      bazel_command.append("//build:requirements_nightly.update")
+    else:
+      bazel_command.append("//build:requirements.update")
+
+    await executor.run(bazel_command.command, args.dry_run)
+    sys.exit(0)
+
   wheel_cpus = {
       "darwin_arm64": "arm64",
       "darwin_x86_64": "x86_64",
       "ppc": "ppc64le",
       "aarch64": "aarch64",
   }
-  # TODO(phawkins): support other bazel cpu overrides.
-  wheel_cpu = (wheel_cpus[args.target_cpu] if args.target_cpu is not None
-               else host_cpu)
+  target_cpu = (
+      wheel_cpus[args.target_cpu] if args.target_cpu is not None else arch
+  )
 
   # Find a working Bazel.
   bazel_path, bazel_version = utils.get_bazel_path(args.bazel_path)
@@ -389,26 +534,17 @@ def main():
     print(f"clang path: {clang_path}")
     clang_major_version = utils.get_clang_major_version(clang_path)
 
-  print("MKL-DNN enabled: {}".format("yes" if args.enable_mkl_dnn else "no"))
-  print(f"Target CPU: {wheel_cpu}")
-  print(f"Target CPU features: {args.target_cpu_features}")
+  if args.target_cpu:
+    logging.debug("Target CPU: %s", args.target_cpu)
+    bazel_command.append(f"--cpu={args.target_cpu}")
 
-  rocm_toolkit_path = args.rocm_path
-  print("CUDA enabled: {}".format("yes" if args.enable_cuda else "no"))
-  if args.enable_cuda:
-    if args.cuda_compute_capabilities is not None:
-      print(f"CUDA compute capabilities: {args.cuda_compute_capabilities}")
-    if args.cuda_version:
-      print(f"CUDA version: {args.cuda_version}")
-    if args.cudnn_version:
-      print(f"CUDNN version: {args.cudnn_version}")
-    print("NCCL enabled: {}".format("yes" if args.enable_nccl else "no"))
+  if args.enable_mkl_dnn:
+    logging.debug("Enabling MKL DNN")
+    bazel_command.append("--config=mkl_open_source_only")
 
-  print("ROCm enabled: {}".format("yes" if args.enable_rocm else "no"))
-  if args.enable_rocm:
-    if rocm_toolkit_path:
-      print(f"ROCm toolkit path: {rocm_toolkit_path}")
-    print(f"ROCm amdgpu targets: {args.rocm_amdgpu_targets}")
+  if hasattr(args, "disable_nccl") and args.disable_nccl:
+    logging.debug("Disabling NCCL")
+    bazel_command.append("--config=nonccl")
 
   write_bazelrc(
       remote_build=args.remote_build,
@@ -459,10 +595,12 @@ def main():
     output_path_jaxlib, output_path_jax_pjrt, output_path_jax_kernel = (
         _get_editable_output_paths(output_path)
     )
-  else:
-    output_path_jaxlib = output_path
-    output_path_jax_pjrt = output_path
-    output_path_jax_kernel = output_path
+    if arch in ["x86_64", "AMD64"]:
+      bazel_command.append(
+          "--config=avx_windows"
+          if os_name == "windows"
+          else "--config=avx_posix"
+      )
 
   if args.build_gpu_kernel_plugin == "" and not args.build_gpu_pjrt_plugin:
     build_cpu_wheel_command = [
@@ -529,4 +667,4 @@ def main():
 
 
 if __name__ == "__main__":
-  main()
+  asyncio.run(main())
