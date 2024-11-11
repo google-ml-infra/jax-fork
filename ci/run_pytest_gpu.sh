@@ -37,7 +37,6 @@ export JAX_SKIP_SLOW_TESTS=true
 
 "$JAXCI_PYTHON" -c "import jax; print(jax.default_backend()); print(jax.devices()); print(len(jax.devices()))"
 
-
 nvidia-smi
 export NCCL_DEBUG=WARN
 export TF_CPP_MIN_LOG_LEVEL=0
