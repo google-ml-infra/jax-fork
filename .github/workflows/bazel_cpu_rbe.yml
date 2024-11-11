@@ -32,9 +32,7 @@ jobs:
                    (contains(matrix.runner, 'windows-x86') && null) }}
 
     env:
-      # Disable running `run_docker_container.sh`. JAX self-hosted runners already run in a Docker
-      # container.
-      JAXCI_RUN_DOCKER_CONTAINER: 0
+      JAXCI_CLONE_MAIN_XLA: 1
       JAXCI_HERMETIC_PYTHON_VERSION: "3.12"
 
     steps:
