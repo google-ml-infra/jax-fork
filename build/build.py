@@ -154,22 +154,6 @@ def add_artifact_subcommand_global_arguments(parser: argparse.ArgumentParser):
   )
 
   parser.add_argument(
-      "--target_cpu",
-      default=None,
-      help="CPU platform to target. Default is the same as the host machine. ",
-  )
-
-  parser.add_argument(
-      "--local_xla_path",
-      type=str,
-      default=os.environ.get("JAXCI_XLA_GIT_DIR", ""),
-      help="""
-        Path to local XLA repository to use. If not set, Bazel uses the XLA at
-        the pinned version in workspace.bzl.
-        """,
-  )
-
-  parser.add_argument(
       "--output_path",
       type=str,
       default=os.path.join(os.getcwd(), "dist"),
@@ -248,7 +232,7 @@ def add_artifact_subcommand_global_arguments(parser: argparse.ArgumentParser):
   rocm_group.add_argument(
       "--rocm_amdgpu_targets",
       type=str,
-      default="gfx900,gfx906,gfx908,gfx90a,gfx1030",
+      default="gfx900,gfx906,gfx908,gfx90a,gfx940,gfx941,gfx942,gfx1030,gfx1100",
       help="A comma-separated list of ROCm amdgpu targets to support.",
   )
 
@@ -303,6 +287,22 @@ def add_artifact_subcommand_global_arguments(parser: argparse.ArgumentParser):
         to any architectural features and use whatever the C compiler generates
         by default. Ignored if --use_ci_bazelrc_flags is set, CI bazelrc flags
         enable release CPU features as default.
+        """,
+  )
+
+  compile_group.add_argument(
+      "--target_cpu",
+      default=None,
+      help="CPU platform to target. Default is the same as the host machine. ",
+  )
+
+  compile_group.add_argument(
+      "--local_xla_path",
+      type=str,
+      default=os.environ.get("JAXCI_XLA_GIT_DIR", ""),
+      help="""
+        Path to local XLA repository to use. If not set, Bazel uses the XLA at
+        the pinned version in workspace.bzl.
         """,
   )
 
@@ -480,8 +480,6 @@ async def main():
 
   # Wheel build command execution
   for wheel in args.wheel_list.split(","):
-    wheel = wheel.strip()
-   
     if wheel not in ARTIFACT_BUILD_TARGET_DICT.keys():
       logging.error("Incorrect wheel name provided: %s, valid choices are: %s", wheel, ",".join(ARTIFACT_BUILD_TARGET_DICT.keys()))
       continue
@@ -500,7 +498,7 @@ async def main():
     # unless the user explicitly sets --config=build_cuda_with_clang.
     if args.use_ci_bazelrc_flags and "rocm" not in wheel:
       bazelrc_config = utils.get_ci_bazelrc_config(os_name, arch.lower(), wheel)
-      logging.debug("--use_ci_bazelrc_flags is set, using --config=%s from .bazelrc", bazelrc_config)
+      logging.info("--use_ci_bazelrc_flags is set, using --config=%s from .bazelrc", bazelrc_config)
       wheel_build_command.append(f"--config={bazelrc_config}")
     else:
       apply_compile_flags_non_ci(
@@ -552,8 +550,8 @@ async def main():
           logging.error("Error retrieving the Bazel options to be written to .jax_configure.bazelrc, exiting.")
           sys.exit(1)
         f.write(jax_configure_options)
-        logging.debug("Bazel options written to .jax_configure.bazelrc")
-        logging.debug("--configure_only is set so not running any Bazel commands.")
+        logging.info("Bazel options written to .jax_configure.bazelrc")
+        logging.info("--configure_only is set so not running any Bazel commands.")
     else:
       # Append the build target to the Bazel command.
       build_target = ARTIFACT_BUILD_TARGET_DICT[wheel]
