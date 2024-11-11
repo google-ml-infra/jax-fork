@@ -25,7 +25,7 @@ jobs:
         shell: bash
     strategy:
       matrix:
-        runner: ["windows-x86-n2-64", "linux-x86-n2-64", "linux-arm64-t2a-48"]
+        runner: ["windows-x86-n2-64", "linux-x86-n2-16", "linux-arm64-t2a-16"]
         artifact: ["jax", "jaxlib", "jax-cuda-pjrt", "jax-cuda-plugin"]
         python: ["3.10", "3.11", "3.12"]
         # jax-cuda-pjrt and jax are pure Python packages so they do not need to be built for each
@@ -44,7 +44,7 @@ jobs:
           - artifact: "jax"
             runner: "windows-x86-n2-64"
           - artifact: "jax"
-            runner: "linux-arm64-t2a-48"
+            runner: "linux-arm64-t2a-16"
           # jax-cuda-plugin and jax-cuda-pjrt are not supported on Windows.
           - artifact: "jax-cuda-plugin"
             runner: "windows-x86-n2-64"
