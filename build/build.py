@@ -17,11 +17,13 @@
 # Helper script for building JAX's libjax easily.
 
 import argparse
-import asyncio
 import logging
 import os
 import platform
-import sys
+import textwrap
+
+from tools import utils
+
 
 from tools import command, utils
 
@@ -31,6 +33,81 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+def write_bazelrc(*, remote_build,
+                  cuda_version, cudnn_version, rocm_toolkit_path,
+                  cpu, cuda_compute_capabilities,
+                  rocm_amdgpu_targets, target_cpu_features,
+                  wheel_cpu, enable_mkl_dnn, use_clang, clang_path,
+                  clang_major_version, python_version,
+                  enable_cuda, enable_nccl, enable_rocm,
+                  use_cuda_nvcc):
+
+  with open("../.jax_configure.bazelrc", "w") as f:
+    if not remote_build:
+      f.write(textwrap.dedent("""\
+        build --strategy=Genrule=standalone
+        """))
+
+    if use_clang:
+      f.write(f'build --action_env CLANG_COMPILER_PATH="{clang_path}"\n')
+      f.write(f'build --repo_env CC="{clang_path}"\n')
+      f.write(f'build --repo_env BAZEL_COMPILER="{clang_path}"\n')
+      f.write('build --copt=-Wno-error=unused-command-line-argument\n')
+      if clang_major_version in (16, 17, 18):
+        # Necessary due to XLA's old version of upb. See:
+        # https://github.com/openxla/xla/blob/c4277a076e249f5b97c8e45c8cb9d1f554089d76/.bazelrc#L505
+        f.write("build --copt=-Wno-gnu-offsetof-extensions\n")
+
+    if rocm_toolkit_path:
+      f.write("build --action_env ROCM_PATH=\"{rocm_toolkit_path}\"\n"
+              .format(rocm_toolkit_path=rocm_toolkit_path))
+    if rocm_amdgpu_targets:
+      f.write(
+        f'build:rocm --action_env TF_ROCM_AMDGPU_TARGETS="{rocm_amdgpu_targets}"\n')
+    if cpu is not None:
+      f.write(f"build --cpu={cpu}\n")
+
+    if target_cpu_features == "release":
+      if wheel_cpu == "x86_64":
+        f.write("build --config=avx_windows\n" if utils.is_windows()
+                else "build --config=avx_posix\n")
+    elif target_cpu_features == "native":
+      if utils.is_windows():
+        print("--target_cpu_features=native is not supported on Windows; ignoring.")
+      else:
+        f.write("build --config=native_arch_posix\n")
+
+    if enable_mkl_dnn:
+      f.write("build --config=mkl_open_source_only\n")
+    if enable_cuda:
+      f.write("build --config=cuda\n")
+      if use_cuda_nvcc:
+        f.write("build --config=build_cuda_with_nvcc\n")
+      else:
+        f.write("build --config=build_cuda_with_clang\n")
+      f.write(f"build --action_env=CLANG_CUDA_COMPILER_PATH={clang_path}\n")
+      if not enable_nccl:
+        f.write("build --config=nonccl\n")
+      if cuda_version:
+        f.write("build --repo_env HERMETIC_CUDA_VERSION=\"{cuda_version}\"\n"
+                .format(cuda_version=cuda_version))
+      if cudnn_version:
+        f.write("build --repo_env HERMETIC_CUDNN_VERSION=\"{cudnn_version}\"\n"
+                .format(cudnn_version=cudnn_version))
+      if cuda_compute_capabilities:
+        f.write(
+          f'build:cuda --repo_env HERMETIC_CUDA_COMPUTE_CAPABILITIES="{cuda_compute_capabilities}"\n')
+    if enable_rocm:
+      f.write("build --config=rocm_base\n")
+      if not enable_nccl:
+        f.write("build --config=nonccl\n")
+      if use_clang:
+        f.write("build --config=rocm\n")
+        f.write(f"build --action_env=CLANG_COMPILER_PATH={clang_path}\n")
+    if python_version:
+      f.write(
+        "build --repo_env HERMETIC_PYTHON_VERSION=\"{python_version}\"".format(
+            python_version=python_version))
 BANNER = r"""
      _   _  __  __
     | | / \ \ \/ /
@@ -433,34 +510,29 @@ async def main():
       wheel_cpus[args.target_cpu] if args.target_cpu is not None else arch
   )
 
-  # If running in CI, we use the "ci_"/"rbe_" configs in the .bazelrc.
-  # These set a custom C++ Clang toolchain and the CUDA compiler to NVCC
-  # When not running in CI, we detect the path to Clang binary and pass it
-  # to Bazel to use as the C++ compiler. NVCC is used as the CUDA compiler
-  # unless the user explicitly sets --config=build_cuda_with_clang.
-  if args.use_ci_bazelrc_flags:
-    bazelrc_config = utils.get_ci_bazelrc_config(os_name, arch.lower(), args.command)
-    logging.debug("Using --config=%s from .bazelrc", bazelrc_config)
-    bazel_command.append(f"--config={bazelrc_config}")
-  else:
-    clang_path = args.clang_path or utils.get_clang_path_or_exit()
-    logging.debug("Using Clang as the compiler, clang path: %s", clang_path)
-    bazel_command.append(f"--action_env CLANG_COMPILER_PATH={clang_path}")
-    bazel_command.append(f"--repo_env CC={clang_path}")
-    bazel_command.append(f"--repo_env BAZEL_COMPILER={clang_path}")
-    bazel_command.append("--config=clang")
+  # Find a working Bazel.
+  bazel_path, bazel_version = utils.get_bazel_path(args.bazel_path)
+  print(f"Bazel binary path: {bazel_path}")
+  print(f"Bazel version: {bazel_version}")
 
-    if "cuda" in args.command:
-      bazel_command.append("--config=cuda")
-      bazel_command.append(
-            f"--action_env=CLANG_CUDA_COMPILER_PATH={clang_path}"
-        )
-      if args.build_cuda_with_clang:
-        logging.debug("Building CUDA with Clang")
-        bazel_command.append("--config=build_cuda_with_clang")
-      else:
-        logging.debug("Building CUDA with NVCC")
-        bazel_command.append("--config=build_cuda_with_nvcc")
+  if args.python_version:
+    python_version = args.python_version
+  else:
+    python_bin_path = utils.get_python_bin_path(args.python_bin_path)
+    print(f"Python binary path: {python_bin_path}")
+    python_version = utils.get_python_version(python_bin_path)
+    print("Python version: {}".format(".".join(map(str, python_version))))
+    utils.check_python_version(python_version)
+    python_version = ".".join(map(str, python_version))
+
+  print("Use clang: {}".format("yes" if args.use_clang else "no"))
+  clang_path = args.clang_path
+  clang_major_version = None
+  if args.use_clang:
+    if not clang_path:
+      clang_path = utils.get_clang_path_or_exit()
+    print(f"clang path: {clang_path}")
+    clang_major_version = utils.get_clang_major_version(clang_path)
 
   if args.target_cpu:
     logging.debug("Target CPU: %s", args.target_cpu)
@@ -474,10 +546,54 @@ async def main():
     logging.debug("Disabling NCCL")
     bazel_command.append("--config=nonccl")
 
-  if args.enable_release_cpu_features:
-    logging.debug(
-        "Using release cpu features: --config=avx_%s",
-        "windows" if os_name == "windows" else "posix",
+  write_bazelrc(
+      remote_build=args.remote_build,
+      cuda_version=args.cuda_version,
+      cudnn_version=args.cudnn_version,
+      rocm_toolkit_path=rocm_toolkit_path,
+      cpu=args.target_cpu,
+      cuda_compute_capabilities=args.cuda_compute_capabilities,
+      rocm_amdgpu_targets=args.rocm_amdgpu_targets,
+      target_cpu_features=args.target_cpu_features,
+      wheel_cpu=wheel_cpu,
+      enable_mkl_dnn=args.enable_mkl_dnn,
+      use_clang=args.use_clang,
+      clang_path=clang_path,
+      clang_major_version=clang_major_version,
+      python_version=python_version,
+      enable_cuda=args.enable_cuda,
+      enable_nccl=args.enable_nccl,
+      enable_rocm=args.enable_rocm,
+      use_cuda_nvcc=args.use_cuda_nvcc,
+  )
+
+  if args.requirements_update or args.requirements_nightly_update:
+    if args.requirements_update:
+      task = "//build:requirements.update"
+    else:  # args.requirements_nightly_update
+      task = "//build:requirements_nightly.update"
+    update_command = ([bazel_path] + args.bazel_startup_options +
+      ["run", "--verbose_failures=true", task, *args.bazel_options])
+    print(" ".join(update_command))
+    utils.shell(update_command)
+    return
+
+  if args.configure_only:
+    return
+
+  print("\nBuilding XLA and installing it in the jaxlib source tree...")
+
+  command_base = (
+    bazel_path,
+    *args.bazel_startup_options,
+    "run",
+    "--verbose_failures=true",
+    *args.bazel_options,
+  )
+
+  if args.build_gpu_plugin and args.editable:
+    output_path_jaxlib, output_path_jax_pjrt, output_path_jax_kernel = (
+        _get_editable_output_paths(output_path)
     )
     if arch in ["x86_64", "AMD64"]:
       bazel_command.append(
@@ -486,99 +602,68 @@ async def main():
           else "--config=avx_posix"
       )
 
-  if args.enable_native_cpu_features:
-    if os_name == "windows":
-      logger.warning(
-          "--target_cpu_features=native is not supported on Windows;"
-          " ignoring."
-      )
+  if args.build_gpu_kernel_plugin == "" and not args.build_gpu_pjrt_plugin:
+    build_cpu_wheel_command = [
+        *command_base,
+        "//jaxlib/tools:build_wheel",
+        "--",
+        f"--output_path={output_path_jaxlib}",
+        f"--jaxlib_git_hash={utils.get_githash()}",
+        f"--cpu={wheel_cpu}",
+    ]
+    if args.build_gpu_plugin:
+      build_cpu_wheel_command.append("--skip_gpu_kernels")
+    if args.editable:
+      build_cpu_wheel_command.append("--editable")
+    print(" ".join(build_cpu_wheel_command))
+    utils.shell(build_cpu_wheel_command)
+
+  if args.build_gpu_plugin or (args.build_gpu_kernel_plugin == "cuda") or \
+      (args.build_gpu_kernel_plugin == "rocm"):
+    build_gpu_kernels_command = [
+        *command_base,
+        "//jaxlib/tools:build_gpu_kernels_wheel",
+        "--",
+        f"--output_path={output_path_jax_kernel}",
+        f"--jaxlib_git_hash={utils.get_githash()}",
+        f"--cpu={wheel_cpu}",
+    ]
+    if args.enable_cuda:
+      build_gpu_kernels_command.append(f"--enable-cuda={args.enable_cuda}")
+      build_gpu_kernels_command.append(f"--platform_version={args.gpu_plugin_cuda_version}")
+    elif args.enable_rocm:
+      build_gpu_kernels_command.append(f"--enable-rocm={args.enable_rocm}")
+      build_gpu_kernels_command.append(f"--platform_version={args.gpu_plugin_rocm_version}")
     else:
-      logging.debug("Using native cpu features: --config=native_arch_posix")
-      bazel_command.append("--config=native_arch_posix")
+      raise ValueError("Unsupported GPU plugin backend. Choose either 'cuda' or 'rocm'.")
+    if args.editable:
+      build_gpu_kernels_command.append("--editable")
+    print(" ".join(build_gpu_kernels_command))
+    utils.shell(build_gpu_kernels_command)
 
-  if "cuda" in args.command:
-    if args.cuda_version:
-      logging.debug("Hermetic CUDA version: %s", args.cuda_version)
-      bazel_command.append(
-          f"--repo_env=HERMETIC_CUDA_VERSION={args.cuda_version}"
-      )
-    if args.cudnn_version:
-      logging.debug("Hermetic cuDNN version: %s", args.cudnn_version)
-      bazel_command.append(
-          f"--repo_env=HERMETIC_CUDNN_VERSION={args.cudnn_version}"
-      )
-    if args.cuda_compute_capabilities:
-      logging.debug(
-          "Hermetic CUDA compute capabilities: %s",
-          args.cuda_compute_capabilities,
-      )
-      bazel_command.append(
-          "--repo_env"
-          f" HERMETIC_CUDA_COMPUTE_CAPABILITIES={args.cuda_compute_capabilities}"
-      )
-
-  if "rocm" in args.command:
-    bazel_command.append("--config=rocm")
-
-    if args.rocm_path:
-      logging.debug("ROCm tookit path: %s", args.rocm_path)
-      bazel_command.append(f"--action_env ROCM_PATH='{args.rocm_path}'")
-    if args.rocm_amdgpu_targets:
-      logging.debug("ROCm AMD GPU targets: %s", args.rocm_amdgpu_targets)
-      bazel_command.append(
-          f"--action_env TF_ROCM_AMDGPU_TARGETS={args.rocm_amdgpu_targets}"
-      )
-
-  if args.local_xla_path:
-    logging.debug("Local XLA path: %s", args.local_xla_path)
-    bazel_command.append(f"--override_repository=xla={args.local_xla_path}")
-
-  if args.bazel_build_options:
-    logging.debug(
-        "Additional Bazel build options: %s", args.bazel_build_options
-    )
-    parse_and_append_bazel_options(bazel_command, args.bazel_build_options)
-
-  # Append the build target to the Bazel command.
-  build_target = ARTIFACT_BUILD_TARGET_DICT[args.command]
-  bazel_command.append(build_target)
-
-  # Read output directory. Default is store the artifacts in the "dist/"
-  # directory in JAX's GitHub repository root.
-  output_path = args.output_path
-
-  # If running on Windows, adjust the paths for compatibility.
-  if os_name == "windows":
-    output_path = utils.adjust_paths_for_windows(output_path)
-
-  logger.debug("Artifacts output directory: %s", output_path)
-
-  bazel_command.append("--")
-
-  if args.editable:
-    logger.debug("Building an editable build")
-    output_path = os.path.join(output_path, args.command)
-    bazel_command.append("--editable")
-
-  bazel_command.append(f"--output_path={output_path}")
-  bazel_command.append(f"--cpu={target_cpu}")
-
-  if "cuda" in args.command:
-    bazel_command.append("--enable-cuda=True")
-    if args.cuda_version:
-      cuda_major_version = args.cuda_version.split(".")[0]
+  if args.build_gpu_plugin or args.build_gpu_pjrt_plugin:
+    build_pjrt_plugin_command = [
+        *command_base,
+        "//jaxlib/tools:build_gpu_plugin_wheel",
+        "--",
+        f"--output_path={output_path_jax_pjrt}",
+        f"--jaxlib_git_hash={utils.get_githash()}",
+        f"--cpu={wheel_cpu}",
+    ]
+    if args.enable_cuda:
+      build_pjrt_plugin_command.append(f"--enable-cuda={args.enable_cuda}")
+      build_pjrt_plugin_command.append(f"--platform_version={args.gpu_plugin_cuda_version}")
+    elif args.enable_rocm:
+      build_pjrt_plugin_command.append(f"--enable-rocm={args.enable_rocm}")
+      build_pjrt_plugin_command.append(f"--platform_version={args.gpu_plugin_rocm_version}")
     else:
-      cuda_major_version = utils.get_cuda_major_version()
-    bazel_command.append(f"--platform_version={cuda_major_version}")
+      raise ValueError("Unsupported GPU plugin backend. Choose either 'cuda' or 'rocm'.")
+    if args.editable:
+      build_pjrt_plugin_command.append("--editable")
+    print(" ".join(build_pjrt_plugin_command))
+    utils.shell(build_pjrt_plugin_command)
 
-  if "rocm" in args.command:
-    bazel_command.append("--enable-rocm=True")
-    bazel_command.append(f"--platform_version={args.rocm_version}")
-
-  git_hash = utils.get_githash()
-  bazel_command.append(f"--jaxlib_git_hash={git_hash}")
-
-  await executor.run(bazel_command.command, args.dry_run)
+  utils.shell([bazel_path] + args.bazel_startup_options + ["shutdown"])
 
 
 if __name__ == "__main__":

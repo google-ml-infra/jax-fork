@@ -31,6 +31,21 @@ logger = logging.getLogger(__name__)
 def is_windows():
   return sys.platform.startswith("win32")
 
+def shell(cmd):
+  try:
+    logger.info("shell(): %s", cmd)
+    output = subprocess.check_output(cmd)
+  except subprocess.CalledProcessError as e:
+    logger.info("subprocess raised: %s", e)
+    if e.output:
+      print(e.output)
+    raise
+  except Exception as e:
+    logger.info("subprocess raised: %s", e)
+    raise
+  return output.decode("UTF-8").strip()
+
+
 # Bazel
 BAZEL_BASE_URI = "https://github.com/bazelbuild/bazel/releases/download/6.5.0/"
 BazelPackage = collections.namedtuple(
@@ -165,12 +180,7 @@ def get_bazel_path(bazel_path_flag):
 
 def get_bazel_version(bazel_path):
   try:
-    version_output = subprocess.run(
-        [bazel_path, "--version"],
-        encoding="utf-8",
-        capture_output=True,
-        check=True,
-    ).stdout.strip()
+    version_output = shell([bazel_path, "--version"])
   except (subprocess.CalledProcessError, OSError):
     return None
   match = re.search(r"bazel *([0-9\\.]+)", version_output)
@@ -193,57 +203,47 @@ def get_clang_path_or_exit():
     sys.exit(-1)
 
 
-def get_cuda_major_version():
-  """Extract the CUDA major version from the .bazelrc"""
-  with open(".bazelrc", "r") as f:
-    for line in f:
-      match = re.search(r'HERMETIC_CUDA_VERSION="([^"]+)"', line)
-      if match:
-        cuda_version=match.group(1)
-        return cuda_version.split(".")[0]
-  return None
+def get_clang_major_version(clang_path):
+  clang_version_proc = subprocess.run(
+      [clang_path, "-E", "-P", "-"],
+      input="__clang_major__",
+      check=True,
+      capture_output=True,
+      text=True,
+  )
+  major_version = int(clang_version_proc.stdout)
+
+  return major_version
 
 
-def get_ci_bazelrc_config(os_name: str, arch: str, artifact: str):
-  """Returns the bazelrc config for the given architecture and OS.
-
-  Used in CI builds to retrieve either the "ci_"/"rbe_" configs from the
-  .bazelrc
-  """
-
-  bazelrc_config = f"{os_name}_{arch}"
-
-  # If building on Linux x86 or Windows, use the "rbe_" flags otherwise use
-  # the "ci_" (non-rbe) flags
-  if (os_name == "linux" and arch == "x86_64") or (
-      os_name == "windows" and arch == "amd64"
-  ):
-    bazelrc_config = "rbe_" + bazelrc_config
-  else:
-    bazelrc_config = "ci_" + bazelrc_config
-
-  # When building jax-cuda-plugin or jax-cuda-pjrt, append "_cuda" to the
-  # bazelrc config to use the CUDA specific configs.
-  if "cuda" in artifact:
-    bazelrc_config = bazelrc_config + "_cuda"
-
-  return bazelrc_config
+# Python
+def get_python_bin_path(python_bin_path_flag):
+  """Returns the path to the Python interpreter to use."""
+  path = python_bin_path_flag or sys.executable
+  return path.replace(os.sep, "/")
 
 
-def adjust_paths_for_windows(output_dir: str) -> tuple[str, str]:
-  """Adjusts the paths to be compatible with Windows."""
-  logger.debug("Adjusting paths for Windows...")
-  output_dir = output_dir.replace("/", "\\")
-  return output_dir
+def get_python_version(python_bin_path):
+  version_output = shell([
+      python_bin_path,
+      "-c",
+      (
+          'import sys; print("{}.{}".format(sys.version_info[0], '
+          "sys.version_info[1]))"
+      ),
+  ])
+  major, minor = map(int, version_output.split("."))
+  return major, minor
 
+def check_python_version(python_version):
+  if python_version < (3, 10):
+    print("ERROR: JAX requires Python 3.10 or newer, found ", python_version)
+    sys.exit(-1)
 
 def get_githash():
   try:
     return subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        encoding="utf-8",
-        capture_output=True,
-        check=True,
+        ["git", "rev-parse", "HEAD"], encoding="utf-8", capture_output=True
     ).stdout.strip()
   except OSError:
     return ""

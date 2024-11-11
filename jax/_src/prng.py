@@ -279,6 +279,11 @@ class PRNGKeyArray(jax.Array):
   __hash__ = None  # type: ignore[assignment]
   __array_priority__ = 100
 
+  def __array__(self, dtype: np.dtype | None = None, copy: bool | None = None) -> np.ndarray:
+    raise TypeError("JAX array with PRNGKey dtype cannot be converted to a NumPy array."
+                    " Use jax.random.key_data(arr) if you wish to extract the underlying"
+                    " integer array.")
+
   # Overwritten immediately below
   @property
   def at(self)                  -> _IndexUpdateHelper: assert False  # type: ignore[override]
@@ -401,6 +406,11 @@ class KeyTyRules:
     return PRNGKeyArray(aval.dtype._impl, phys_result)
 
   @staticmethod
+  def device_get(val):
+    buffer = api.device_get(random_unwrap(val))
+    return random_wrap(buffer, impl=val.dtype._impl)
+
+  @staticmethod
   def device_put_sharded(vals, aval, sharding, devices):
     physical_aval = core.physical_aval(aval)
     physical_buffers = tree_util.tree_map(random_unwrap, vals)
@@ -463,12 +473,13 @@ xla.pytype_aval_mappings[PRNGKeyArray] = lambda x: x.aval
 xla.canonicalize_dtype_handlers[PRNGKeyArray] = lambda x: x
 
 
-def key_array_shard_arg_handler(xs: Sequence[PRNGKeyArray], shardings, layouts):
+def key_array_shard_arg_handler(xs: Sequence[PRNGKeyArray], shardings, layouts,
+                                copy_semantics):
   arrs = [x._base_array for x in xs]
   phys_shardings = [physical_sharding(x.aval, sharding)
                     for x, sharding in zip(xs, shardings)]
   # TODO(yashkatariya): `layouts` should be converted to physical layouts.
-  return pxla.shard_args(phys_shardings, layouts, arrs)
+  return pxla.shard_args(phys_shardings, layouts, copy_semantics, arrs)
 
 
 pxla.shard_arg_handlers[PRNGKeyArray] = key_array_shard_arg_handler
@@ -807,7 +818,7 @@ def _threefry2x32_abstract_eval(*args):
     shape = lax_internal.broadcasting_shape_rule(*args)
     aval = core.ShapedArray(shape, jnp.dtype(jnp.uint32))
   else:
-    aval = core.UnshapedArray(jnp.dtype(jnp.uint32))
+    raise TypeError(f"Arguments to threefry2x32 must all be arrays, got {args}")
   return (aval,) * 2
 
 
@@ -1067,8 +1078,9 @@ def threefry_2x32(keypair, count):
 
   odd_size = count.size % 2
   if not isinstance(odd_size, int):
-    msg = ("jax.random functions have limited support for shape polymorphism. "
-           "In particular, the product of the known dimensions must be even.")
+    msg = ("jax.random functions have limited support for shape polymorphism "
+           "when using threefry. "
+           f"In particular, the array size ({count.size}) must be even.")
     raise core.InconclusiveDimensionOperation(msg)
 
   if odd_size:
