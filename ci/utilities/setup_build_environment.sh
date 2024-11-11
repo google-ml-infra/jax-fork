@@ -36,6 +36,10 @@ if [[ "$JAXCI_CLONE_MAIN_XLA" == 1 ]]; then
   # Clone only if $(pwd)/xla does not exist to avoid failure on re-runs.
   if [[ ! -d $(pwd)/xla ]]; then
     clone_main_xla
+  else
+    echo "JAXCI_CLONE_MAIN_XLA set but local XLA folder already exists: $(pwd)/xla"
+    # Set JAXCI_XLA_GIT_DIR if local XLA already exists
+    export JAXCI_XLA_GIT_DIR=$(pwd)/xla
   fi
 fi
 
