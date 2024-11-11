@@ -26,7 +26,6 @@ jobs:
       image: "gcr.io/tensorflow-testing/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest"
 
     env:
-      JAXCI_CLONE_MAIN_XLA: 1
       JAXCI_HERMETIC_PYTHON_VERSION: 3.11
 
     steps:
@@ -37,10 +36,16 @@ jobs:
         with:
           halt-dispatch-input: ${{ inputs.halt-for-connection }}
       - name: Build jaxlib
+        env:
+          JAXCI_CLONE_MAIN_XLA: 1
         run: ./ci/build_artifacts.sh "ci/envs/build_artifacts/jaxlib.env"
       - name: Build jax-cuda-plugin
+        env:
+          JAXCI_CLONE_MAIN_XLA: 1
         run: ./ci/build_artifacts.sh "ci/envs/build_artifacts/jax-cuda-plugin.env"
       - name: Build jax-cuda-pjrt
+        env:
+          JAXCI_CLONE_MAIN_XLA: 1
         run: ./ci/build_artifacts.sh "ci/envs/build_artifacts/jax-cuda-pjrt.env"
       - name: Run Bazel GPU tests locally
         run: ./ci/run_bazel_test_gpu_non_rbe.sh 
