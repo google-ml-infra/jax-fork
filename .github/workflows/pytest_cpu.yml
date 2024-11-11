@@ -52,6 +52,6 @@ jobs:
       - name: Install dependencies
         env:
           JAXCI_PYTHON: python${{ matrix.python }}
-        run: $JAXCI_PYTHON -m pip install --upgrade     numpy=="2.0.0" scipy=="1.13.1"     wheel build pytest-xdist absl-py opt-einsum colorama portpicker     matplotlib 'importlib_metadata>=4.6' hypothesis flatbuffers filelock
+        run: $JAXCI_PYTHON -m pip install -r build/requirements.in
       - name: Run Pytest CPU tests
         run: ./ci/run_pytest_cpu.sh
