@@ -45,17 +45,17 @@ fi
 
 # Build the jaxlib CPU artifact
 if [[ "$JAXCI_BUILD_JAXLIB" == 1 ]]; then
-  python build/build.py jaxlib --use_ci_bazelrc_flags --python_version=$JAXCI_HERMETIC_PYTHON_VERSION --verbose
+  python build/build.py build_artifacts --wheel_list="jaxlib" --use_ci_bazelrc_flags --python_version=$JAXCI_HERMETIC_PYTHON_VERSION --verbose
 fi
 
 # Build the jax-cuda-plugin artifact
 if [[ "$JAXCI_BUILD_PLUGIN" == 1 ]]; then
-  python build/build.py jax-cuda-plugin --use_ci_bazelrc_flags --python_version=$JAXCI_HERMETIC_PYTHON_VERSION --verbose
+  python build/build.py build_artifacts --wheel_list="jax-cuda-plugin" --use_ci_bazelrc_flags --python_version=$JAXCI_HERMETIC_PYTHON_VERSION --verbose
 fi
 
 # Build the jax-cuda-pjrt artifact
 if [[ "$JAXCI_BUILD_PJRT" == 1 ]]; then
-  python build/build.py jax-cuda-pjrt --use_ci_bazelrc_flags --verbose
+  python build/build.py build_artifacts --wheel_list="jax-cuda-pjrt" --use_ci_bazelrc_flags --verbose
 fi
 
 # After building `jaxlib`, `jaxcuda-plugin`, and `jax-cuda-pjrt`, we run
