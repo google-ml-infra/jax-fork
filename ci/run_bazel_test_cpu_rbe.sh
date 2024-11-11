@@ -25,8 +25,10 @@ set -exu -o history -o allexport
 # Inherit default JAXCI environment variables.
 source ci/envs/default.env
 
-# Clone XLA at HEAD.
-export JAXCI_CLONE_MAIN_XLA=1
+# Clone XLA at HEAD if path to local XLA is not provided
+if [[ -z "$JAXCI_XLA_GIT_DIR" ]]; then
+    export JAXCI_CLONE_MAIN_XLA=1
+fi
 
 # Set up the build environment.
 source "ci/utilities/setup_build_environment.sh"
