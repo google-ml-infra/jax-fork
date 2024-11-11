@@ -1,0 +1,55 @@
+name: Run Pytest GPU tests
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      halt-for-connection:
+        description: 'Should this workflow run wait for a remote connection?'
+        type: choice
+        required: true
+        default: 'no'
+        options:
+        - 'yes'
+        - 'no'
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        runner: ["mike-x86-g2-48-l4-4gpu"]
+        python: ["3.10"]
+
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: "gcr.io/tensorflow-testing/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest"
+
+    env:
+      JAXCI_CLONE_MAIN_XLA: 1
+      JAXCI_HERMETIC_PYTHON_VERSION: ${{ matrix.python }}
+
+    steps:
+      - uses: actions/checkout@v3
+      # Halt for testing
+      - name: Wait For Connection
+        uses: google-ml-infra/actions/ci_connection@main
+        with:
+          halt-dispatch-input: ${{ inputs.halt-for-connection }}
+      - name: Build jaxlib
+        run: ./ci/build_artifacts.sh "ci/envs/build_artifacts/jaxlib.env"
+      - name: Build jax-cuda-plugin
+        run: ./ci/build_artifacts.sh "ci/envs/build_artifacts/jax-cuda-plugin.env"
+      - name: Build jax-cuda-pjrt
+        run: ./ci/build_artifacts.sh "ci/envs/build_artifacts/jax-cuda-pjrt.env"
+      - name: Install pytest
+        env:
+          JAXCI_PYTHON: python${{ matrix.python }}
+        run: $JAXCI_PYTHON -m pip install pytest
+      - name: Install dependencies
+        env:
+          JAXCI_PYTHON: python${{ matrix.python }}
+        run: $JAXCI_PYTHON -m pip install -r build/requirements.in
+      - name: Run Pytest GPU tests
+        run: ./ci/run_pytest_gpu.sh
