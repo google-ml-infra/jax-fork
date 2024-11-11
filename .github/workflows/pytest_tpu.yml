@@ -20,6 +20,7 @@ jobs:
     strategy:
       matrix:
         runner: ["linux-x86-ct5lp-224-8tpu"]
+        tpu_cores: ["8"]
         python: ["3.10"]
 
     runs-on: ${{ matrix.runner }}
@@ -54,4 +55,6 @@ jobs:
           JAXCI_PYTHON: python${{ matrix.python }}
         run: $JAXCI_PYTHON -m pip install --pre libtpu-nightly -f "https://storage.googleapis.com/jax-releases/libtpu_releases.html"
       - name: Run Pytest TPU tests
+        env:
+          JAXCI_TPU_CORES: ${{ matrix.tpu_cores }}
         run: ./ci/run_pytest_tpu.sh
