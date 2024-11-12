@@ -39,37 +39,11 @@ if ! docker container inspect jax >/dev/null 2>&1 ; then
     JAXCI_DOCKER_ARGS="$JAXCI_DOCKER_ARGS -v $HOME/.config/gcloud:/root/.config/gcloud"
   fi
 
-  # If XLA repository on the local system is to be used, map it to the container
-  # and set the JAXCI_XLA_GIT_DIR environment variable to the container path.
-  if [[ -n $JAXCI_XLA_GIT_DIR ]]; then
-    JAXCI_DOCKER_ARGS="$JAXCI_DOCKER_ARGS -v $JAXCI_XLA_GIT_DIR:$JAXCI_DOCKER_WORK_DIR/xla -e JAXCI_XLA_GIT_DIR=$JAXCI_DOCKER_WORK_DIR/xla"
-  fi
-
-  # Set the output directory to the container path.
-  export JAXCI_OUTPUT_DIR=$JAXCI_DOCKER_WORK_DIR/dist
-
-  # Capture the environment variables that get set by JAXCI_ENV_FILE and store
-  # them in a file. This is needed so that we know which envs to set when
-  # setting up the Docker container in `setup_docker.sh`. An easier solution
-  # would be to just grep for "JAXCI_" variables but unfortunately, this is not
-  # robust as there are some variables such as `JAX_ENABLE_X64`, `NCCL_DEBUG`,
-  # etc that are used by JAX but do not have the `JAXCI_` prefix.
-  envs_after=$(mktemp)
-  env > "$envs_after"
-
-  jax_ci_envs=$(mktemp)
-
-  # Only get the new environment variables set by JAXCI_ENV_FILE. Use
-  # "env_before" that gets set in setup.sh for the initial environment
-  # variables. diff exits with a return code. This can end the build abrupty so
-  # we use "|| true" to ignore the return code and continue.
-  diff <(sort "$envs_before") <(sort "$envs_after") | grep "^> " | sed 's/^> //' | grep -v "^BASH_FUNC" > "$jax_ci_envs" || true
-
   # Start the container. `user_set_jaxci_envs` is read after `jax_ci_envs` to
   # allow the user to override any environment variables set by JAXCI_ENV_FILE.
-  docker run --env-file $jax_ci_envs --env-file "$user_set_jaxci_envs" $JAXCI_DOCKER_ARGS --name jax \
-      -w $JAXCI_DOCKER_WORK_DIR -itd --rm \
-      -v "$JAXCI_JAX_GIT_DIR:$JAXCI_DOCKER_WORK_DIR" \
+  docker run $JAXCI_DOCKER_ARGS --name jax \
+      -w /jax -itd --rm \
+      -v "$JAXCI_JAX_GIT_DIR:/jax" \
       "$JAXCI_DOCKER_IMAGE" \
     bash
 
@@ -79,14 +53,3 @@ if ! docker container inspect jax >/dev/null 2>&1 ; then
     netsh advfirewall firewall add rule name="Allow Metadata Proxy" dir=in action=allow protocol=TCP localport=80 remoteip="$CONTAINER_IP_ADDR"
   fi
 fi
-
-# Update `JAXCI_OUTPUT_DIR`, `JAXCI_JAX_GIT_DIR` and `JAXCI_XLA_GIT_DIR` with
-# the new Docker path on the host shell environment. This is needed because when
-# running in Docker with `docker exec`, the commands are run on the host shell
-# environment and as such the following variables need to be updated with The
-# Docker paths.
-export JAXCI_OUTPUT_DIR=$JAXCI_DOCKER_WORK_DIR/dist
-export JAXCI_JAX_GIT_DIR=$JAXCI_DOCKER_WORK_DIR
-export JAXCI_XLA_GIT_DIR=$JAXCI_DOCKER_WORK_DIR/xla
-
-git config --global --add safe.directory $JAXCI_DOCKER_WORK_DIR
