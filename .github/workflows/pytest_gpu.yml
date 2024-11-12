@@ -20,7 +20,7 @@ jobs:
         python: ["3.10"]
 
     runs-on: "mike-x86-g2-48-l4-4gpu"
-    container: "gcr.io/tensorflow-testing/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest"
+    container: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest"
     
     name: "Pytest GPU (Build wheels on CUDA 12.3)"
     env:
