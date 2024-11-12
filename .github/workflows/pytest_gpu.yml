@@ -30,10 +30,6 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       # Halt for testing
-      - name: Wait For Connection
-        uses: google-ml-infra/actions/ci_connection@main
-        with:
-          halt-dispatch-input: ${{ inputs.halt-for-connection }}
       - name: Build jaxlib
         run: ./ci/build_artifacts.sh "ci/envs/build_artifacts/jaxlib.env"
       - name: Build jax-cuda-plugin
@@ -48,5 +44,9 @@ jobs:
         env:
           JAXCI_PYTHON: python${{ matrix.python }}
         run: $JAXCI_PYTHON -m pip install -r build/requirements.in
+      - name: Wait For Connection
+        uses: google-ml-infra/actions/ci_connection@main
+        with:
+          halt-dispatch-input: ${{ inputs.halt-for-connection }}
       - name: Run Pytest GPU tests
         run: ./ci/run_pytest_gpu.sh
