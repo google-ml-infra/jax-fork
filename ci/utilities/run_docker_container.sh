@@ -13,8 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-#
 # Set up the Docker container and start it for JAX CI jobs.
+#
+# -e: abort script if one command fails
+# -u: error if undefined variable used
+# -x: log all commands
+# -o history: record shell history
+# -o allexport: export all functions and variables to be available to subscripts
+set -exu -o history -o allexport
+
 source ci/envs/docker_images.env
 
 # Keep the existing "jax" container if it's already present.
