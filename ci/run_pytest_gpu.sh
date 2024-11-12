@@ -32,6 +32,19 @@ export JAXCI_INSTALL_WHEELS_LOCALLY=1
 # Set up the build environment.
 source "ci/utilities/setup_build_environment.sh"
 
+
+# Install cuda deps into the current python
+"$JAXCI_PYTHON" -m pip install "nvidia-cublas-cu12>=12.1.3.1"
+"$JAXCI_PYTHON" -m pip install "nvidia-cuda-cupti-cu12>=12.1.105"
+"$JAXCI_PYTHON" -m pip install "nvidia-cuda-nvcc-cu12>=12.1.105"
+"$JAXCI_PYTHON" -m pip install "nvidia-cuda-runtime-cu12>=12.1.105"
+"$JAXCI_PYTHON" -m pip install "nvidia-cudnn-cu12>=9.1,<10.0"
+"$JAXCI_PYTHON" -m pip install "nvidia-cufft-cu12>=11.0.2.54"
+"$JAXCI_PYTHON" -m pip install "nvidia-cusolver-cu12>=11.4.5.107"
+"$JAXCI_PYTHON" -m pip install "nvidia-cusparse-cu12>=12.1.0.106"
+"$JAXCI_PYTHON" -m pip install "nvidia-nccl-cu12>=2.18.1"
+"$JAXCI_PYTHON" -m pip install "nvidia-nvjitlink-cu12>=12.1.105"
+
 export PY_COLORS=1
 export JAX_SKIP_SLOW_TESTS=true
 
