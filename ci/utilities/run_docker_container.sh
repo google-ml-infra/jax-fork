@@ -22,7 +22,7 @@
 # -o allexport: export all functions and variables to be available to subscripts
 set -exu -o history -o allexport
 
-source ci/envs/docker_images.env
+source ./ci/envs/docker_images.env
 
 # Keep the existing "jax" container if it's already present.
 if ! docker container inspect jax >/dev/null 2>&1 ; then
