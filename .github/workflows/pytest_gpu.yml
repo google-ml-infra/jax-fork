@@ -1,9 +1,7 @@
 name: Run Pytest GPU tests
 
 on:
-  # pull_request:
-  #   branches:
-  #     - main
+  pull_request:
   workflow_dispatch:
     inputs:
       halt-for-connection:
@@ -48,9 +46,9 @@ jobs:
     strategy:
       matrix:
         test_env: [
-          {cuda_version: "12.3", runner: "linux-x86-g2-48-l4-4gpu", 
+          {cuda_version: "12.3", runner: "mike-x86-g2-48-l4-4gpu", 
           image: "gcr.io/tensorflow-testing/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest"},
-          {cuda_version: "12.1", runner: "linux-x86-g2-48-l4-4gpu", 
+          {cuda_version: "12.1", runner: "mike-x86-g2-48-l4-4gpu", 
           image: "gcr.io/tensorflow-testing/nosla-cuda12.1-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest"},
           ]
         python: ["3.10"]
