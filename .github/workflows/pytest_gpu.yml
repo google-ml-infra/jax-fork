@@ -1,7 +1,7 @@
 name: Run Pytest GPU tests
 
 on:
-  pull_request:
+  push:
   workflow_dispatch:
     inputs:
       halt-for-connection:
