@@ -24,7 +24,7 @@ jobs:
     
     name: "Pytest GPU (Build wheels on CUDA 12.3)"
     env:
-      JAXCI_CLONE_MAIN_XLA: 1
+      JAXCI_CLONE_MAIN_XLA: 0
       JAXCI_HERMETIC_PYTHON_VERSION: ${{ matrix.python }}
 
     steps:
