@@ -73,7 +73,7 @@ jobs:
         with:
           halt-dispatch-input: ${{ inputs.halt-for-connection }}
       - name: Download the artifacts built in the "build_artifacts" job
-        run: gsutil -m cp -r gs://general-ml-ci-transient/jax-github-actions/"${{ github.workflow }}"/${{ github.run_number }}/${{ github.run_attempt }} $(pwd)/dist
+        run: mkdir -p $(pwd)/dist && gsutil -m cp -r gs://general-ml-ci-transient/jax-github-actions/"${{ github.workflow }}"/${{ github.run_number }}/${{ github.run_attempt }} $(pwd)/dist
       - name: Install pytest
         env:
           JAXCI_PYTHON: python${{ matrix.python }}
