@@ -21,8 +21,8 @@ jobs:
       matrix:
         python: ["3.10"]
 
-    runs-on: "linux-x86-g2-48-l4-4gpu"
-    container: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest"
+    runs-on: "linux-x86-n2-16"
+    container: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest"
     
     name: "Pytest GPU (Build wheels on CUDA 12.3)"
     env:
@@ -43,7 +43,7 @@ jobs:
       - name: Build jax-cuda-pjrt
         run: ./ci/build_artifacts.sh "jax-cuda-pjrt"
       - name: Upload artifacts to GCS bucket
-        run: gsutil -m rsync -d -r gs://general-ml-ci-transient/jax-github-actions/${{ github.workflow }}/${{ github.run_id }}/${{ github.run_attempt }}
+        run:  ~/usr/local/bin/google-cloud-sdk/bin/gsutil -m rsync -d -r gs://general-ml-ci-transient/jax-github-actions/${{ github.workflow }}/${{ github.run_id }}/${{ github.run_attempt }}
   
   run_tests:
     needs: build_artifacts
