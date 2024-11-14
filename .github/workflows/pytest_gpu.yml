@@ -42,6 +42,38 @@ jobs:
         run: ./ci/build_artifacts.sh "jax-cuda-plugin"
       - name: Build jax-cuda-pjrt
         run: ./ci/build_artifacts.sh "jax-cuda-pjrt"
+      - name: Upload artifacts to GCS bucket
+        run: gsutil -m rsync -d -r gs://general-ml-ci-transient/jax-github-actions/${{ github.workflow }}/${{ github.run_id }}/${{ github.run_attempt }}
+  
+  run_tests:
+    needs: build_artifacts
+    strategy:
+      matrix:
+        test_env: [
+          {cuda_version: "12.3", runner: "linux-x86-g2-48-l4-4gpu", 
+          image: "gcr.io/tensorflow-testing/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest"},
+          {cuda_version: "12.1", runner: "linux-x86-g2-48-l4-4gpu", 
+          image: "gcr.io/tensorflow-testing/nosla-cuda12.1-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest"},
+          ]
+        python: ["3.10"]
+
+    runs-on: ${{ matrix.test_env.runner }}
+    container:
+      image: ${{ matrix.test_env.image }}
+    
+    name: "Pytest GPU (Test on CUDA ${{ matrix.test_env.cuda_version }})"
+    env:
+      JAXCI_HERMETIC_PYTHON_VERSION: ${{ matrix.python }}
+
+    steps:
+      - uses: actions/checkout@v3
+      # Halt for testing
+      - name: Wait For Connection
+        uses: google-ml-infra/actions/ci_connection@main
+        with:
+          halt-dispatch-input: ${{ inputs.halt-for-connection }}
+      - name: Download the artifacts built in the "build_artifacts" job
+        run: gsutil -m cp -r gs://general-ml-ci-transient/jax-github-actions/${{ github.workflow }}/${{ github.run_id }}/${{ github.run_attempt }} $(pwd)/dist
       - name: Install pytest
         env:
           JAXCI_PYTHON: python${{ matrix.python }}
@@ -52,41 +84,3 @@ jobs:
         run: $JAXCI_PYTHON -m pip install -r build/requirements.in
       - name: Run Pytest GPU tests
         run: ./ci/run_pytest_gpu.sh
-  
-  # run_tests:
-  #   needs: build_artifacts
-  #   strategy:
-  #     matrix:
-  #       test_env: [
-  #         {cuda_version: "12.3", runner: "linux-x86-g2-48-l4-4gpu", 
-  #         image: "gcr.io/tensorflow-testing/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest"},
-  #         {cuda_version: "12.1", runner: "linux-x86-g2-48-l4-4gpu", 
-  #         image: "gcr.io/tensorflow-testing/nosla-cuda12.1-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest"},
-  #         ]
-  #       python: ["3.10"]
-
-  #   runs-on: ${{ matrix.test_env.runner }}
-  #   container:
-  #     image: ${{ matrix.test_env.image }}
-    
-  #   name: "Pytest GPU (Test on CUDA ${{ matrix.test_env.cuda_version }})"
-  #   env:
-  #     JAXCI_HERMETIC_PYTHON_VERSION: ${{ matrix.python }}
-
-  #   steps:
-  #     - uses: actions/checkout@v3
-  #     # Halt for testing
-  #     - name: Wait For Connection
-  #       uses: google-ml-infra/actions/ci_connection@main
-  #       with:
-  #         halt-dispatch-input: ${{ inputs.halt-for-connection }}
-  #     - name: Install pytest
-  #       env:
-  #         JAXCI_PYTHON: python${{ matrix.python }}
-  #       run: $JAXCI_PYTHON -m pip install pytest
-  #     - name: Install dependencies
-  #       env:
-  #         JAXCI_PYTHON: python${{ matrix.python }}
-  #       run: $JAXCI_PYTHON -m pip install -r build/requirements.in
-  #     - name: Run Pytest GPU tests
-  #       run: ./ci/run_pytest_gpu.sh
