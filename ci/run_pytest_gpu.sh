@@ -27,11 +27,17 @@ set -exu -o history -o allexport
 source ci/envs/default.env
 
 # Install jaxlib, jax-cuda-plugin, and jax-cuda-pjrt wheels on the system.
+<<<<<<< HEAD
 export JAXCI_INSTALL_WHEELS_LOCALLY=1
+=======
+echo "Installing wheels locally..."
+source ./ci/utilities/install_wheels_locally.sh
+>>>>>>> main
 
 # Set up the build environment.
 source "ci/utilities/setup_build_environment.sh"
 
+<<<<<<< HEAD
 
 # # Install cuda deps into the current python
 # "$JAXCI_PYTHON" -m pip install "nvidia-cublas-cu12>=12.1.3.1"
@@ -49,6 +55,8 @@ source "ci/utilities/setup_build_environment.sh"
 # "$JAXCI_PYTHON" -m pip install "tensorrt-lean"
 # "$JAXCI_PYTHON" -m pip install "tensorrt-dispatch"
 
+=======
+>>>>>>> main
 export PY_COLORS=1
 export JAX_SKIP_SLOW_TESTS=true
 
