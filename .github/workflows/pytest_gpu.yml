@@ -43,7 +43,7 @@ jobs:
       - name: Build jax-cuda-pjrt
         run: ./ci/build_artifacts.sh "jax-cuda-pjrt"
       - name: Upload artifacts to GCS bucket
-        run:  ~/usr/local/bin/google-cloud-sdk/bin/gsutil -m rsync -d -r gs://general-ml-ci-transient/jax-github-actions/${{ github.run_number }}/${{ github.run_attempt }}
+        run:  ~/usr/local/bin/google-cloud-sdk/bin/gsutil -m cp -r $(pwd)/dist gs://general-ml-ci-transient/jax-github-actions/"${{ github.workflow }}"/${{ github.run_number }}/${{ github.run_attempt }}
   
   run_tests:
     needs: build_artifacts
@@ -73,7 +73,7 @@ jobs:
         with:
           halt-dispatch-input: ${{ inputs.halt-for-connection }}
       - name: Download the artifacts built in the "build_artifacts" job
-        run: gsutil -m cp -r gs://general-ml-ci-transient/jax-github-actions/${{ github.run_number }}/${{ github.run_attempt }} $(pwd)/dist
+        run: gsutil -m cp -r gs://general-ml-ci-transient/jax-github-actions/"${{ github.workflow }}"/${{ github.run_number }}/${{ github.run_attempt }} $(pwd)/dist
       - name: Install pytest
         env:
           JAXCI_PYTHON: python${{ matrix.python }}
