@@ -17,25 +17,25 @@ on:
   workflow_call:
     inputs:
       build_jax:
-        description: "Should the jax artifact be built?"
+        description: "Should the jax artifact be built? (1 to enable, 0 to disable)"
+        type: string
         required: true
-        default: true
-        type: boolean
+        default: "1"
       build_jaxlib:
-        description: "Should the jaxlib artifact be built?"
+        description: "Should the jaxlib artifact be built? (1 to enable, 0 to disable)"
+        type: string
         required: true
-        default: true
-        type: boolean
+        default: "1"
       build_jax_cuda_plugin:
-        description: "Should the jax-cuda-plugin artifact be built?"
+        description: "Should the jax-cuda-plugin artifact be built? (1 to enable, 0 to disable)"
+        type: string
         required: true
-        default: true
-        type: boolean
+        default: "1"
       build_jax_cuda_pjrt:
-        description: "Should the jax-cuda-pjrt artifact be built?"
+        description: "Should the jax-cuda-pjrt artifact be built? (1 to enable, 0 to disable)"
+        type: string
         required: true
-        default: true
-        type: boolean
+        default: "1"
       clone_main_xla:
         description: "Should latest XLA be used? (1 to enable, 0 to disable)"
         type: string
@@ -62,13 +62,13 @@ jobs:
       - id: set-matrix
         run: |
           matrix='[]'
-          if ${{ inputs.build_jax }}; then
+          if [[ ${{ inputs.build_jax }} == "1" ]]; then
             matrix='["jax"]'
-            if ${{ inputs.build_jaxlib }}; then
+            if [[ ${{ inputs.build_jaxlib }} == "1" ]]; then
               matrix='["jax", "jaxlib"]'
-              if ${{ inputs.build_jax_cuda_pjrt }}; then
+              if [[ ${{ inputs.build_jax_cuda_pjrt }} == "1" ]]; then
                 matrix='["jax", "jaxlib", "jax-cuda-pjrt"]'
-                if ${{ inputs.build_jax_cuda_plugin }}; then
+                if [[ ${{ inputs.build_jax_cuda_plugin }} == "1" ]]; then
                   matrix='["jax", "jaxlib", "jax-cuda-pjrt", "jax-cuda-plugin"]'
                 fi
               fi

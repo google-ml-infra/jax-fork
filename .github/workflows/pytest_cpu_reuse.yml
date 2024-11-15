@@ -19,10 +19,10 @@ jobs:
     name: "Build the jaxlib aritfact using latest XLA"
     uses: ./.github/workflows/build_artifacts.yml
     with:
-      build_jax: false
-      build_jaxlib: true
-      build_jax_cuda_plugin: false
-      build_jax_cuda_pjrt: false
+      build_jax: 0
+      build_jaxlib: 1
+      build_jax_cuda_plugin: 0
+      build_jax_cuda_pjrt: 0
       clone_main_xla: 1
       upload_artifacts: true
       upload_destination: '${{ github.workflow }}/${{ github.run_number }}/${{ github.run_attempt }}'
