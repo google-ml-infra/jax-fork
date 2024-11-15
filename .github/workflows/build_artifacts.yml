@@ -100,18 +100,43 @@ jobs:
     if: inputs.build_jax || inputs.build_jaxlib || inputs.build_jax_cuda_plugin || inputs.build_jax_cuda_pjrt
     steps:
       - uses: actions/checkout@v3
+        if: >-
+            (inputs.build_jax && matrix.artifact == 'jax') ||
+            (inputs.build_jaxlib && matrix.artifact == 'jaxlib') ||
+            (inputs.build_jax_cuda_plugin && matrix.artifact == 'jax-cuda-plugin') ||
+            (inputs.build_jax_cuda_pjrt && matrix.artifact == 'jax-cuda-pjrt')
       # Halt for testing
       - name: Wait For Connection
         uses: google-ml-infra/actions/ci_connection@main
         with:
           halt-dispatch-input: ${{ inputs.halt-for-connection }}
+        if: >-
+          (inputs.build_jax && matrix.artifact == 'jax') ||
+          (inputs.build_jaxlib && matrix.artifact == 'jaxlib') ||
+          (inputs.build_jax_cuda_plugin && matrix.artifact == 'jax-cuda-plugin') ||
+          (inputs.build_jax_cuda_pjrt && matrix.artifact == 'jax-cuda-pjrt')
       - name: Build ${{ matrix.artifact }}
+        if: >-
+            (inputs.build_jax && matrix.artifact == 'jax') ||
+            (inputs.build_jaxlib && matrix.artifact == 'jaxlib') ||
+            (inputs.build_jax_cuda_plugin && matrix.artifact == 'jax-cuda-plugin') ||
+            (inputs.build_jax_cuda_pjrt && matrix.artifact == 'jax-cuda-pjrt')
         run: ./ci/build_artifacts.sh "${{ matrix.artifact }}"
       - name: Set Platform
+        if: >-
+            (inputs.build_jax && matrix.artifact == 'jax') ||
+            (inputs.build_jaxlib && matrix.artifact == 'jaxlib') ||
+            (inputs.build_jax_cuda_plugin && matrix.artifact == 'jax-cuda-plugin') ||
+            (inputs.build_jax_cuda_pjrt && matrix.artifact == 'jax-cuda-pjrt')
         run: |
           echo "PLATFORM=$(uname)_$(uname -m)" >> $GITHUB_ENV
       - name: Upload artifacts to GCS bucket
         # Upload if requested and one of the artifacts was built
-        if: inputs.upload_artifacts
+        if: >-
+          inputs.upload_artifacts &&
+          (inputs.build_jax && matrix.artifact == 'jax') ||
+          (inputs.build_jaxlib && matrix.artifact == 'jaxlib') ||
+          (inputs.build_jax_cuda_plugin && matrix.artifact == 'jax-cuda-plugin') ||
+          (inputs.build_jax_cuda_pjrt && matrix.artifact == 'jax-cuda-pjrt')
         run:  ~/usr/local/bin/google-cloud-sdk/bin/gsutil -m cp -r $(pwd)/dist gs://general-ml-ci-transient/jax-github-actions/"${{ inputs.upload_destination }}"/$PLATFORM
       
