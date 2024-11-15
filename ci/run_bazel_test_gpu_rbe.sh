@@ -34,10 +34,12 @@ fi
 # Set up the build environment.
 source "ci/utilities/setup_build_environment.sh"
 
-# Run Bazel GPU tests with RBE (single accelerator tests with one GPU apiece.)
+# Run Bazel GPU tests with RBE (single accelerator tests)
+nvidia-smi
 echo "Running RBE GPU tests..."
 
 # Only Linux x86 builds run GPU tests
+# Runs single accelerator tests with one GPU apiece.
 bazel test --config=rbe_linux_x86_64_cuda \
     --repo_env=HERMETIC_PYTHON_VERSION="$JAXCI_HERMETIC_PYTHON_VERSION" \
     --override_repository=xla="${JAXCI_XLA_GIT_DIR}" \

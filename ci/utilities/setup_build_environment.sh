@@ -73,3 +73,9 @@ if [[ $(uname -s) =~ "MSYS_NT" ]]; then
   # Convert all "_DIR" variables to Windows paths.
   source <(python3 ./ci/utilities/convert_msys_paths_to_win_paths.py)
 fi
+
+# When running Pytests, we need to install the wheels locally.
+if [[ "$JAXCI_INSTALL_WHEELS_LOCALLY" == 1 ]]; then
+   echo "Installing wheels locally..."
+   source ./ci/utilities/install_wheels_locally.sh
+fi

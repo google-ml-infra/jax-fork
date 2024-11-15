@@ -26,8 +26,8 @@ set -exu -o history -o allexport
 # Inherit default JAXCI environment variables.
 source ci/envs/default.env
 
-echo "Installing wheels locally..."
-source ./ci/utilities/install_wheels_locally.sh
+# Install jaxlib wheel on the system. 
+export JAXCI_INSTALL_WHEELS_LOCALLY=1
 
 # Set up the build environment.
 source "ci/utilities/setup_build_environment.sh"

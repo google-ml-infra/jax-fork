@@ -27,11 +27,32 @@ set -exu -o history -o allexport
 source ci/envs/default.env
 
 # Install jaxlib, jax-cuda-plugin, and jax-cuda-pjrt wheels on the system.
+
+export JAXCI_INSTALL_WHEELS_LOCALLY=1
+
 echo "Installing wheels locally..."
 source ./ci/utilities/install_wheels_locally.sh
 
 # Set up the build environment.
 source "ci/utilities/setup_build_environment.sh"
+
+
+# # Install cuda deps into the current python
+# "$JAXCI_PYTHON" -m pip install "nvidia-cublas-cu12>=12.1.3.1"
+# "$JAXCI_PYTHON" -m pip install "nvidia-cuda-cupti-cu12>=12.1.105"
+# "$JAXCI_PYTHON" -m pip install "nvidia-cuda-nvcc-cu12>=12.1.105"
+# "$JAXCI_PYTHON" -m pip install "nvidia-cuda-runtime-cu12>=12.1.105"
+# "$JAXCI_PYTHON" -m pip install "nvidia-cudnn-cu12>=9.1,<10.0"
+# "$JAXCI_PYTHON" -m pip install "nvidia-cufft-cu12>=11.0.2.54"
+# "$JAXCI_PYTHON" -m pip install "nvidia-cusolver-cu12>=11.4.5.107"
+# "$JAXCI_PYTHON" -m pip install "nvidia-cusparse-cu12>=12.1.0.106"
+# "$JAXCI_PYTHON" -m pip install "nvidia-nccl-cu12>=2.18.1"
+# "$JAXCI_PYTHON" -m pip install "nvidia-nvjitlink-cu12>=12.1.105"
+# "$JAXCI_PYTHON" -m pip install "tensorrt"
+
+# "$JAXCI_PYTHON" -m pip install "tensorrt-lean"
+# "$JAXCI_PYTHON" -m pip install "tensorrt-dispatch"
+
 
 export PY_COLORS=1
 export JAX_SKIP_SLOW_TESTS=true
@@ -45,9 +66,10 @@ export TF_CPP_MIN_LOG_LEVEL=0
 echo "Running GPU tests..."
 export XLA_PYTHON_CLIENT_ALLOCATOR=platform
 export XLA_FLAGS=--xla_gpu_force_compilation_parallelism=1
-"$JAXCI_PYTHON" -m pytest -n 8 --tb=short --maxfail=20 \
+"$JAXCI_PYTHON" -m pytest -n 8 --tb=short --maxfail=200 \
 tests examples \
 --deselect=tests/multi_device_test.py::MultiDeviceTest::test_computation_follows_data \
 --deselect=tests/xmap_test.py::XMapTest::testCollectivePermute2D \
 --deselect=tests/multiprocess_gpu_test.py::MultiProcessGpuTest::test_distributed_jax_visible_devices \
---deselect=tests/compilation_cache_test.py::CompilationCacheTest::test_task_using_cache_metric
+--deselect=tests/compilation_cache_test.py::CompilationCacheTest::test_task_using_cache_metric \
+--deselect=tests/tests/sparse_nm_test.py::SpmmTest

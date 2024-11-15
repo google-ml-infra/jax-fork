@@ -28,8 +28,7 @@ source ci/envs/default.env
 
 # Install jaxlib wheel on the system. Requires a jaxlib wheel to be present
 # inside $JAXCI_OUTPUT_DIR (../dist)
-echo "Installing wheels locally..."
-source ./ci/utilities/install_wheels_locally.sh
+export JAXCI_INSTALL_WHEELS_LOCALLY=1
 
 # Set up the build environment.
 source "ci/utilities/setup_build_environment.sh"

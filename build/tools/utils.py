@@ -189,6 +189,43 @@ def get_clang_path_or_exit():
     sys.exit(-1)
 
 
+def get_cuda_major_version():
+  """Extract the CUDA major version from the .bazelrc"""
+  with open(".bazelrc", "r") as f:
+    for line in f:
+      match = re.search(r'HERMETIC_CUDA_VERSION="([^"]+)"', line)
+      if match:
+        cuda_version=match.group(1)
+        return cuda_version.split(".")[0]
+  return None
+
+
+def get_ci_bazelrc_config(os_name: str, arch: str, artifact: str):
+  """Returns the bazelrc config for the given architecture and OS.
+
+  Used in CI builds to retrieve either the "ci_"/"rbe_" configs from the
+  .bazelrc
+  """
+
+  bazelrc_config = f"{os_name}_{arch}"
+
+  # If building on Linux x86 or Windows, use the "rbe_" flags otherwise use
+  # the "ci_" (non-rbe) flags
+  if (os_name == "linux" and arch == "x86_64") or (
+      os_name == "windows" and arch == "amd64"
+  ):
+    bazelrc_config = "rbe_" + bazelrc_config
+  else:
+    bazelrc_config = "ci_" + bazelrc_config
+
+  # When building jax-cuda-plugin or jax-cuda-pjrt, append "_cuda" to the
+  # bazelrc config to use the CUDA specific configs.
+  if "cuda" in artifact:
+    bazelrc_config = bazelrc_config + "_cuda"
+
+  return bazelrc_config
+
+
 def get_jax_configure_bazel_options(bazel_command: list[str]):
   """Returns the bazel options to be written to .jax_configure.bazelrc."""
   # Get the index of the "run" parameter. Build options will come after "run" so
@@ -219,3 +256,4 @@ def get_githash():
     ).stdout.strip()
   except OSError:
     return ""
+

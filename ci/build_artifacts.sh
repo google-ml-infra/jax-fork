@@ -13,10 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-# Build JAX artifacts.
-# Usage: ./ci/build_artifacts.sh "<artifact>"
-# Supported artifact values are: jax, jaxlib, jax-cuda-plugin, jax-cuda-pjrt
-# E.g: ./ci/build_artifacts.sh "jax" or ./ci/build_artifacts.sh "jaxlib"
+# Build JAX artifacts. Requires an env file from the ci/envs/build_artifacts to
+# be passed as an argument
 #
 # -e: abort script if one command fails
 # -u: error if undefined variable used
@@ -25,65 +23,43 @@
 # -o allexport: export all functions and variables to be available to subscripts
 set -exu -o history -o allexport
 
-artifact="$1"
+# If a JAX CI env file has not been passed, exit.
+if [[ -z "$1" ]]; then
+    echo "ERROR: No JAX CI env file passed."
+    echo "build_artifacts.sh requires that a path to a JAX CI env file to be"
+    echo "passed as an argument when invoking the build scripts."
+    echo "Pass in a corresponding env file from the ci/envs/build_artifacts"
+    echo "directory to continue."
+    exit 1
+fi
 
-# Source default JAXCI environment variables.
-source ci/envs/default.env
-
+# Source JAXCI environment variables.
+source "$1"
 # Set up the build environment.
 source "ci/utilities/setup_build_environment.sh"
 
-allowed_artifacts=("jax" "jaxlib" "jax-cuda-plugin" "jax-cuda-pjrt")
-
-os=$(uname -s | awk '{print tolower($0)}')
-arch=$(uname -m)
-
-# Adjust the values when running on Windows x86 to match the config in
-# .bazelrc
-if [[ $os =~ "msys_nt" ]] && [[ $arch == "x86_64" ]]; then
-  os="windows"
-  arch="amd64"
+# Build the jax artifact
+if [[ "$JAXCI_BUILD_JAX" == 1 ]]; then
+  python -m build --outdir $JAXCI_OUTPUT_DIR
 fi
 
-if [[ " ${allowed_artifacts[@]} " =~ " ${artifact} " ]]; then
+# Build the jaxlib CPU artifact
+if [[ "$JAXCI_BUILD_JAXLIB" == 1 ]]; then
+  python build/build.py build_artifacts --wheel_list="jaxlib" --use_ci_bazelrc_flags --python_version=$JAXCI_HERMETIC_PYTHON_VERSION --verbose
+fi
 
-  # Build the jax artifact
-  if [[ "$artifact" == "jax" ]]; then
-    python -m build --outdir $JAXCI_OUTPUT_DIR
-  else
+# Build the jax-cuda-plugin artifact
+if [[ "$JAXCI_BUILD_PLUGIN" == 1 ]]; then
+  python build/build.py build_artifacts --wheel_list="jax-cuda-plugin" --use_ci_bazelrc_flags --python_version=$JAXCI_HERMETIC_PYTHON_VERSION --verbose
+fi
 
-    # For bazel builds, use the "rbe_" config for Linux x86/Windows and "ci_" for other platforms
-    bazelrc_config="${os}_${arch}"
-    if ( [[ "$os" == "linux" ]] && [[ "$arch" == "x86_64" ]] ) || [[ "$os" == "windows" ]]; then
-      bazelrc_config="rbe_$bazelrc_config"
-    else
-      bazelrc_config="ci_$bazelrc_config"
-    fi
+# Build the jax-cuda-pjrt artifact
+if [[ "$JAXCI_BUILD_PJRT" == 1 ]]; then
+  python build/build.py build_artifacts --wheel_list="jax-cuda-pjrt" --use_ci_bazelrc_flags --verbose
+fi
 
-    # Build the jaxlib CPU artifact
-    if [[ "$artifact" == "jaxlib" ]]; then
-      python build/build.py build --wheels="jaxlib" --bazel_options=--config="$bazelrc_config" --python_version=$JAXCI_HERMETIC_PYTHON_VERSION --verbose
-    fi
-
-    # Build the jax-cuda-plugin artifact
-    if [[ "$artifact" == "jax-cuda-plugin" ]]; then
-      python build/build.py build --wheels="jax-cuda-plugin" --bazel_options=--config="${bazelrc_config}_cuda" --python_version=$JAXCI_HERMETIC_PYTHON_VERSION --verbose
-    fi
-
-    # Build the jax-cuda-pjrt artifact
-    if [[ "$artifact" == "jax-cuda-pjrt" ]]; then
-      python build/build.py build --wheels="jax-cuda-pjrt" --bazel_options=--config="${bazelrc_config}_cuda" --verbose
-    fi
-
-    # If building `jaxlib` or `jax-cuda-plugin` or `jax-cuda-pjrt` for Linux, we
-    # run `auditwheel show` to verify manylinux compliance.
-    if  [[ "$os" == "linux" ]]; then
-      ./ci/utilities/run_auditwheel.sh
-    fi
-
-  fi
-
-else
-  echo "Error: Invalid artifact: $artifact. Allowed values are: ${allowed_artifacts[@]}"
-  exit 1
+# After building `jaxlib`, `jaxcuda-plugin`, and `jax-cuda-pjrt`, we run
+# `auditwheel show` to ensure manylinux compliance.
+if  [[ "$JAXCI_RUN_AUDITWHEEL" == 1 ]]; then
+  ./ci/utilities/run_auditwheel.sh
 fi

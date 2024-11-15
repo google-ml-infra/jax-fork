@@ -49,8 +49,8 @@ if ! docker container inspect jax >/dev/null 2>&1 ; then
   # Start the container. `user_set_jaxci_envs` is read after `jax_ci_envs` to
   # allow the user to override any environment variables set by JAXCI_ENV_FILE.
   docker run $JAXCI_DOCKER_ARGS --name jax \
-      -w "$JAXCI_DOCKER_WORK_DIR" -itd --rm \
-      -v "$JAXCI_JAX_GIT_DIR:$JAXCI_DOCKER_WORK_DIR" \
+      -w /jax -itd --rm \
+      -v "$JAXCI_JAX_GIT_DIR:/jax" \
       "$JAXCI_DOCKER_IMAGE" \
     bash
 
