@@ -70,4 +70,4 @@ jobs:
           JAXCI_PYTHON: python${{ matrix.python }}
         run: $JAXCI_PYTHON -m pip install -r build/requirements.in
       - name: Run Pytest CPU tests
-        run: ./ci/run_pytest.sh "ci/envs/run_tests/pytest_cpu"
+        run: ./ci/run_pytest_cpu.sh
