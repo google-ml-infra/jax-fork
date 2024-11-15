@@ -53,6 +53,29 @@ on:
         type: string
 
 jobs:
+  determine_matrix:
+    runs-on: linux-x86-n2-16
+    container: 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest')
+    outputs:
+      build_matrix: ${{ steps.set-matrix.outputs.build_matrix }}
+    steps:
+      - id: set-matrix
+        run: |
+          matrix='[]'
+          if ${{ inputs.build_jax }}; then
+            matrix='["jax"]'
+            if ${{ inputs.build_jaxlib }}; then
+              matrix='["jax", "jaxlib"]'
+              if ${{ inputs.build_jax_cuda_pjrt }}; then
+                matrix='["jax", "jaxlib", "jax-cuda-pjrt"]'
+                if ${{ inputs.build_jax_cuda_plugin }}; then
+                  matrix='["jax", "jaxlib", "jax-cuda-pjrt", "jax-cuda-plugin"]'
+                fi
+              fi
+            fi
+          fi
+          echo "build_matrix=${matrix}" >> $GITHUB_OUTPUT 
+
   build_artifacts:
     continue-on-error: true
     defaults:
@@ -62,12 +85,7 @@ jobs:
     strategy:
       matrix:
         runner: ["windows-x86-n2-64", "linux-x86-n2-16", "linux-arm64-t2a-16"]
-        artifact: >-
-                 ${{ inputs.build_jax && inputs.build_jaxlib && inputs.build_jax_cuda_pjrt && inputs.build_jax_cuda_plugin &&  fromJSON('["jax", "jaxlib", "jax-cuda-pjrt", "jax-cuda-plugin"]') }} ||
-                 ${{ inputs.build_jax && inputs.build_jaxlib && inputs.build_jax_cuda_pjrt && fromJSON('["jax", "jaxlib", "jax-cuda-pjrt"]') }} ||
-                 ${{ inputs.build_jax && inputs.build_jaxlib && fromJSON('["jax", "jaxlib"]') }} ||
-                 ${{ inputs.build_jax && fromJSON('["jax"]') }} ||
-                 ${{ fromJSON('[]') }}
+        artifact: ${{ fromJSON(needs.determine_matrix.outputs.build_matrix) }} 
         python: ["3.10"] #, "3.11", "3.12"]
         # jax-cuda-pjrt and jax are pure Python packages so they do not need to be built for each
         # Python version.
