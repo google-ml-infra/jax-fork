@@ -67,7 +67,7 @@ jobs:
                  ${{ inputs.build_jax && inputs.build_jaxlib && inputs.build_jax_cuda_pjrt && fromJSON('["jax", "jaxlib", "jax-cuda-pjrt"]') }} ||
                  ${{ inputs.build_jax && inputs.build_jaxlib && fromJSON('["jax", "jaxlib"]') }} ||
                  ${{ inputs.build_jax && fromJSON('["jax"]') }} ||
-                 ${{ '[]' }}
+                 ${{ fromJSON('[]') }}
         python: ["3.10"] #, "3.11", "3.12"]
         # jax-cuda-pjrt and jax are pure Python packages so they do not need to be built for each
         # Python version.
