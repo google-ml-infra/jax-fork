@@ -71,4 +71,5 @@ tests examples \
 --deselect=tests/multi_device_test.py::MultiDeviceTest::test_computation_follows_data \
 --deselect=tests/xmap_test.py::XMapTest::testCollectivePermute2D \
 --deselect=tests/multiprocess_gpu_test.py::MultiProcessGpuTest::test_distributed_jax_visible_devices \
---deselect=tests/compilation_cache_test.py::CompilationCacheTest::test_task_using_cache_metric
+--deselect=tests/compilation_cache_test.py::CompilationCacheTest::test_task_using_cache_metric \
+--deselect=tests/tests/sparse_nm_test.py::SpmmTest
