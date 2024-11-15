@@ -54,8 +54,13 @@ jobs:
         uses: google-ml-infra/actions/ci_connection@main
         with:
           halt-dispatch-input: ${{ inputs.halt-for-connection }}
+      - name: Set Platform
+        run: |
+          echo "PLATFORM=$(uname)_$(uname -m)" >> $GITHUB_ENV
       - name: Download the artifacts built in the "build_artifacts" job
-        run: mkdir -p $(pwd)/dist && ~/usr/local/bin/google-cloud-sdk/bin/gsutil -m cp -r gs://general-ml-ci-transient/jax-github-actions/"${{ github.workflow }}"/${{ github.run_number }}/${{ github.run_attempt }} $(pwd)/dist
+        run: >-
+          mkdir -p $(pwd)/dist &&
+          ~/usr/local/bin/google-cloud-sdk/bin/gsutil -m cp -r gs://general-ml-ci-transient/jax-github-actions/"${{ github.workflow }}"/${{ github.run_number }}/${{ github.run_attempt }}/$PLATFORM $(pwd)/dist
       - name: Install pytest
         env:
           JAXCI_PYTHON: python${{ matrix.python }}
