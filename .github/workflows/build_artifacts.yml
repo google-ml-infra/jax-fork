@@ -54,8 +54,8 @@ on:
 
 jobs:
   determine_matrix:
-    runs-on: linux-x86-n2-16
-    container: 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest')
+    runs-on: "linux-x86-n2-16"
+    container: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest"
     outputs:
       build_matrix: ${{ steps.set-matrix.outputs.build_matrix }}
     steps:
