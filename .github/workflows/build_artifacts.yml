@@ -57,24 +57,31 @@ jobs:
     runs-on: "linux-x86-n2-16"
     container: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest"
     outputs:
-      build_matrix: ${{ steps.set-matrix.outputs.build_matrix }}
+      artifact_matrix: ${{ steps.set-matrix.outputs.artifact_matrix }}
     steps:
       - id: set-matrix
         run: |
-          matrix='[]'
-          if [[ ${{ inputs.build_jax }} == "1" ]]; then
-            matrix='["jax"]'
-            if [[ ${{ inputs.build_jaxlib }} == "1" ]]; then
-              matrix='["jax", "jaxlib"]'
+            artifacts=()
+            if [[ ${{ github.event }}  == "pull_request" ]];
+              artifacts = ("jax" ", jaxlib" ", jax-cuda-pjrt" ", jax-cuda-plugin")
+            else
+              if [[ ${{ inputs.build_jax }} == "1" ]]; then
+                  artifacts+="jax"
+              fi
+
+              if [[ ${{ inputs.build_jaxlib }} == "1" ]]; then
+                  artifacts+=", jaxlib"
+              fi
+
               if [[ ${{ inputs.build_jax_cuda_pjrt }} == "1" ]]; then
-                matrix='["jax", "jaxlib", "jax-cuda-pjrt"]'
-                if [[ ${{ inputs.build_jax_cuda_plugin }} == "1" ]]; then
-                  matrix='["jax", "jaxlib", "jax-cuda-pjrt", "jax-cuda-plugin"]'
-                fi
+                  artifacts+=", jax-cuda-pjrt"
+              fi
+
+              if [[ ${{ inputs.build_jax_cuda_plugin }} == "1" ]]; then
+                  artifacts+=", jax-cuda-plugin"
               fi
             fi
-          fi
-          echo "build_matrix=${matrix}" >> $GITHUB_OUTPUT 
+            echo "artifact_matrix='[${artifacts[@]}]'" >> $GITHUB_OUTPUT 
 
   build_artifacts:
     needs: determine_matrix
@@ -86,7 +93,7 @@ jobs:
     strategy:
       matrix:
         runner: ["windows-x86-n2-64", "linux-x86-n2-16", "linux-arm64-t2a-16"]
-        artifact: ${{ fromJSON(needs.determine_matrix.outputs.build_matrix) }} 
+        artifact: ${{ fromJSON(needs.determine_matrix.outputs.artifact_matrix) }} 
         python: ["3.10"] #, "3.11", "3.12"]
         # jax-cuda-pjrt and jax are pure Python packages so they do not need to be built for each
         # Python version.
