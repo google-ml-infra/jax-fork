@@ -15,6 +15,42 @@ on:
         - 'yes'
         - 'no'
   workflow_call:
+    inputs:
+      build_jax:
+        description: "Should the jax artifact be built?"
+        required: true
+        default: true
+        type: boolean
+      build_jaxlib:
+        description: "Should the jaxlib artifact be built?"
+        required: true
+        default: true
+        type: boolean
+      build_jax_cuda_plugin:
+        description: "Should the jax-cuda-plugin artifact be built?"
+        required: true
+        default: true
+        type: boolean
+      build_jax_cuda_pjrt:
+        description: "Should the jax-cuda-pjrt artifact be built?"
+        required: true
+        default: true
+        type: boolean
+      clone_main_xla:
+        description: "Should latest XLA be used? (1 to enable, 0 to disable)"
+        type: string
+        required: true
+        default: "0"
+      upload_artifacts:
+        description: "Should the artifacts be uploaded to a GCS bucket?"
+        required: true
+        default: false
+        type: boolean
+      upload_destination:
+        description: "GCS location to where the artifacts should be uploaded"
+        required: true
+        default: '${{ github.workflow }}/${{ github.run_number }}/${{ github.run_attempt }}'
+        type: string
 
 jobs:
   build:
@@ -27,7 +63,7 @@ jobs:
       matrix:
         runner: ["windows-x86-n2-64", "linux-x86-n2-16", "linux-arm64-t2a-16"]
         artifact: ["jax", "jaxlib", "jax-cuda-pjrt", "jax-cuda-plugin"]
-        python: ["3.10", "3.11", "3.12"]
+        python: ["3.10"] #, "3.11", "3.12"]
         # jax-cuda-pjrt and jax are pure Python packages so they do not need to be built for each
         # Python version.
         exclude:
@@ -58,8 +94,8 @@ jobs:
                    (contains(matrix.runner, 'windows-x86') && null) }}
 
     env:
-      # Do not run Docker container for Linux runners. Linux runners already run in a Docker container.
-      JAXCI_RUN_DOCKER_CONTAINER: 0
+      JAXCI_HERMETIC_PYTHON_VERSION: "${{ matrix.python }}"
+      JAXCI_CLONE_MAIN_XLA: "${{ inputs.clone_main_xla }}"
 
     steps:
       - uses: actions/checkout@v3
@@ -68,7 +104,19 @@ jobs:
         uses: google-ml-infra/actions/ci_connection@main
         with:
           halt-dispatch-input: ${{ inputs.halt-for-connection }}
-      - name: Build ${{ matrix.artifact }}
-        env:
-          JAXCI_HERMETIC_PYTHON_VERSION: "${{ matrix.python }}"
-        run: ./ci/build_artifacts.sh "${{ matrix.artifact }}"
+      - name: Build jax
+        if: inputs.build_jax && matrix.artifact == 'jax'
+        run: ./ci/build_artifacts.sh "jax"
+      - name: Build jaxlib
+        if: inputs.build_jaxlib && matrix.artifact == 'jaxlib'
+        run: ./ci/build_artifacts.sh "jaxlib"
+      - name: Build jax-cuda-plugin
+        if: inputs.build_jax_cuda_plugin && matrix.artifact == 'jax-cuda-plugin'
+        run: ./ci/build_artifacts.sh "jax-cuda-plugin"
+      - name: Build jax-cuda-pjrt
+        if: inputs.build_jax_cuda_pjrt && matrix.artifact == 'jax-cuda-pjrt'
+        run: ./ci/build_artifacts.sh "jax-cuda-pjrt"
+      - name: Upload artifacts to GCS bucket
+        if: inputs.upload_artifacts
+        run:  ~/usr/local/bin/google-cloud-sdk/bin/gsutil -m cp -r $(pwd)/dist gs://general-ml-ci-transient/jax-github-actions/"${{ inputs.upload_destination }}"
+      

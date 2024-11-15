@@ -1,9 +1,9 @@
 name: Run Pytest CPU tests (resuable workflow)
 
 on:
-  # pull_request:
-  #   branches:
-  #     - main
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       halt-for-connection:
@@ -15,11 +15,21 @@ on:
         - 'yes'
 
 jobs:
-  build_jaxlib_artifacts:
+  build_jaxlib_artifact:
+    name: "Build the jaxlib aritfact using latest XLA"
     uses: ./.github/workflows/build_artifacts.yml
+    with:
+      build_jax: false
+      build_jaxlib: true
+      build_jax_cuda_plugin: false
+      build_jax_cuda_pjrt: false
+      clone_main_xla: 1
+      upload_artifacts: true
+      upload_destination: '${{ github.workflow }}/${{ github.run_number }}/${{ github.run_attempt }}'
 
   run_pytest:
-    needs: build_jaxlib_artifacts
+    name: "Run CPU tests with Pytest"
+    needs: build_jaxlib_artifact
     continue-on-error: true
     defaults:
       run:
@@ -27,16 +37,14 @@ jobs:
         shell: bash
     strategy:
       matrix:
-        runner: ["windows-x86-n2-64", "linux-x86-n2-64", "linux-arm64-t2a-48"]
+        runner: ["linux-x86-n2-64", "linux-arm64-t2a-48"]
         python: ["3.10"]
 
     runs-on: ${{ matrix.runner }}
     container: ${{ (contains(matrix.runner, 'linux-x86') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest') ||
-                (contains(matrix.runner, 'linux-arm64') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/linux-arm64-arc-container:latest') ||
-                (contains(matrix.runner, 'windows-x86') && null) }}
+                (contains(matrix.runner, 'linux-arm64') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build-arm64:latest') }}
 
     env:
-      JAXCI_CLONE_MAIN_XLA: 1
       JAXCI_HERMETIC_PYTHON_VERSION: ${{ matrix.python }}
 
     steps:
@@ -46,6 +54,8 @@ jobs:
         uses: google-ml-infra/actions/ci_connection@main
         with:
           halt-dispatch-input: ${{ inputs.halt-for-connection }}
+      - name: Download the artifacts built in the "build_artifacts" job
+        run: mkdir -p $(pwd)/dist && ~/usr/local/bin/google-cloud-sdk/bin/gsutil -m cp -r gs://general-ml-ci-transient/jax-github-actions/"${{ github.workflow }}"/${{ github.run_number }}/${{ github.run_attempt }} $(pwd)/dist
       - name: Install pytest
         env:
           JAXCI_PYTHON: python${{ matrix.python }}
