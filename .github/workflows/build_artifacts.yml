@@ -63,7 +63,7 @@ jobs:
         run: |
             artifacts=()
             if [[ ${{ github.event_name }}  == "pull_request" ]];
-              artifacts = ("jax" ", jaxlib" ", jax-cuda-pjrt" ", jax-cuda-plugin")
+              artifacts=("jax" ", jaxlib" ", jax-cuda-pjrt" ", jax-cuda-plugin")
             else
               if [[ ${{ inputs.build_jax }} == "1" ]]; then
                   artifacts+="jax"
