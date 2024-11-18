@@ -65,19 +65,19 @@ jobs:
             if [[ ${{ github.event_name }}  == "pull_request" ]];
               artifacts=("jax" ", jaxlib" ", jax-cuda-pjrt" ", jax-cuda-plugin")
             else
-              if [[ ${{ inputs.build_jax }} == "1" ]]; then
+              if [[ ${${{ inputs.build_jax }}:-0} == "1" ]]; then
                   artifacts+="jax"
               fi
 
-              if [[ ${{ inputs.build_jaxlib }} == "1" ]]; then
+              if [[ ${${{ inputs.build_jaxlib }}:-0} == "1" ]]; then
                   artifacts+=", jaxlib"
               fi
 
-              if [[ ${{ inputs.build_jax_cuda_pjrt }} == "1" ]]; then
+              if [[ ${${{ inputs.build_jax_cuda_pjrt }}:-0} == "1" ]]; then
                   artifacts+=", jax-cuda-pjrt"
               fi
 
-              if [[ ${{ inputs.build_jax_cuda_plugin }} == "1" ]]; then
+              if [[ ${${{ inputs.build_jax_cuda_plugin }}:-0} == "1" ]]; then
                   artifacts+=", jax-cuda-plugin"
               fi
             fi
