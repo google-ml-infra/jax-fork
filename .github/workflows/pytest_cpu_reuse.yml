@@ -60,7 +60,7 @@ jobs:
       - name: Download the artifacts built in the "build_artifacts" job
         run: >-
           mkdir -p $(pwd)/dist &&
-          ~/usr/local/bin/google-cloud-sdk/bin/gsutil -m cp -r gs://general-ml-ci-transient/jax-github-actions/"${{ github.workflow }}"/${{ github.run_number }}/${{ github.run_attempt }}/$PLATFORM $(pwd)/dist
+          gsutil -m cp -r gs://general-ml-ci-transient/jax-github-actions/"${{ github.workflow }}"/${{ github.run_number }}/${{ github.run_attempt }}/$PLATFORM $(pwd)/dist
       - name: Install pytest
         env:
           JAXCI_PYTHON: python${{ matrix.python }}
