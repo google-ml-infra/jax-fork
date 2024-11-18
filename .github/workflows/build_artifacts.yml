@@ -54,7 +54,7 @@ on:
       is_workflow_call:
         description: "Metadata variable to know whether a workflow call was made"
         type: string
-        required: true
+        required: false
         default: "1"
 
 jobs:
