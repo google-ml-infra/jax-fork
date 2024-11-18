@@ -75,24 +75,31 @@ jobs:
       - id: set-matrix
         run: |
             artifacts=()
+            # Define inputs as bash variables to be able to parse them in
+            # if conditions
             is_workflow_call=${{ inputs.is_workflow_call }}
+            build_jax=${{ inputs.build_jax }}
+            build_jaxlib=${{ inputs.build_jaxlib }}
+            build_jax_cuda_pjrt=${{ inputs.build_jax_cuda_pjrt }}
+            build_jax_cuda_plugin=${{ inputs.build_jax_cuda_plugin }}
+
             # Build every package if not a workflow call
-            if [[ ${is_workflow_call:-0} == "0" ]]; then
+            if [[ ${is_workflow_call:-"0"} == "0" ]]; then
               artifacts=("'jax'" ", 'jaxlib'" ", 'jax-cuda-pjrt'" ", 'jax-cuda-plugin'")
             else
-              if [[ ${${{ inputs.build_jax }}:-0} == "1" ]]; then
+              if [[ ${build_jax:-"0"} == "1" ]]; then
                   artifacts+="'jax',"
               fi
 
-              if [[ ${${{ inputs.build_jaxlib }}:-0} == "1" ]]; then
+              if [[ ${build_jaxlib:-"0"} == "1" ]]; then
                   artifacts+="'jaxlib',"
               fi
 
-              if [[ ${${{ inputs.build_jax_cuda_pjrt }}:-0} == "1" ]]; then
+              if [[ ${build_jax_cuda_pjrt:-"0"} == "1" ]]; then
                   artifacts+="'jax-cuda-pjrt',"
               fi
 
-              if [[ ${${{ inputs.build_jax_cuda_plugin }}:-0} == "1" ]]; then
+              if [[ ${build_jax_cuda_plugin:-"0"} == "1" ]]; then
                   artifacts+="'jax-cuda-plugin'"
               fi
             fi
