@@ -70,7 +70,7 @@ jobs:
       - id: set-matrix
         run: |
             artifacts=()
-            if [[ ${{ github.event_name }}  == "pull_request" ]];
+            if [[ ${{ github.event_name }}  == "pull_request" ]]; then
               artifacts=("jax" ", jaxlib" ", jax-cuda-pjrt" ", jax-cuda-plugin")
             else
               if [[ ${${{ inputs.build_jax }}:-0} == "1" ]]; then
