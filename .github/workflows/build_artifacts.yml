@@ -58,6 +58,9 @@ jobs:
     container: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest"
     outputs:
       artifact_matrix: ${{ steps.set-matrix.outputs.artifact_matrix }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - id: set-matrix
         run: |
