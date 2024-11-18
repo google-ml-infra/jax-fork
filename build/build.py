@@ -54,8 +54,8 @@ From the root directory of the JAX repository, run
   `python build/build.py requirements_update`
 """
 
-# Define the build target for each artifact.
-ARTIFACT_BUILD_TARGET_DICT = {
+# Define the build target for each wheel.
+WHEEL_BUILD_TARGET_DICT = {
     "jaxlib": "//jaxlib/tools:build_wheel",
     "jax-cuda-plugin": "//jaxlib/tools:build_gpu_kernels_wheel",
     "jax-cuda-pjrt": "//jaxlib/tools:build_gpu_plugin_wheel",
@@ -143,10 +143,11 @@ def add_artifact_subcommand_global_arguments(parser: argparse.ArgumentParser):
       type=str,
       default="jaxlib",
       help=
-        f"""
-        A comma separated list of JAX artifacts to build. E.g: --wheels="jaxlib",
+        """
+        A comma separated list of JAX wheels to build. E.g: --wheels="jaxlib",
         --wheels="jaxlib,jax-cuda-plugin", etc.
-        Valid options are: {','.join(ARTIFACT_BUILD_TARGET_DICT.keys())}
+        Valid options are: jaxlib, jax-cuda-plugin or cuda-plugin, jax-cuda-pjrt or cuda-pjrt,
+        jax-rocm-plugin or rocm-plugin, jax-rocm-pjrt or rocm-pjrt
         """,
   )
 
@@ -362,8 +363,7 @@ async def main():
         f"--repo_env=HERMETIC_PYTHON_VERSION={args.python_version}"
     )
 
-  # Enable color in the Bazel output and verbose failures.
-  bazel_command_base.append("--color=yes")
+  # Enable verbose failures.
   bazel_command_base.append("--verbose_failures=true")
 
   # Requirements update subcommand execution
@@ -377,7 +377,7 @@ async def main():
         requirements_command.append(option)
 
     if args.nightly_update:
-      logging.debug(
+      logging.info(
           "--nightly_update is set. Bazel will run"
           " //build:requirements_nightly.update"
       )
@@ -414,8 +414,16 @@ async def main():
 
   # Wheel build command execution
   for wheel in args.wheels.split(","):
-    if wheel not in ARTIFACT_BUILD_TARGET_DICT.keys():
-      logging.error("Incorrect wheel name provided: %s, valid choices are: %s", wheel, ",".join(ARTIFACT_BUILD_TARGET_DICT.keys()))
+    # Allow CUDA/ROCm wheels without the "jax-" prefix.
+    if ("plugin" in wheel or "pjrt" in wheel) and "jax" not in wheel:
+      wheel = "jax-" + wheel
+
+    if wheel not in WHEEL_BUILD_TARGET_DICT.keys():
+      logging.error(
+          "Incorrect wheel name provided, valid choices are jaxlib,"
+          " jax-cuda-plugin or cuda-plugin, jax-cuda-pjrt or cuda-pjrt,"
+          " jax-rocm-plugin or rocm-plugin, jax-rocm-pjrt or rocm-pjrt"
+      )
       sys.exit(1)
 
     wheel_build_command = copy.deepcopy(bazel_command_base)
@@ -518,18 +526,19 @@ async def main():
       for option in args.bazel_options:
         wheel_build_command.append(option)
 
+    with open(".jax_configure.bazelrc", "w") as f:
+      jax_configure_options = utils.get_jax_configure_bazel_options(wheel_build_command.get_command_as_list())
+      if not jax_configure_options:
+        logging.error("Error retrieving the Bazel options to be written to .jax_configure.bazelrc, exiting.")
+        sys.exit(1)
+      f.write(jax_configure_options)
+      logging.info("Bazel options written to .jax_configure.bazelrc")
+
     if args.configure_only:
-      with open(".jax_configure.bazelrc", "w") as f:
-        jax_configure_options = utils.get_jax_configure_bazel_options(wheel_build_command.get_command_as_list())
-        if not jax_configure_options:
-          logging.error("Error retrieving the Bazel options to be written to .jax_configure.bazelrc, exiting.")
-          sys.exit(1)
-        f.write(jax_configure_options)
-        logging.info("Bazel options written to .jax_configure.bazelrc")
-        logging.info("--configure_only is set so not running any Bazel commands.")
+      logging.info("--configure_only is set so not running any Bazel commands.")
     else:
       # Append the build target to the Bazel command.
-      build_target = ARTIFACT_BUILD_TARGET_DICT[wheel]
+      build_target = WHEEL_BUILD_TARGET_DICT[wheel]
       wheel_build_command.append(build_target)
 
       wheel_build_command.append("--")
@@ -538,7 +547,7 @@ async def main():
       logger.debug("Artifacts output directory: %s", output_path)
 
       if args.editable:
-        logger.debug("Building an editable build")
+        logger.info("Building an editable build")
         output_path = os.path.join(output_path, wheel)
         wheel_build_command.append("--editable")
 
