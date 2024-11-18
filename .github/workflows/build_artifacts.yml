@@ -81,19 +81,19 @@ jobs:
               artifacts=("'jax'" ", 'jaxlib'" ", 'jax-cuda-pjrt'" ", 'jax-cuda-plugin'")
             else
               if [[ ${${{ inputs.build_jax }}:-0} == "1" ]]; then
-                  artifacts+="'jax'"
+                  artifacts+="'jax',"
               fi
 
               if [[ ${${{ inputs.build_jaxlib }}:-0} == "1" ]]; then
-                  artifacts+=", 'jaxlib'"
+                  artifacts+="'jaxlib',"
               fi
 
               if [[ ${${{ inputs.build_jax_cuda_pjrt }}:-0} == "1" ]]; then
-                  artifacts+=", 'jax-cuda-pjrt'"
+                  artifacts+="'jax-cuda-pjrt',"
               fi
 
               if [[ ${${{ inputs.build_jax_cuda_plugin }}:-0} == "1" ]]; then
-                  artifacts+=", 'jax-cuda-plugin'"
+                  artifacts+="'jax-cuda-plugin'"
               fi
             fi
             echo "artifact_matrix=[${artifacts[@]}]" >> $GITHUB_OUTPUT 
