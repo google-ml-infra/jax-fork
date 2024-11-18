@@ -116,24 +116,31 @@ jobs:
       matrix:
         runner: ["windows-x86-n2-64", "linux-x86-n2-16", "linux-arm64-t2a-48"]
         artifact: ${{ fromJSON(needs.determine_artifact_matrix.outputs.artifact_matrix) }}
-        python: ["3.10", "3.11", "3.12"]
+        python: ["3.10", "3.11", "3.12", "3.13"]
         # jax-cuda-pjrt and jax are pure Python packages so they do not need to be built for each
         # Python version.
         exclude:
-          # Pure Python packages do not need to be built for each Python version.
-          - artifact: "jax-cuda-pjrt"
-            python: "3.10"
+          # jax-cuda-pjrt and jax are Python version independent and do not need to be built for
+          # each Python version
+          # Exclude jax-cuda-pjrt
           - artifact: "jax-cuda-pjrt"
             python: "3.11"
-          - artifact: "jax"
-            python: "3.10"
+          - artifact: "jax-cuda-pjrt"
+            python: "3.12"
+          - artifact: "jax-cuda-pjrt"
+            python: "3.13"
+          # Exclude jax
           - artifact: "jax"
             python: "3.11"
-          # jax is a pure Python package so it does not need to be built on multiple platforms.
+          - artifact: "jax"
+            python: "3.12"
+          - artifact: "jax"
+            python: "3.13"
+          # jax also only needs to be built once per runner
           - artifact: "jax"
             runner: "windows-x86-n2-64"
           - artifact: "jax"
-            runner: "linux-arm64-t2a-16"
+            runner: "linux-arm64-t2a-48"
           # jax-cuda-plugin and jax-cuda-pjrt are not supported on Windows.
           - artifact: "jax-cuda-plugin"
             runner: "windows-x86-n2-64"
