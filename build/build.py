@@ -64,18 +64,6 @@ WHEEL_BUILD_TARGET_DICT = {
 }
 
 
-def add_requirements_nightly_update_argument(parser: argparse.ArgumentParser):
-  parser.add_argument(
-      "--nightly_update",
-      action="store_true",
-      help="""
-        If true, updates requirements_lock.txt for a corresponding version of
-        Python and will consider dev, nightly and pre-release versions of
-        packages.
-        """,
-  )
-
-
 def add_global_arguments(parser: argparse.ArgumentParser):
   """Adds all the global arguments that applies to all the CLI subcommands."""
   parser.add_argument(
@@ -136,8 +124,8 @@ def add_global_arguments(parser: argparse.ArgumentParser):
   )
 
 
-def add_artifact_subcommand_global_arguments(parser: argparse.ArgumentParser):
-  """Adds all the global arguments that applies to the artifact subcommands."""
+def add_artifact_subcommand_arguments(parser: argparse.ArgumentParser):
+  """Adds all the arguments that applies to the artifact subcommands."""
   parser.add_argument(
       "--wheels",
       type=str,
@@ -178,26 +166,32 @@ def add_artifact_subcommand_global_arguments(parser: argparse.ArgumentParser):
   cuda_group.add_argument(
       "--cuda_version",
       type=str,
-      # LINT.IfChange(cuda_version)
-      default="12.3.2",
-      # LINT.ThenChange(//depot/google3/third_party/py/jax/oss/.bazelrc)
       help=
         """
         Hermetic CUDA version to use. Default is to use the version specified
-        in the .bazelrc (12.3.2).
+        in the .bazelrc.
+        """,
+  )
+
+  cuda_group.add_argument(
+      "--cuda_major_version",
+      type=str,
+      default="12",
+      help=
+        """
+        Which CUDA major version should the wheel be tagged as? Auto-detected if
+        --cuda_version is set. When --cuda_version is not set, the default is to
+        set the major version to 12 to match the default in .bazelrc.
         """,
   )
 
   cuda_group.add_argument(
       "--cudnn_version",
       type=str,
-      # LINT.IfChange(cudnn_version)
-      default="9.1.1",
-      # LINT.ThenChange(//depot/google3/third_party/py/jax/oss/.bazelrc)
       help=
         """
         Hermetic cuDNN version to use. Default is to use the version specified
-        in the .bazelrc (9.1.1).
+        in the .bazelrc.
         """,
   )
 
@@ -317,14 +311,22 @@ async def main():
   requirements_update_parser = subparsers.add_parser(
       "requirements_update", help="Updates the requirements_lock.txt files"
   )
-  add_requirements_nightly_update_argument(requirements_update_parser)
+  requirements_update_parser.add_argument(
+    "--nightly_update",
+    action="store_true",
+    help="""
+      If true, updates requirements_lock.txt for a corresponding version of
+      Python and will consider dev, nightly and pre-release versions of
+      packages.
+      """,
+  )
   add_global_arguments(requirements_update_parser)
 
   # Artifact build subcommand
   build_artifact_parser = subparsers.add_parser(
       "build", help="Builds the jaxlib, plugin, and pjrt artifact"
   )
-  add_artifact_subcommand_global_arguments(build_artifact_parser)
+  add_artifact_subcommand_arguments(build_artifact_parser)
   add_global_arguments(build_artifact_parser)
 
   arch = platform.machine()
@@ -556,7 +558,10 @@ async def main():
 
       if "cuda" in wheel:
         wheel_build_command.append("--enable-cuda=True")
-        cuda_major_version = args.cuda_version.split(".")[0]
+        if args.cuda_version:
+          cuda_major_version = args.cuda_version.split(".")[0]
+        else:
+          cuda_major_version = args.cuda_major_version
         wheel_build_command.append(f"--platform_version={cuda_major_version}")
 
       if "rocm" in wheel:
