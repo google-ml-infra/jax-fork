@@ -114,7 +114,7 @@ jobs:
         shell: bash
     strategy:
       matrix:
-        runner: ["windows-x86-n2-64", "linux-x86-n2-16", "linux-arm64-t2a-48"]
+        runner: ["linux-x86-n2-16"] #, "linux-arm64-t2a-48", "windows-x86-n2-64"]
         artifact: ${{ fromJSON(needs.determine_artifact_matrix.outputs.artifact_matrix) }}
         python: ["3.10", "3.11", "3.12", "3.13"]
         # jax-cuda-pjrt and jax are pure Python packages so they do not need to be built for each
@@ -174,11 +174,13 @@ jobs:
           halt-dispatch-input: ${{ inputs.halt-for-connection }}
       - name: Build ${{ matrix.artifact }}
         run: ./ci/build_artifacts.sh "${{ matrix.artifact }}"
-      - name: Set Platform
+      - name: Set PLATFORM env var for use in upload destination 
         run: |
-          echo "PLATFORM=$(uname)_$(uname -m)" >> $GITHUB_ENV
+          os=$(uname -s | awk '{print tolower($0)}')
+          arch=$(uname -m)
+          echo "PLATFORM=${os}_${arch}" >> $GITHUB_ENV
       - name: Upload artifacts to GCS bucket
         # Upload if requested and one of the artifacts was built
         if: inputs.upload_artifacts
-        run:  gsutil -m cp -r $(pwd)/dist gs://general-ml-ci-transient/jax-github-actions/"${{ inputs.upload_destination }}"/$PLATFORM
+        run:  gsutil -m cp -r $(pwd)/dist/*.whl gs://general-ml-ci-transient/jax-github-actions/"${{ inputs.upload_destination }}"/$PLATFORM/python${JAXCI_HERMETIC_PYTHON_VERSION}/
       
