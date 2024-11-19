@@ -26,15 +26,16 @@ jobs:
       matrix:
         jaxlib-version: ["pypi_latest", "nightly", "nightly+oldest_supported_libtpu"]
         tpu: [
-          {type: "v3-8", cores: "4"},
-          {type: "v4-8", cores: "4"},
-          {type: "v5e-8", cores: "8"}
+          # {type: "v3-8", cores: "4"}, # Enable when we have the v3 type available
+          {type: "v4-8", cores: "4", runner: "linux-x86-ct4p-240-4tpu"},
+          {type: "v5e-8", cores: "8", runner: "linux-x86-ct5lp-224-8tpu"}
         ]
     name: "TPU test (jaxlib=${{ matrix.jaxlib-version }}, ${{ matrix.tpu.type }})"
     env:
       LIBTPU_OLDEST_VERSION_DATE: 20240722
       ENABLE_PJRT_COMPATIBILITY: ${{ matrix.jaxlib-version == 'nightly+oldest_supported_libtpu' }}
-    runs-on: ["self-hosted", "tpu", "${{ matrix.tpu.type }}"]
+    runs-on: ${{ matrix.tpu.runner }}
+    container: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest"
     timeout-minutes: 120
     defaults:
       run:
