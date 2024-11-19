@@ -245,7 +245,7 @@ def add_artifact_subcommand_arguments(parser: argparse.ArgumentParser):
   )
 
   # Compile Options
-  compile_group = parser.add_argument_group('Compile Options')
+  compile_group = parser.add_argument_group('Compile Options', )
 
   compile_group.add_argument(
       "--clang_path",
