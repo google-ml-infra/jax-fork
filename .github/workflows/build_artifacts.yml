@@ -19,36 +19,36 @@ on:
       build_jax:
         description: "Should the jax artifact be built? (1 to enable, 0 to disable)"
         type: string
-        required: true
-        default: "1"
+        required: false
+        default: "0"
       build_jaxlib:
         description: "Should the jaxlib artifact be built? (1 to enable, 0 to disable)"
         type: string
-        required: true
-        default: "1"
+        required: false
+        default: "0"
       build_jax_cuda_plugin:
         description: "Should the jax-cuda-plugin artifact be built? (1 to enable, 0 to disable)"
         type: string
-        required: true
-        default: "1"
+        required: false
+        default: "0"
       build_jax_cuda_pjrt:
         description: "Should the jax-cuda-pjrt artifact be built? (1 to enable, 0 to disable)"
         type: string
-        required: true
-        default: "1"
+        required: false
+        default: "0"
       clone_main_xla:
         description: "Should latest XLA be used? (1 to enable, 0 to disable)"
         type: string
-        required: true
+        required: false
         default: "0"
       upload_artifacts:
         description: "Should the artifacts be uploaded to a GCS bucket?"
-        required: true
+        required: false
         default: false
         type: boolean
       upload_destination:
         description: "GCS location to where the artifacts should be uploaded"
-        required: true
+        required: false
         default: '${{ github.workflow }}/${{ github.run_number }}/${{ github.run_attempt }}'
         type: string
       is_workflow_call:
