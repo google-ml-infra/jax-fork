@@ -37,7 +37,7 @@ jobs:
     strategy:
       matrix:
         runner: ["linux-x86-n2-64", "linux-arm64-t2a-48", "windows-x86-n2-64"]
-        python: ["3.10"]
+        python: ["3.10", "3.11", "3.12", "3.13"]
 
     runs-on: ${{ matrix.runner }}
     container: ${{ (contains(matrix.runner, 'linux-x86') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest') ||
