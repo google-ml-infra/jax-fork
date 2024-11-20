@@ -88,7 +88,7 @@ jobs:
             # Packages that are not supported on a platform won't be built. E.g. CUDA packages won't be
             # built for Windows
             if [[ ${is_workflow_call:-"0"} == "0" ]]; then
-              wheels=("'jax'" ", 'jaxlib'" ", 'jax-cuda-pjrt'" ", 'jax-cuda-plugin'")
+              wheels=("'jaxlib'" ", 'jax-cuda-pjrt'" ", 'jax-cuda-plugin'")
               python_versions=("'3.10'" ", '3.11'" ", '3.12'", ", '3.13'")
               platforms=("'linux-x86-n2-16'" ", 'linux-arm64-t2a-48'" ", 'windows-x86-n2-64'") 
             else
@@ -143,27 +143,10 @@ jobs:
         # jax-cuda-pjrt and jax are pure Python packages so they do not need to be built for each
         # Python version.
         exclude:
-          # jax-cuda-pjrt and jax are Python version independent and do not need to be built for
-          # each Python version
-          # Exclude jax-cuda-pjrt
-          - artifact: "jax-cuda-pjrt"
-            python: "3.11"
-          - artifact: "jax-cuda-pjrt"
-            python: "3.12"
-          - artifact: "jax-cuda-pjrt"
-            python: "3.13"
-          # Exclude jax
-          - artifact: "jax"
-            python: "3.11"
-          - artifact: "jax"
-            python: "3.12"
-          - artifact: "jax"
-            python: "3.13"
-          # jax also only needs to be built once per runner
-          - artifact: "jax"
-            runner: "windows-x86-n2-64"
-          - artifact: "jax"
-            runner: "linux-arm64-t2a-48"
+          # jax-cuda-pjrt does not need to be built for every Python but excluding it here for 
+          # every but one Python version causes issues when a workflow call is made to this file
+          # requesting a build for an exlcuded Python version (see pytest_gpu.yaml)
+          #
           # jax-cuda-plugin and jax-cuda-pjrt are not supported on Windows.
           - artifact: "jax-cuda-plugin"
             runner: "windows-x86-n2-64"
