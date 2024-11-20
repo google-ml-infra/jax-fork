@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-# Runs Pyest CPU tests. Requires all jaxlib, jax-cuda-plugin, and jax-cuda-pjrt
+# Runs Pyest CPU tests. Requires the jaxlib, jax-cuda-plugin, and jax-cuda-pjrt
 # wheels to be present inside $JAXCI_OUTPUT_DIR (../dist)
 #
 # -e: abort script if one command fails
@@ -23,10 +23,11 @@
 # -o allexport: export all functions and variables to be available to subscripts
 set -exu -o history -o allexport
 
-# Inherit default JAXCI environment variables.
+# Source default JAXCI environment variables.
 source ci/envs/default.env
 
-# Install jaxlib, jax-cuda-plugin, and jax-cuda-pjrt wheels on the system.
+# Install jaxlib, jax-cuda-plugin, and jax-cuda-pjrt wheels inside the
+# $JAXCI_OUTPUT_DIR directory on the system.
 echo "Installing wheels locally..."
 source ./ci/utilities/install_wheels_locally.sh
 
@@ -42,10 +43,14 @@ nvidia-smi
 export NCCL_DEBUG=WARN
 export TF_CPP_MIN_LOG_LEVEL=0
 
+# Set the number of processes to run to be 4x the number of GPUs.
+export gpu_count=$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
+export num_processes=`expr 4 \* $gpu_count`
+
 echo "Running GPU tests..."
 export XLA_PYTHON_CLIENT_ALLOCATOR=platform
 export XLA_FLAGS=--xla_gpu_force_compilation_parallelism=1
-"$JAXCI_PYTHON" -m pytest -n 8 --tb=short --maxfail=20 \
+"$JAXCI_PYTHON" -m pytest -n $num_processes --tb=short --maxfail=20 \
 tests examples \
 --deselect=tests/multi_device_test.py::MultiDeviceTest::test_computation_follows_data \
 --deselect=tests/xmap_test.py::XMapTest::testCollectivePermute2D \
