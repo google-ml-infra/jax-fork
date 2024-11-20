@@ -19,7 +19,9 @@ jobs:
     name: "Build the jaxlib aritfact using latest XLA"
     uses: ./.github/workflows/build_artifacts.yml
     with:
-      build_jaxlib: 1
+      wheel_list: "jaxlib"
+      python_list: "3.10"
+      platform_list: "linux_x86,linux_arm64"
       clone_main_xla: 1
       upload_artifacts: true
       upload_destination: '${{ github.workflow }}/${{ github.run_number }}/${{ github.run_attempt }}'
@@ -34,7 +36,7 @@ jobs:
         shell: bash
     strategy:
       matrix:
-        runner: ["linux-x86-n2-64"] #, "linux-arm64-t2a-48"]
+        runner: ["linux-x86-n2-64", "linux-arm64-t2a-48"]
         python: ["3.10"]
 
     runs-on: ${{ matrix.runner }}

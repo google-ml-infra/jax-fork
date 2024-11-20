@@ -16,26 +16,21 @@ on:
         - 'no'
   workflow_call:
     inputs:
-      build_jax:
-        description: "Should the jax artifact be built? (1 to enable, 0 to disable)"
+      wheel_list:
+        description: "A comma separated list of JAX wheels to build. E.g: jaxlib or jaxlib,jax-cuda-pjrt"
         type: string
         required: false
-        default: "0"
-      build_jaxlib:
-        description: "Should the jaxlib artifact be built? (1 to enable, 0 to disable)"
+        default: ""
+      python_list:
+        description: "A comma separated list of Python versions to build for. E.g: 3.10 or 3.11,3.12"
         type: string
         required: false
-        default: "0"
-      build_jax_cuda_plugin:
-        description: "Should the jax-cuda-plugin artifact be built? (1 to enable, 0 to disable)"
+        default: ""
+      platform_list:
+        description: "A comma separated list of platforms to build for. E.g: linux_x86 or linux_x86,linux_arm64,windows_x86"
         type: string
         required: false
-        default: "0"
-      build_jax_cuda_pjrt:
-        description: "Should the jax-cuda-pjrt artifact be built? (1 to enable, 0 to disable)"
-        type: string
-        required: false
-        default: "0"
+        default: ""
       clone_main_xla:
         description: "Should latest XLA be used? (1 to enable, 0 to disable)"
         type: string
@@ -58,11 +53,13 @@ on:
         default: "1"
 
 jobs:
-  determine_artifact_matrix:
+  determine_matrix:
     runs-on: "linux-x86-n2-16"
     container: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest"
     outputs:
       artifact_matrix: ${{ steps.set-matrix.outputs.artifact_matrix }}
+      python_matrix: ${{ steps.set-matrix.outputs.python_matrix }}
+      platform_matrix: ${{ steps.set-matrix.outputs.platform_matrix }}
     defaults:
       run:
         shell: bash
@@ -74,39 +71,64 @@ jobs:
           halt-dispatch-input: ${{ inputs.halt-for-connection }}
       - id: set-matrix
         run: |
-            artifacts=()
             # Define inputs as bash variables to be able to parse them in
             # if conditions
             is_workflow_call=${{ inputs.is_workflow_call }}
-            build_jax=${{ inputs.build_jax }}
-            build_jaxlib=${{ inputs.build_jaxlib }}
-            build_jax_cuda_pjrt=${{ inputs.build_jax_cuda_pjrt }}
-            build_jax_cuda_plugin=${{ inputs.build_jax_cuda_plugin }}
+            wheel_list=${{ inputs.wheel_list }}
+            python_list=${{ inputs.python_list }}
+            platform_list=${{ inputs.platform_list }}
+            
+            # Initialize the arrays
+            wheels=()
+            python_versions=()
+            platforms=()
 
-            # Build every package if not a workflow call
+            # Build every package for every Python version on every platform if not a workflow call
+            # Packages that are not supported on a platform won't be built. E.g. CUDA packages won't be
+            # built for Windows
             if [[ ${is_workflow_call:-"0"} == "0" ]]; then
-              artifacts=("'jax'" ", 'jaxlib'" ", 'jax-cuda-pjrt'" ", 'jax-cuda-plugin'")
+              wheels=("'jax'" ", 'jaxlib'" ", 'jax-cuda-pjrt'" ", 'jax-cuda-plugin'")
+              python_versions=("'3.10'" ", '3.11'" ", '3.12'", ", '3.13'")
+              platforms=("'linux-x86-n2-16'" ", 'linux-arm64-t2a-48'" ", 'windows-x86-n2-64'") 
             else
-              if [[ ${build_jax:-"0"} == "1" ]]; then
-                  artifacts+="'jax',"
-              fi
+              # Set the Internal Field Separator to be comma
+              IFS=,
 
-              if [[ ${build_jaxlib:-"0"} == "1" ]]; then
-                  artifacts+="'jaxlib',"
-              fi
+              # Wheels
+              for wheel in $wheel_list; do
+                wheels+="'$wheel',"
+              done
 
-              if [[ ${build_jax_cuda_pjrt:-"0"} == "1" ]]; then
-                  artifacts+="'jax-cuda-pjrt',"
-              fi
+              # Python versions
+              for python_version in $python_list; do
+                python_versions+="'$python_version',"
+              done
 
-              if [[ ${build_jax_cuda_plugin:-"0"} == "1" ]]; then
-                  artifacts+="'jax-cuda-plugin'"
-              fi
+              # Platforms
+              for platform in $platform_list; do
+                if [[ $platform == "linux_x86" ]]; then
+                  platforms+="'linux-x86-n2-16',"
+                elif [[ $platform == "linux_arm64" ]]; then
+                  platforms+="'linux-arm64-t2a-48',"
+                elif [[ $platform == "windows_x86" ]]; then
+                  platforms+="'windows-x86-n2-64',"
+                else
+                  echo "Incorrect platform provided. Valid options are: linux_x86, linux_arm64, windows_x86"
+                  exit 1
+                fi
+              done
             fi
-            echo "artifact_matrix=[${artifacts[@]}]" >> $GITHUB_OUTPUT 
+
+            echo "artifact_matrix=[${wheels[@]}]" >> $GITHUB_OUTPUT
+            echo "python_matrix=[${python_versions[@]}]" >> $GITHUB_OUTPUT  
+            echo "platform_matrix=[${platforms[@]}]" >> $GITHUB_OUTPUT 
+            
+            echo "Artifacts: $artifact_matrix"
+            echo "Python versions: $python_matrix"
+            echo "Platforms: $platform_matrix"
 
   build_artifacts:
-    needs: determine_artifact_matrix
+    needs: determine_matrix
     continue-on-error: true
     defaults:
       run:
@@ -114,9 +136,9 @@ jobs:
         shell: bash
     strategy:
       matrix:
-        runner: ["linux-x86-n2-16"] #, "linux-arm64-t2a-48", "windows-x86-n2-64"]
-        artifact: ${{ fromJSON(needs.determine_artifact_matrix.outputs.artifact_matrix) }}
-        python: ["3.10", "3.11", "3.12", "3.13"]
+        runner: ${{ fromJSON(needs.determine_matrix.outputs.platform_matrix) }}
+        artifact: ${{ fromJSON(needs.determine_matrix.outputs.artifact_matrix) }}
+        python: ${{ fromJSON(needs.determine_matrix.outputs.python_matrix) }}
         # jax-cuda-pjrt and jax are pure Python packages so they do not need to be built for each
         # Python version.
         exclude:
