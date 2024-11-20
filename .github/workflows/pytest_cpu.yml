@@ -33,12 +33,12 @@ jobs:
   run_pytest:
     name: "Run CPU tests with Pytest"
     needs: build_jaxlib_artifact
-    continue-on-error: true
     defaults:
       run:
         # Explicitly set the shell to bash to override the default Windows environment, i.e, cmd.
         shell: bash
     strategy:
+      fail-fast: false # don't cancel all jobs on failure
       matrix:
         runner: ["linux-x86-n2-64", "linux-arm64-t2a-48", "windows-x86-n2-64"]
         python: ["3.10", "3.11", "3.12", "3.13"]

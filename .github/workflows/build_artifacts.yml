@@ -130,12 +130,12 @@ jobs:
 
   build_artifacts:
     needs: determine_matrix
-    continue-on-error: true
     defaults:
       run:
         # Explicitly set the shell to bash to override the default Windows environment, i.e, cmd.
         shell: bash
     strategy:
+      fail-fast: false # don't cancel all jobs on failure
       matrix:
         runner: ${{ fromJSON(needs.determine_matrix.outputs.platform_matrix) }}
         artifact: ${{ fromJSON(needs.determine_matrix.outputs.artifact_matrix) }}
