@@ -58,6 +58,12 @@ jobs:
         run: |
           os=$(uname -s | awk '{print tolower($0)}')
           arch=$(uname -m)
+
+          # Adjust name for Windows
+          if [[  $os  =~ "msys_nt" ]]; then
+            os="windows"
+          fi
+
           echo "PLATFORM=${os}_${arch}" >> $GITHUB_ENV
       - name: Download the artifacts built in the "build_artifacts" job
         run: >-
