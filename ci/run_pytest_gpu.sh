@@ -34,12 +34,13 @@ source ./ci/utilities/install_wheels_locally.sh
 # Set up the build environment.
 source "ci/utilities/setup_build_environment.sh"
 
-export PY_COLORS=1
-export JAX_SKIP_SLOW_TESTS=true
-
 "$JAXCI_PYTHON" -c "import jax; print(jax.default_backend()); print(jax.devices()); print(len(jax.devices()))"
 
 nvidia-smi
+
+# Set up all test environment variables
+export PY_COLORS=1
+export JAX_SKIP_SLOW_TESTS=true
 export NCCL_DEBUG=WARN
 export TF_CPP_MIN_LOG_LEVEL=0
 
@@ -47,9 +48,11 @@ export TF_CPP_MIN_LOG_LEVEL=0
 export gpu_count=$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
 export num_processes=`expr 4 \* $gpu_count`
 
-echo "Running GPU tests..."
 export XLA_PYTHON_CLIENT_ALLOCATOR=platform
 export XLA_FLAGS=--xla_gpu_force_compilation_parallelism=1
+# End of test environment variable setup
+
+echo "Running GPU tests..."
 "$JAXCI_PYTHON" -m pytest -n $num_processes --tb=short --maxfail=20 \
 tests examples \
 --deselect=tests/multi_device_test.py::MultiDeviceTest::test_computation_follows_data \
