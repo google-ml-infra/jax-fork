@@ -31,7 +31,7 @@ jobs:
     name: "Run Bazel GPU tests (single accelerator and multi-accelerator tests, non-RBE)"
     needs: build_artifacts
     runs-on: "linux-x86-g2-48-l4-4gpu"
-    container: "gcr.io/tensorflow-testing/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest"
+    container: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest"
 
     env:
       JAXCI_HERMETIC_PYTHON_VERSION: 3.11
