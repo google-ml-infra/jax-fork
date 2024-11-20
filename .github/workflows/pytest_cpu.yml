@@ -24,7 +24,7 @@ jobs:
       platform_list: "linux_x86,linux_arm64,windows_x86"
       clone_main_xla: 1
       upload_artifacts: true
-      upload_destination: '${{ github.workflow }}/${{ github.run_number }}/${{ github.run_attempt }}'
+      upload_destination_prefix: '${{ github.workflow }}/${{ github.run_number }}/${{ github.run_attempt }}'
 
   run_pytest:
     name: "Run CPU tests with Pytest"

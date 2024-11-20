@@ -41,8 +41,8 @@ on:
         required: false
         default: false
         type: boolean
-      upload_destination:
-        description: "GCS location to where the artifacts should be uploaded"
+      upload_destination_prefix:
+        description: "GCS location prefix to where the artifacts should be uploaded"
         required: false
         default: '${{ github.workflow }}/${{ github.run_number }}/${{ github.run_attempt }}'
         type: string
@@ -187,5 +187,5 @@ jobs:
           echo "PLATFORM=${os}_${arch}" >> $GITHUB_ENV
       - name: Upload artifacts to GCS bucket
         if: inputs.upload_artifacts
-        run:  gsutil -m cp -r $(pwd)/dist/*.whl gs://general-ml-ci-transient/jax-github-actions/"${{ inputs.upload_destination }}"/$PLATFORM/python${JAXCI_HERMETIC_PYTHON_VERSION}/
+        run:  gsutil -m cp -r $(pwd)/dist/*.whl gs://general-ml-ci-transient/jax-github-actions/"${{ inputs.upload_destination_prefix }}"/$PLATFORM/python${JAXCI_HERMETIC_PYTHON_VERSION}/
       
