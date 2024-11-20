@@ -69,7 +69,8 @@ jobs:
         uses: google-ml-infra/actions/ci_connection@main
         with:
           halt-dispatch-input: ${{ inputs.halt-for-connection }}
-      - id: set-matrix
+      - name: "Determine the matrix"
+        id: set-matrix
         run: |
             # Define inputs as bash variables to be able to parse them in
             # if conditions
@@ -123,9 +124,9 @@ jobs:
             echo "python_matrix=[${python_versions[@]}]" >> $GITHUB_OUTPUT  
             echo "platform_matrix=[${platforms[@]}]" >> $GITHUB_OUTPUT 
             
-            echo "Artifacts: $artifact_matrix"
-            echo "Python versions: $python_matrix"
-            echo "Platforms: $platform_matrix"
+            echo "Artifacts: ${wheels[@]}"
+            echo "Python versions:${python_versions[@]}"
+            echo "Platforms: ${platforms[@]}"
 
   build_artifacts:
     needs: determine_matrix
@@ -202,7 +203,6 @@ jobs:
           arch=$(uname -m)
           echo "PLATFORM=${os}_${arch}" >> $GITHUB_ENV
       - name: Upload artifacts to GCS bucket
-        # Upload if requested and one of the artifacts was built
         if: inputs.upload_artifacts
         run:  gsutil -m cp -r $(pwd)/dist/*.whl gs://general-ml-ci-transient/jax-github-actions/"${{ inputs.upload_destination }}"/$PLATFORM/python${JAXCI_HERMETIC_PYTHON_VERSION}/
       
