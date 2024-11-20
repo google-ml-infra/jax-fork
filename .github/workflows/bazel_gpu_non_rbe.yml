@@ -15,6 +15,10 @@ on:
         - 'yes'
         - 'no'
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build_artifacts:
     name: "Build the jaxlib and CUDA plugins using latest XLA"

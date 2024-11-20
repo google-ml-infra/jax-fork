@@ -1,9 +1,9 @@
 name: CI - Bazel CPU tests (RBE)
 
 on:
-  # pull_request:
-  #   branches:
-  #     - main
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       halt-for-connection:
@@ -21,10 +21,13 @@ concurrency:
 
 jobs:
   run_tests:
-    if: github.event.repository.fork == false
+    defaults:
+      run:
+        # Explicitly set the shell to bash to override the default Windows environment, i.e, cmd.
+        shell: bash
     strategy:
       matrix:
-        runner: ["windows-x86-n2-64"] #, "linux-x86-n2-16", "linux-arm64-t2a-16"]
+        runner: ["windows-x86-n2-64", "linux-x86-n2-16", "linux-arm64-t2a-16"]
 
     runs-on: ${{ matrix.runner }}
     container: ${{ (contains(matrix.runner, 'linux-x86') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest') ||
