@@ -1,9 +1,9 @@
 name: Run Bazel GPU tests (non RBE)
 
 on:
-  # pull_request:
-  #   branches:
-  #     - main
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       halt-for-connection:
@@ -16,14 +16,22 @@ on:
         - 'no'
 
 jobs:
-  build:
-    strategy:
-      matrix:
-        runner: ["linux-x86-g2-48-l4-4gpu"]
-
-    runs-on: ${{ matrix.runner }}
-    container:
-      image: "gcr.io/tensorflow-testing/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest"
+  build_artifacts:
+    name: "Build the jaxlib and CUDA plugins using latest XLA"
+    uses: ./.github/workflows/build_artifacts.yml
+    with:
+      wheel_list: "jaxlib,jax-cuda-plugin,jax-cuda-pjrt"
+      python_list: "3.11"
+      platform_list: "linux_x86"
+      clone_main_xla: 1
+      upload_artifacts: true
+      upload_destination: '${{ github.workflow }}/${{ github.run_number }}/${{ github.run_attempt }}'
+    
+  run_bazel_tests:
+    name: "Run Bazel GPU tests (single accelerator and multi-accelerator tests, non-RBE)"
+    needs: build_artifacts
+    runs-on: "linux-x86-g2-48-l4-4gpu"
+    container: "gcr.io/tensorflow-testing/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest"
 
     env:
       JAXCI_HERMETIC_PYTHON_VERSION: 3.11
@@ -35,17 +43,12 @@ jobs:
         uses: google-ml-infra/actions/ci_connection@main
         with:
           halt-dispatch-input: ${{ inputs.halt-for-connection }}
-      - name: Build jaxlib
-        env:
-          JAXCI_CLONE_MAIN_XLA: 1
-        run: ./ci/build_artifacts.sh "jaxlib"
-      - name: Build jax-cuda-plugin
-        env:
-          JAXCI_CLONE_MAIN_XLA: 1
-        run: ./ci/build_artifacts.sh "jax-cuda-plugin"
-      - name: Build jax-cuda-pjrt
-        env:
-          JAXCI_CLONE_MAIN_XLA: 1
-        run: ./ci/build_artifacts.sh "jax-cuda-pjrt"
+      - name: Set Platform
+        run: |
+          os=$(uname -s | awk '{print tolower($0)}')
+          arch=$(uname -m)
+          echo "PLATFORM=${os}_${arch}" >> $GITHUB_ENV
+      - name: Download the artifacts built in the "build_artifacts" job
+        run: mkdir -p $(pwd)/dist && gsutil -m cp -r gs://general-ml-ci-transient/jax-github-actions/"${{ github.workflow }}"/${{ github.run_number }}/${{ github.run_attempt }}/$PLATFORM/python${JAXCI_HERMETIC_PYTHON_VERSION} $(pwd)/dist/
       - name: Run Bazel GPU tests locally
         run: ./ci/run_bazel_test_gpu_non_rbe.sh 
