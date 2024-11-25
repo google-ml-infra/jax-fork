@@ -189,6 +189,19 @@ def get_clang_path_or_exit():
     sys.exit(-1)
 
 
+def get_clang_major_version(clang_path):
+  clang_version_proc = subprocess.run(
+      [clang_path, "-E", "-P", "-"],
+      input="__clang_major__",
+      check=True,
+      capture_output=True,
+      text=True,
+  )
+  major_version = int(clang_version_proc.stdout)
+
+  return major_version
+
+
 def get_jax_configure_bazel_options(bazel_command: list[str]):
   """Returns the bazel options to be written to .jax_configure.bazelrc."""
   # Get the index of the "run" parameter. Build options will come after "run" so
@@ -219,3 +232,13 @@ def get_githash():
     ).stdout.strip()
   except OSError:
     return ""
+
+def _parse_string_as_bool(s):
+  """Parses a string as a boolean value."""
+  lower = s.lower()
+  if lower == "true":
+    return True
+  elif lower == "false":
+    return False
+  else:
+    raise ValueError(f"Expected either 'true' or 'false'; got {s}")

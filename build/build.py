@@ -245,7 +245,19 @@ def add_artifact_subcommand_arguments(parser: argparse.ArgumentParser):
   )
 
   # Compile Options
-  compile_group = parser.add_argument_group('Compile Options', )
+  compile_group = parser.add_argument_group('Compile Options')
+
+  compile_group.add_argument(
+      "--use_clang",
+      type=utils._parse_string_as_bool,
+      default="true",
+      const=True,
+      nargs="?",
+      help="""
+        Whether to use Clang as the compiler. Not recommended to set this to
+        False as JAX uses Clang as the default compiler.
+        """,
+  )
 
   compile_group.add_argument(
       "--clang_path",
@@ -304,7 +316,7 @@ async def main():
       formatter_class=argparse.RawDescriptionHelpFormatter
   )
 
-  # Create subparsers for build_artifacts and requirements_update
+  # Create subparsers for build and requirements_update
   subparsers = parser.add_subparsers(dest="command", required=True)
 
   # requirements_update subcommand
@@ -437,13 +449,22 @@ async def main():
       arch,
     )
 
-    clang_path = args.clang_path or utils.get_clang_path_or_exit()
-    logging.debug("Using Clang as the compiler, clang path: %s", clang_path)
+    clang_path = ""
+    if args.use_clang:
+      clang_path = args.clang_path or utils.get_clang_path_or_exit()
+      clang_major_version = utils.get_clang_major_version(clang_path)
+      logging.debug(
+          "Using Clang as the compiler, clang path: %s, clang version: %s",
+          clang_path,
+          clang_major_version,
+      )
 
-    # Use double quotes around clang path to avoid path issues on Windows.
-    wheel_build_command.append(f"--action_env=CLANG_COMPILER_PATH=\"{clang_path}\"")
-    wheel_build_command.append(f"--repo_env=CC=\"{clang_path}\"")
-    wheel_build_command.append(f"--repo_env=BAZEL_COMPILER=\"{clang_path}\"")
+      # Use double quotes around clang path to avoid path issues on Windows.
+      wheel_build_command.append(f"--action_env=CLANG_COMPILER_PATH=\"{clang_path}\"")
+      wheel_build_command.append(f"--repo_env=CC=\"{clang_path}\"")
+      wheel_build_command.append(f"--repo_env=BAZEL_COMPILER=\"{clang_path}\"")
+    else:
+      logging.debug("Use Clang: False")
 
     # Do not apply --config=clang on Mac as these settings do not apply to
     # Apple Clang.
@@ -455,11 +476,11 @@ async def main():
       wheel_build_command.append("--config=mkl_open_source_only")
 
     if args.target_cpu_features == "release":
-      logging.debug(
-          "Using release cpu features: --config=avx_%s",
-          "windows" if os_name == "windows" else "posix",
-      )
       if arch in ["x86_64", "AMD64"]:
+        logging.debug(
+            "Using release cpu features: --config=avx_%s",
+            "windows" if os_name == "windows" else "posix",
+        )
         wheel_build_command.append(
             "--config=avx_windows"
             if os_name == "windows"
@@ -509,7 +530,10 @@ async def main():
         )
 
     if "rocm" in wheel:
-      wheel_build_command.append("--config=rocm")
+      wheel_build_command.append("--config=rocm_base")
+      if args.use_clang:
+        wheel_build_command.append("--config=rocm")
+        wheel_build_command.append(f"--action_env=CLANG_COMPILER_PATH=\"{clang_path}\"")
       if args.rocm_path:
         logging.debug("ROCm tookit path: %s", args.rocm_path)
         wheel_build_command.append(f"--action_env=ROCM_PATH=\"{args.rocm_path}\"")
