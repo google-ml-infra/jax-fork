@@ -59,13 +59,17 @@ jobs:
           source ${GITHUB_WORKSPACE}/venv/bin/activate
           cd jax
           pip install -r build/test-requirements.txt
+      # Halt for testing
+      - name: Wait For Connection
+        uses: google-ml-infra/actions/ci_connection@main
       - name: Build and install JAX
         env:
           ASAN_OPTIONS: detect_leaks=0
         run: |
           source ${GITHUB_WORKSPACE}/venv/bin/activate
           cd jax
-          python build/build.py \
+          git config --global --add safe.directory jax
+          python build/build.py build --wheels=jaxlib --verbose \
             --bazel_options=--color=yes \
             --bazel_options=--copt=-fsanitize=address \
             --clang_path=/usr/bin/clang-18
