@@ -2,7 +2,7 @@ name: CI - Address Sanitizer (nightly)
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  #cancel-in-progress: true
 
 on:
   schedule:
@@ -42,23 +42,29 @@ jobs:
             zlib1g-dev libbz2-dev libreadline-dev libsqlite3-dev curl git \
             libncursesw5-dev xz-utils tk-dev libxml2-dev libxmlsec1-dev \
             libffi-dev liblzma-dev
-      - name: Build CPython with ASAN enabled
-        env:
-          ASAN_OPTIONS: detect_leaks=0
-        run: |
-          cd cpython
-          mkdir ${GITHUB_WORKSPACE}/cpythonasan
-          CC=clang-18 CXX=clang++-18 ./configure --prefix ${GITHUB_WORKSPACE}/cpythonasan --with-address-sanitizer --without-pymalloc
-          make -j64
-          make install
-          ${GITHUB_WORKSPACE}/cpythonasan/bin/python3 -m venv ${GITHUB_WORKSPACE}/venv
-      - name: Install JAX test requirements
-        env:
-          ASAN_OPTIONS: detect_leaks=0
-        run: |
-          source ${GITHUB_WORKSPACE}/venv/bin/activate
-          cd jax
-          pip install -r build/test-requirements.txt
+      # - name: Build CPython with ASAN enabled
+      #   env:
+      #     ASAN_OPTIONS: detect_leaks=0
+      #   run: |
+      #     cd cpython
+      #     mkdir ${GITHUB_WORKSPACE}/cpythonasan
+      #     CC=clang-18 CXX=clang++-18 ./configure --prefix ${GITHUB_WORKSPACE}/cpythonasan --with-address-sanitizer --without-pymalloc
+      #     make -j64
+      #     make install
+      #     ${GITHUB_WORKSPACE}/cpythonasan/bin/python3 -m venv ${GITHUB_WORKSPACE}/venv
+      # - name: Install JAX test requirements
+      #   env:
+      #     ASAN_OPTIONS: detect_leaks=0
+      #   run: |
+      #     source ${GITHUB_WORKSPACE}/venv/bin/activate
+      #     cd jax
+      #     pip install -r build/test-requirements.txt
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Create python3 symlink
+        run: ln -s /__w/_tool/Python/3.11.10/x64/bin/python3 /usr/local/bin/python3
       # Halt for testing
       - name: Wait For Connection
         uses: google-ml-infra/actions/ci_connection@main
