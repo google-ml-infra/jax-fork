@@ -29,8 +29,12 @@ jobs:
       - run: python -m pip install pre-commit
       - name: Add to PATH
         run: export PATH=$PATH:/__w/_tool/Python/3.11.10/x64/bin
+      - name: echo PATH
+        run: echo $PATH
       # Halt for testing
       - name: Wait For Connection
+        env:
+            PATH: '$PATH:/__w/_tool/Python/3.11.10/x64/bin'
         uses: google-ml-infra/actions/ci_connection@main
       - uses: actions/cache@6849a6489940f00c2f30c0fb92c6274307ccb58a # v4.1.2
         with:
