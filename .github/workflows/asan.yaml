@@ -63,8 +63,8 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Create python3 symlink
-        run: ln -s /__w/_tool/Python/3.11.10/x64/bin/python3 /usr/local/bin/python3
+      - name: Add to PATH
+        run: export PATH=$PATH:/__w/_tool/Python/3.11.10/x64/bin/
       # Halt for testing
       - name: Wait For Connection
         uses: google-ml-infra/actions/ci_connection@main
