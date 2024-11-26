@@ -28,7 +28,7 @@ jobs:
           python-version: "3.11"
       - run: python -m pip install pre-commit
       - name: Add to PATH
-        run: export PATH=$PATH:/__w/_tool/Python/3.11.10/x64/bin/
+        run: export PATH=$PATH:/__w/_tool/Python/3.11.10/x64/bin
       # Halt for testing
       - name: Wait For Connection
         uses: google-ml-infra/actions/ci_connection@main
