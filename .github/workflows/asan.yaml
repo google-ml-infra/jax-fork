@@ -38,32 +38,23 @@ jobs:
           repository: python/cpython
           path: cpython
           ref: v3.13.0
-      # - name: Build CPython with ASAN enabled
-      #   env:
-      #     ASAN_OPTIONS: detect_leaks=0
-      #   run: |
-      #     cd cpython
-      #     mkdir ${GITHUB_WORKSPACE}/cpythonasan
-      #     CC=clang-18 CXX=clang++-18 ./configure --prefix ${GITHUB_WORKSPACE}/cpythonasan --with-address-sanitizer --without-pymalloc
-      #     make -j64
-      #     make install
-      #     ${GITHUB_WORKSPACE}/cpythonasan/bin/python3 -m venv ${GITHUB_WORKSPACE}/venv
-      # - name: Install JAX test requirements
-      #   env:
-      #     ASAN_OPTIONS: detect_leaks=0
-      #   run: |
-      #     source ${GITHUB_WORKSPACE}/venv/bin/activate
-      #     cd jax
-      #     pip install -r build/test-requirements.txt
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Add to PATH
-        run: export PATH=$PATH:/__w/_tool/Python/3.11.10/x64/bin/
-      # Halt for testing
-      - name: Wait For Connection
-        uses: google-ml-infra/actions/ci_connection@main
+      - name: Build CPython with ASAN enabled
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: |
+          cd cpython
+          mkdir ${GITHUB_WORKSPACE}/cpythonasan
+          CC=clang-18 CXX=clang++-18 ./configure --prefix ${GITHUB_WORKSPACE}/cpythonasan --with-address-sanitizer --without-pymalloc
+          make -j64
+          make install
+          ${GITHUB_WORKSPACE}/cpythonasan/bin/python3 -m venv ${GITHUB_WORKSPACE}/venv
+      - name: Install JAX test requirements
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: |
+          source ${GITHUB_WORKSPACE}/venv/bin/activate
+          cd jax
+          pip install -r build/test-requirements.txt
       - name: Build and install JAX
         env:
           ASAN_OPTIONS: detect_leaks=0
