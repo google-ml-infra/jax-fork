@@ -16,12 +16,12 @@ jobs:
       image: index.docker.io/library/ubuntu@sha256:6d8d9799fe6ab3221965efac00b4c34a2bcc102c086a58dff9e19a08b913c7ef # ratchet:ubuntu:20.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
       - name: Install dependencies for setting up Python
         env:
-          DEBIAN_FRONTEND: noninteractive
+            DEBIAN_FRONTEND: noninteractive
         run: |
-          apt update && apt install libssl-dev libsqlite3-dev git -y
+            apt update && apt install libssl-dev libsqlite3-dev git -y
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
@@ -29,12 +29,10 @@ jobs:
       - run: python -m pip install pre-commit
       - name: Add to PATH
         run: export PATH=$PATH:/__w/_tool/Python/3.11.10/x64/bin
-      - name: echo PATH
-        run: echo $PATH
+      - name: Create python3 symlink
+        run: ln -s /__w/_tool/Python/3.11.10/x64/bin/python3 /usr/local/bin/python3 
       # Halt for testing
       - name: Wait For Connection
-        env:
-            PATH: '$PATH:/__w/_tool/Python/3.11.10/x64/bin'
         uses: google-ml-infra/actions/ci_connection@main
       - uses: actions/cache@6849a6489940f00c2f30c0fb92c6274307ccb58a # v4.1.2
         with:
