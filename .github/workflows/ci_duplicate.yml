@@ -9,10 +9,6 @@ permissions:
   contents: read  # to fetch code
   actions: write  # to cancel previous workflows
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
-  cancel-in-progress: true
-
 jobs:
   lint_and_typecheck:
     runs-on: linux-x86-n2-16
