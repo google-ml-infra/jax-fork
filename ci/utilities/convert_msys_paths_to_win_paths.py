@@ -16,7 +16,7 @@
 Converts MSYS Linux-like paths stored in env variables to Windows paths.
 
 This is necessary on Windows, because some applications do not understand/handle
-Linux-like paths MSYS uses, for example, Docker.
+Linux-like paths MSYS uses, for example, Bazel.
 """
 import argparse
 import os
@@ -44,24 +44,19 @@ def msys_to_windows_path(msys_path):
     return None
 
 def should_convert(var: str,
-                   convert: list[str] | None,
-                   exclude: list[str] | None):
-  """Check the variable name against convert/exclude list"""
-  if exclude and var in exclude:
-    return False
-  
+                   convert: list[str] | None):
+  """Check the variable name against convert list"""
   if var in convert:
     return True
-
-  return False
+  else:
+    return False
 
 def main(parsed_args: argparse.Namespace):
   converted_paths = {}
 
   for var, value in os.environ.items():
     if not value or not should_convert(var,
-                                       parsed_args.convert,
-                                       parsed_args.exclude):
+                                       parsed_args.convert):
       continue
     converted_path = msys_to_windows_path(value)
     converted_paths[var] = converted_path
@@ -80,9 +75,6 @@ if __name__ == '__main__':
                       nargs='+',
                       required=True,
                       help='Space separated list of environment variables to convert. E.g: --convert env_var1 env_var2')
-  parser.add_argument('--exclude',
-                    nargs='*',
-                    help='Optional space separated list of environment variables to exclude')
   args = parser.parse_args()
 
   main(args)
