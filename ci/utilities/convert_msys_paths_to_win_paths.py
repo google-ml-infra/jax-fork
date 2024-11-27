@@ -79,10 +79,10 @@ if __name__ == '__main__':
   parser.add_argument('--convert',
                       nargs='+',
                       required=True,
-                      help='Space separated list of variables and values to convert. E.g: --convert foo=/path/to/bar')
+                      help='Space separated list of environment variables to convert. E.g: --convert env_var1 env_var2')
   parser.add_argument('--exclude',
                     nargs='*',
-                    help='Optional list of variables to exclude')
+                    help='Optional space separated list of environment variables to exclude')
   args = parser.parse_args()
 
   main(args)
