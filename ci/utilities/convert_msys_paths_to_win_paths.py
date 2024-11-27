@@ -45,7 +45,7 @@ def msys_to_windows_path(msys_path):
 
 def should_convert(var_name: str,
                    exclude: list[str] | None):
-  """Check the variable name against allow/deny lists."""
+  """Check the variable name against exclude list"""
   if exclude and var_name in exclude:
     return False
   return True
