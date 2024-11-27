@@ -43,15 +43,22 @@ def msys_to_windows_path(msys_path):
     print(f"Error converting path: {e}")
     return None
 
+def should_convert(var_name: str,
+                   exclude: list[str] | None):
+  """Check the variable name against allow/deny lists."""
+  if exclude and var_name in exclude:
+    return False
+  return True
+
 def main(parsed_args: argparse.Namespace):
   converted_paths = {}
 
   for var, value in os.environ.items():
-    if (parsed_args.blacklist and var in parsed_args.blacklist) or not value:
+    if not value or not should_convert(var,
+                                       parsed_args.exclude):
       continue
-    if "_DIR" in var or (args.whitelist and var in parsed_args.whitelist):
-      converted_path = msys_to_windows_path(value)
-      converted_paths[var] = converted_path
+    converted_path = msys_to_windows_path(value)
+    converted_paths[var] = converted_path
 
   var_str = '\n'.join(f'export {k}="{v}"'
                       for k, v in converted_paths.items())
@@ -63,12 +70,13 @@ def main(parsed_args: argparse.Namespace):
 if __name__ == '__main__':
   parser = argparse.ArgumentParser(description=(
       'Convert MSYS paths in environment variables to Windows paths.'))
-  parser.add_argument('--blacklist',
-                      nargs='*',
-                      help='List of variables to ignore')
-  parser.add_argument('--whitelist',
-                      nargs='*',
-                      help='List of variables to include')
+  parser.add_argument('--convert',
+                      nargs='+',
+                      required=True,
+                      help='List of variables to convert')
+  parser.add_argument('--exclude',
+                    nargs='*',
+                    help='Optional list of variables to exclude')
   args = parser.parse_args()
 
   main(args)

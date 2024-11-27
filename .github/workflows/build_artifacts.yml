@@ -159,7 +159,6 @@ jobs:
 
     env:
       JAXCI_HERMETIC_PYTHON_VERSION: "${{ matrix.python }}"
-      JAXCI_BUILD_ARTIFACT_WITH_RBE: 1
       JAXCI_CLONE_MAIN_XLA: "${{ inputs.clone_main_xla }}"
 
     steps:
@@ -169,6 +168,7 @@ jobs:
           os=$(uname -s | awk '{print tolower($0)}')
           arch=$(uname -m)
 
+          # Enable RBE if building on Linux x86 or Windows x86
           if [[ ($os == "linux" || $os  =~ "msys_nt" ) && $arch == "x86_64" ]]; then
             echo "JAXCI_BUILD_ARTIFACT_WITH_RBE=1" >> $GITHUB_ENV
           fi
