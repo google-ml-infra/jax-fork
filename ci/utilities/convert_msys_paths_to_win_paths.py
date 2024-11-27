@@ -46,7 +46,7 @@ def msys_to_windows_path(msys_path):
 def should_convert(var: str,
                    convert: list[str] | None,
                    exclude: list[str] | None):
-  """Check the variable name against exclude list"""
+  """Check the variable name against convert/exclude list"""
   if exclude and var in exclude:
     return False
   
