@@ -56,6 +56,7 @@ if [[ "${allowed_artifacts[@]}" =~ "${artifact}" ]]; then
     # flags in the .bazelrc depending upon the platform we are building for.
     bazelrc_config="${os}_${arch}"
 
+    # TODO(b/379903748): Add remote cache options for Linux and Windows.
     if [[ "$JAXCI_BUILD_ARTIFACT_WITH_RBE" == 1 ]]; then
       bazelrc_config="rbe_${bazelrc_config}"
     else

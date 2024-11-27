@@ -21,6 +21,8 @@ jobs:
       run:
         shell: bash -l {0}
     steps:
+      # Install git before actions/checkout as otherwise it will download the code with the GitHub
+      # REST API and therefore any subsequent git commands will fail.
       - name: Install clang 18
         env:
           DEBIAN_FRONTEND: noninteractive
@@ -61,7 +63,6 @@ jobs:
         run: |
           source ${GITHUB_WORKSPACE}/venv/bin/activate
           cd jax
-          git config --global --add safe.directory jax
           python build/build.py build --wheels=jaxlib --verbose \
             --bazel_options=--color=yes \
             --bazel_options=--copt=-fsanitize=address \
