@@ -43,18 +43,24 @@ def msys_to_windows_path(msys_path):
     print(f"Error converting path: {e}")
     return None
 
-def should_convert(var_name: str,
+def should_convert(var: str,
+                   convert: list[str] | None,
                    exclude: list[str] | None):
   """Check the variable name against exclude list"""
-  if exclude and var_name in exclude:
+  if exclude and var in exclude:
     return False
+  
+  if var in convert:
+    return True
+
+  return False
 
 def main(parsed_args: argparse.Namespace):
   converted_paths = {}
 
-  for var_value in parsed_args.convert:
-    var, value = var_value.split("=")
+  for var, value in os.environ.items():
     if not value or not should_convert(var,
+                                       parsed_args.convert,
                                        parsed_args.exclude):
       continue
     converted_path = msys_to_windows_path(value)
