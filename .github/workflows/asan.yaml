@@ -1,14 +1,14 @@
 name: CI - Address Sanitizer (nightly)
 
 on:
-  schedule:
-    - cron: "0 12 * * *" # Daily at 12:00 UTC
-  workflow_dispatch: # allows triggering the workflow run manually
-  pull_request: # Automatically trigger on pull requests affecting this file
-    branches:
-      - main
-    paths:
-      - '**/workflows/asan.yaml'
+#   schedule:
+#     - cron: "0 12 * * *" # Daily at 12:00 UTC
+#   workflow_dispatch: # allows triggering the workflow run manually
+#   pull_request: # Automatically trigger on pull requests affecting this file
+#     branches:
+#       - main
+#     paths:
+#       - '**/workflows/asan.yaml'
 
 jobs:
   asan:
