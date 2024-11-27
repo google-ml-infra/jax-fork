@@ -43,7 +43,7 @@ jobs:
       JAXCI_HERMETIC_PYTHON_VERSION: 3.11
       JAXCI_ENABLE_X64: ${{ matrix.enable-x_64 }}
 
-    name: "Run Bazel GPU tests (single accelerator and multi-accelerator tests, non-RBE), x64=${{ matrix.enable-x_64 }}"
+    name: "Bazel single accelerator and multi-accelerator GPU tests (Non RBE, linux-x86-g2-48-l4-4gpu, Python 3.11, x64=${{ matrix.enable-x_64 }})"
 
     steps:
       - uses: actions/checkout@v3

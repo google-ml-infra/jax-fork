@@ -40,7 +40,7 @@ jobs:
       JAXCI_HERMETIC_PYTHON_VERSION: "3.12"
       JAXCI_ENABLE_X64: ${{ matrix.enable-x_64 }}
 
-    name: "Run Bazel CPU tests (x64=${{ matrix.enable-x_64 }}"
+    name: "Bazel CPU tests (${{ matrix.runner }}, Python 3.12, x64=${{ matrix.enable-x_64 }})"
       
     steps:
     - uses: actions/checkout@v3
