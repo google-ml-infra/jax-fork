@@ -159,6 +159,7 @@ jobs:
 
     env:
       JAXCI_HERMETIC_PYTHON_VERSION: "${{ matrix.python }}"
+      JAXCI_BUILD_ARTIFACT_WITH_RBE: 1
       JAXCI_CLONE_MAIN_XLA: "${{ inputs.clone_main_xla }}"
 
     steps:

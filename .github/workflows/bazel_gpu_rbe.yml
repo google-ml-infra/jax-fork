@@ -1,9 +1,9 @@
 name: CI - Bazel GPU tests (RBE)
 
 on:
-  # pull_request:
-  #   branches:
-  #     - main
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       halt-for-connection:
@@ -24,13 +24,17 @@ jobs:
     strategy:
       matrix:
         runner: ["linux-x86-n2-16"]
+        enable-x_64: [1, 0]
 
     runs-on: ${{ matrix.runner }}
     container: 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest'
 
     env:
       JAXCI_HERMETIC_PYTHON_VERSION: "3.12"
-
+      JAXCI_ENABLE_X64: ${{ matrix.enable-x_64 }}
+    
+    name: "Run Bazel GPU tests (x64=${{ matrix.enable-x_64 }}"
+  
     steps:
       - uses: actions/checkout@v3
       - name: Wait For Connection

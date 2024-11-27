@@ -32,13 +32,18 @@ jobs:
       upload_destination_prefix: '${{ github.workflow }}/${{ github.run_number }}/${{ github.run_attempt }}'
     
   run_bazel_tests:
-    name: "Run Bazel GPU tests (single accelerator and multi-accelerator tests, non-RBE)"
     needs: build_artifacts
     runs-on: "linux-x86-g2-48-l4-4gpu"
     container: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest"
-
+    strategy:
+      fail-fast: false # don't cancel all jobs on failure
+      matrix:
+        enable-x_64: [1, 0]
     env:
       JAXCI_HERMETIC_PYTHON_VERSION: 3.11
+      JAXCI_ENABLE_X64: ${{ matrix.enable-x_64 }}
+
+    name: "Run Bazel GPU tests (single accelerator and multi-accelerator tests, non-RBE), x64=${{ matrix.enable-x_64 }}"
 
     steps:
       - uses: actions/checkout@v3
