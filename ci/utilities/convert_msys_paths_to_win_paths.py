@@ -48,12 +48,12 @@ def should_convert(var_name: str,
   """Check the variable name against exclude list"""
   if exclude and var_name in exclude:
     return False
-  return True
 
 def main(parsed_args: argparse.Namespace):
   converted_paths = {}
 
-  for var, value in os.environ.items():
+  for var_value in parsed_args.convert:
+    var, value = var_value.split("=")
     if not value or not should_convert(var,
                                        parsed_args.exclude):
       continue
@@ -73,7 +73,7 @@ if __name__ == '__main__':
   parser.add_argument('--convert',
                       nargs='+',
                       required=True,
-                      help='List of variables to convert')
+                      help='Space separated list of variables and values to convert. E.g: --convert foo=/path/to/bar')
   parser.add_argument('--exclude',
                     nargs='*',
                     help='Optional list of variables to exclude')
