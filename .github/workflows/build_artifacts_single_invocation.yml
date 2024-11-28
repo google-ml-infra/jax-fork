@@ -31,5 +31,7 @@ jobs:
         uses: google-ml-infra/actions/ci_connection@main
         with:
           halt-dispatch-input: ${{ inputs.halt-for-connection }}
+      - name: Mark GitHub repo as safe
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Build all artifacts with a single invocation of build CLI
         run: python build/build.py build --wheels=jax-cuda-plugin,jax-cuda-pjrt,jaxlib --bazel_options=--config=rbe_linux_x86_64_cuda --python_version=$JAXCI_HERMETIC_PYTHON_VERSION --verbose
