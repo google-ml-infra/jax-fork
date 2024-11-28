@@ -1,0 +1,35 @@
+name: Build multiple artifacts with build CLI
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      halt-for-connection:
+        description: 'Should this workflow run wait for a remote connection?'
+        type: choice
+        required: true
+        default: 'no'
+        options:
+        - 'yes'
+        - 'no'
+
+jobs:
+  build_artifacts:
+
+    runs-on: "linux-x86-n2-16"
+    container: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest"
+
+    env:
+      JAXCI_HERMETIC_PYTHON_VERSION: 3.12
+
+    steps:
+      - uses: actions/checkout@v3
+      # Halt for testing
+      - name: Wait For Connection
+        uses: google-ml-infra/actions/ci_connection@main
+        with:
+          halt-dispatch-input: ${{ inputs.halt-for-connection }}
+      - name: Build all artifacts with a single invocation of build CLI
+        run: python build/build.py build --wheels=jax-cuda-plugin,jax-cuda-pjrt,jaxlib --bazel_options=--config=rbe_linux_x86_64_cuda --python_version=$JAXCI_HERMETIC_PYTHON_VERSION --verbose
