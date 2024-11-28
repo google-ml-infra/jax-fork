@@ -64,6 +64,6 @@ jobs:
 
           echo "PLATFORM=${os}_${arch}" >> $GITHUB_ENV
       - name: Download the artifacts built in the "build_artifacts" job
-        run: mkdir -p $(pwd)/dist && gsutil -m cp -r gs://general-ml-ci-transient/jax-github-actions/"${{ github.workflow }}"/${{ github.run_number }}/${{ github.run_attempt }}/$PLATFORM/python${JAXCI_HERMETIC_PYTHON_VERSION} $(pwd)/dist/
+        run: mkdir -p $(pwd)/dist && gsutil -m cp -r gs://general-ml-ci-transient/jax-github-actions/"${{ github.workflow }}"/${{ github.run_number }}/${{ github.run_attempt }}/$PLATFORM/python${JAXCI_HERMETIC_PYTHON_VERSION}/*.whl $(pwd)/dist/
       - name: Run Bazel GPU tests locally
         run: ./ci/run_bazel_test_gpu_non_rbe.sh 

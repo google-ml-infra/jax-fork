@@ -72,7 +72,7 @@ jobs:
       - name: Download the artifacts built in the "build_artifacts" job
         run: >-
           mkdir -p $(pwd)/dist &&
-          gsutil -m cp -r gs://general-ml-ci-transient/jax-github-actions/"${{ github.workflow }}"/${{ github.run_number }}/${{ github.run_attempt }}/$PLATFORM/python${JAXCI_HERMETIC_PYTHON_VERSION} $(pwd)/dist/
+          gsutil -m cp -r gs://general-ml-ci-transient/jax-github-actions/"${{ github.workflow }}"/${{ github.run_number }}/${{ github.run_attempt }}/$PLATFORM/python${JAXCI_HERMETIC_PYTHON_VERSION}/*.whl $(pwd)/dist/
       - name: Install pytest
         env:
           JAXCI_PYTHON: python${{ matrix.python }}
