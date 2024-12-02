@@ -8,9 +8,13 @@ on:
   workflow_dispatch:
     inputs:
       halt-for-connection:
-        description: 'Should this invocation wait for a remote connection?'
-        required: false
-        default: '0'
+        description: 'Should this workflow run wait for a remote connection?'
+        type: choice
+        required: true
+        default: 'no'
+        options:
+        - 'yes'
+        - 'no'
 # Cancel any previous iterations if a new commit is pushed
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -20,7 +24,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: ["linux-x86-n2-64","linux-arm64-t2a-48"]
+        runner: ["linux-x86-n2-16"]
         instances: ["1"]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
@@ -30,8 +34,14 @@ jobs:
     steps:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # ratchet:actions/checkout@v4
       # Halt for connection if workflow dispatch is told to or if it is a retry with the label halt_on_retry
+      - name: Get external actions
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # ratchet:actions/checkout@v4
+        with:
+          repository: google-ml-infra/actions
+          ref: ssh_graceful_timeout
+          path: cool_actions
       - name: Wait For Connection
-        uses: ./actions/ci_connection/
+        uses: ./cool_actions/ci_connection/
         with:
           halt-dispatch-input: ${{ inputs.halt-for-connection }}
       - name: Echo

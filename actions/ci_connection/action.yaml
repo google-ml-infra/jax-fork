@@ -1,44 +1,26 @@
 name: "Wait For Connection"
-description: 'Action to wait for connection from user'
+description: 'Action to wait for connection from user (condtionally)'
 inputs:
   halt-dispatch-input:
-    description: 'Should the action wait for user connection from workflow_dispatch'
+    description: 'Should the action wait for user connection from workflow_dispatch?'
     required: false
-    default: "0"
-  should-wait-retry-tag:
-    description: "Tag that will flag action to wait on reruns if present"
-    required: false
-    default: "CI Connection Halt - On Retry"
-  should-wait-always-tag:
-    description: "Tag that will flag action to wait on reruns if present"
-    required: false
-    default: "CI Connection Halt - Always"
-  repository:
-      description: 'Repository name with owner. For example, actions/checkout'
-      default: ${{ github.repository }}
+    default: "no"
 runs:
   using: "composite"
   steps:
-  - name: Print halt conditions
+  - name: Wait for connection (conditionally)
     shell: bash
-    run: |
-      echo "All labels: ${{ toJSON(github.event.pull_request.labels.*.name) }}"
-      echo "Halt retry tag: ${{ inputs.should-wait-retry-tag }}"
-      echo "Halt always tag ${{ inputs.should-wait-always-tag}}"
-      echo "Should halt input: ${{ inputs.halt-dispatch-input }}"
-      echo "Reattempt count: ${{ github.run_attempt }}"
-      echo "PR number ${{ github.event.number }}"
-  - name: Halt For Connection 
-    shell: bash
-    if: |
-      (contains(github.event.pull_request.labels.*.name, inputs.should-wait-retry-tag) && github.run_attempt > 1) ||
-      contains(github.event.pull_request.labels.*.name, inputs.should-wait-always-tag) ||
-      inputs.halt-dispatch-input == '1' ||
-      inputs.halt-dispatch-input == 'yes'
     env:
-      REPOSITORY: ${{ inputs.repository }}
-      INTERACTIVE_CI: 1 
+      # This variable is on by default, but can be overridden for convenience,
+      # in case the workflow calling this action should not be halted, despite
+      # other labels/inputs.
+      INTERACTIVE_CI: 1
       PYTHONUNBUFFERED: 1
+      HALT_DISPATCH_INPUT: ${{ inputs.halt-dispatch-input }}
+    # The calling workflow shouldn't fail in case this step does
+    continue-on-error: true
     run: |
-      echo "$GITHUB_ACTION_PATH"
-      python3 $GITHUB_ACTION_PATH/wait_for_connection.py
+      # Pick an existing Python alias
+      python_bin=$(which python3 2>/dev/null || which python)
+      # Wait for the connection, if a halt was requested via a label/input
+      "$python_bin" "$GITHUB_ACTION_PATH/wait_for_connection.py"
