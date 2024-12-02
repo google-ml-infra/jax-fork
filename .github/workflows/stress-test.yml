@@ -1,0 +1,60 @@
+# WorkFlow dispatch to stress test the runner system
+name: Stress Test
+# Run on pull_request that is labeled as "optional_ci_tpu" or workflow dispatch
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+# Cancel any previous iterations if a new commit is pushed
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  cuda-stress:
+    strategy:
+      matrix:
+        #TODO: need to fix naming here, this pool is only allocating 4 gpus
+        runner: ["arc-linux-x86-g2-96-l4-8gpu"]
+        instances: ["one"]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    container:
+      # TODO: Needs newer, light weight image
+      image: index.docker.io/tensorflow/build@sha256:7fb38f0319bda36393cad7f40670aa22352b44421bb906f5cf34d543acd8e1d2 # ratchet:tensorflow/build:latest-python3.11
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # ratchet:actions/checkout@v4
+      # Install JAX, this should correspond to the code or pytest may be out of sync
+      - name: Install JAX
+        run: |
+          pip install -U -r build/test-requirements.txt
+          pip install -U --pre jax[cuda12]==0.4.31.dev20240625 -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
+          nvidia-smi
+      - name: Test JAX
+        env: 
+          JAX_NUM_GENERATED_CASES: 25
+          JAX_PLATFORMS: gpu
+        run: |
+          python -m pytest -n 4 --tb=short --maxfail=20 tests examples
+  cpu-stress:
+    strategy:
+      matrix:
+        runner: ["arc-linux-x86-n2-64"]
+        instances: ["1","2","3","4","5","6"]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    container:
+      # TODO: Needs newer, light weight image
+      image: index.docker.io/tensorflow/build@sha256:7fb38f0319bda36393cad7f40670aa22352b44421bb906f5cf34d543acd8e1d2 # ratchet:tensorflow/build:latest-python3.11
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # ratchet:actions/checkout@v4
+      # Install JAX, this should correspond to the code or pytest may be out of sync
+      - name: Install JAX
+        run: |
+          pip install -U -r build/test-requirements.txt
+          pip install -U --pre jax==0.4.31.dev20240625 -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
+      - name: Test JAX
+        env: 
+          JAX_NUM_GENERATED_CASES: 25
+        run: |
+          python -m pytest -n auto --tb=short --maxfail=20 tests examples
