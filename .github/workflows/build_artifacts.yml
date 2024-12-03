@@ -90,7 +90,7 @@ jobs:
             if [[ ${is_workflow_call:-"0"} == "0" ]]; then
               wheels=("'jaxlib'" ", 'jax-cuda-pjrt'" ", 'jax-cuda-plugin'")
               python_versions=("'3.10'" ", '3.11'" ", '3.12'", ", '3.13'")
-              platforms=("'linux-x86-n2-16'" ", 'linux-arm64-t2a-48'" ", 'windows-x86-n2-64'") 
+              platforms=("'linux-x86-n2-16'" ", 'linux-arm64-t2a-48'" ", 'windows-x86-n2-16'") 
             else
               # Set the Internal Field Separator to be comma
               IFS=,
@@ -112,7 +112,7 @@ jobs:
                 elif [[ $platform == "linux_arm64" ]]; then
                   platforms+="'linux-arm64-t2a-48',"
                 elif [[ $platform == "windows_x86" ]]; then
-                  platforms+="'windows-x86-n2-64',"
+                  platforms+="'windows-x86-n2-16',"
                 else
                   echo "Incorrect platform provided. Valid options are: linux_x86, linux_arm64, windows_x86"
                   exit 1
