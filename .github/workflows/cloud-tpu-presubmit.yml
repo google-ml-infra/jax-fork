@@ -15,9 +15,9 @@ jobs:
         shell: bash
     strategy:
       matrix:
-        runner: ["windows-x86-n2-64-dev"]
+        runner: ["linux-x86-n2-64"]
         artifact: ["jax", "jaxlib", "jax-cuda-pjrt", "jax-cuda-plugin"]
-        python: ["3.10", "3.11", "3.12"]
+        python: ["3.11"]
         # jax-cuda-pjrt and jax are pure Python packages so they do not need to be built for each
         # Python version.
         exclude:
@@ -43,9 +43,7 @@ jobs:
 
     runs-on: ${{ matrix.runner }}
 
-    container: ${{ (contains(matrix.runner, 'linux-x86') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest') ||
-                   (contains(matrix.runner, 'linux-arm64') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/linux-arm64-arc-container:latest') ||
-                   (contains(matrix.runner, 'windows-x86') && null) }}
+    container: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:702526224"
 
     env:
       # Do not run Docker container for Linux runners. Linux runners already run in a Docker container.
@@ -55,10 +53,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@v3
-      # Halt for testing
-      - name: Wait For Connection
-        uses: ./actions/ci_connection/
       - name: Build ${{ matrix.artifact }}
         env:
           JAXCI_HERMETIC_PYTHON_VERSION: "${{ matrix.python }}"
-        run: sleep 400
+        run: echo "Testing quoct"
+      - name: Another Test
+        run: ls
+      - name: Another Test
+        run: sleep 500
