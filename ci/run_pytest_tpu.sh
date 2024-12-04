@@ -23,8 +23,12 @@
 # -o allexport: export all functions and variables to be available to subscripts
 set -exu -o history -o allexport
 
-# Inherit default JAXCI environment variables.
+# Source default JAXCI environment variables.
 source ci/envs/default.env
+
+# Install jaxlib wheel inside the $JAXCI_OUTPUT_DIR directory on the system.
+echo "Installing wheels locally..."
+source ./ci/utilities/install_wheels_locally.sh
 
 # Set up the build environment.
 source "ci/utilities/setup_build_environment.sh"
