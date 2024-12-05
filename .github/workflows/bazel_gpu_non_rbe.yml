@@ -39,7 +39,7 @@ jobs:
       matrix:
         enable-x_64: [1] #, 0]
         container-list: [
-                        {name: "nosla", image: "gcr.io/tensorflow-testing/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython"},
+                        {name: "nosla", image: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest"},
                         {name: "ml-build", image: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest"}
                         ]
     container: ${{ matrix.container-list.image }}
