@@ -15,7 +15,7 @@ jobs:
         shell: bash
     strategy:
       matrix:
-        runner: ["linux-x86-n2-64-quoct"]
+        runner: ["linux-arm64-c4a-16"]
         artifact: ["jax", "jaxlib", "jax-cuda-pjrt", "jax-cuda-plugin"]
         python: ["3.11"]
         # jax-cuda-pjrt and jax are pure Python packages so they do not need to be built for each
