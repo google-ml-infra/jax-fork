@@ -146,13 +146,6 @@ jobs:
             artifact: "jax-cuda-pjrt"
           - runner: "windows-x86-n2-16"
             artifact: "jax-cuda-plugin"
-          # cuda-pjrt is a pure Python package, so it doesn't need to be built for all Python versions.
-          - artifact: "jax-cuda-pjrt"
-            python: 3.10
-          - artifact: "jax-cuda-pjrt"
-            python: 3.11
-          - artifact: "jax-cuda-pjrt"
-            python: 3.12
 
     runs-on: ${{ matrix.runner }}
 
