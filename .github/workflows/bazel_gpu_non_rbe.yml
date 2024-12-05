@@ -34,16 +34,20 @@ jobs:
   run_bazel_tests:
     needs: build_artifacts
     runs-on: "linux-x86-g2-48-l4-4gpu"
-    container: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest"
     strategy:
       fail-fast: false # don't cancel all jobs on failure
       matrix:
-        enable-x_64: [1, 0]
+        enable-x_64: [1] #, 0]
+        container-list: [
+                        {name: "nosla", image: "gcr.io/tensorflow-testing/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython"},
+                        {name: "ml-build", image: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest"}
+                        ]
+    container: ${{ matrix.container-list.image }}
     env:
       JAXCI_HERMETIC_PYTHON_VERSION: 3.11
       JAXCI_ENABLE_X64: ${{ matrix.enable-x_64 }}
 
-    name: "Bazel single accelerator and multi-accelerator GPU tests (Non RBE, linux-x86-g2-48-l4-4gpu, Python 3.11, x64=${{ matrix.enable-x_64 }})"
+    name: "Bazel single accelerator and multi-accelerator GPU tests (Non RBE, linux-x86-g2-48-l4-4gpu, Python 3.11, x64=${{ matrix.enable-x_64 }}, image=${{ matrix.container-list.name }})"
 
     steps:
       - uses: actions/checkout@v3
