@@ -1,0 +1,87 @@
+name: Run Pytest CPU tests
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      halt-for-connection:
+        description: 'Should this workflow run wait for a remote connection?'
+        type: choice
+        required: true
+        default: 'no'
+        options:
+        - 'yes'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build_jaxlib_artifact:
+    name: "Build the jaxlib aritfact using latest XLA"
+    uses: ./.github/workflows/build_artifacts.yml
+    strategy:
+        fail-fast: false # don't cancel all jobs on failure
+        matrix:
+          runner: ["linux-x86-n2-64", "linux-arm64-c4a-64", "windows-x86-n2-64"]
+          python: ["3.10", "3.11", "3.12", "3.13"]
+    with:
+      clone_main_xla: 1
+      upload_artifacts: true
+      upload_destination_prefix: '${{ github.workflow }}/${{ github.run_number }}/${{ github.run_attempt }}'
+
+  run_pytest:
+    name: "Run CPU tests with Pytest"
+    needs: build_jaxlib_artifact
+    defaults:
+      run:
+        # Explicitly set the shell to bash to override the default Windows environment, i.e, cmd.
+        shell: bash
+    strategy:
+      fail-fast: false # don't cancel all jobs on failure
+      matrix:
+        runner: ["linux-x86-n2-64", "linux-arm64-c4a-64", "windows-x86-n2-64"]
+        python: ["3.10", "3.11", "3.12", "3.13"]
+
+    runs-on: ${{ matrix.runner }}
+    container: ${{ (contains(matrix.runner, 'linux-x86') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest') ||
+                   (contains(matrix.runner, 'linux-arm64') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build-arm64:latest') ||
+                   (contains(matrix.runner, 'windows-x86') && null) }}
+
+    env:
+      JAXCI_HERMETIC_PYTHON_VERSION: ${{ matrix.python }}
+
+    steps:
+      - uses: actions/checkout@v3
+      # Halt for testing
+      - name: Wait For Connection
+        uses: google-ml-infra/actions/ci_connection@main
+        with:
+          halt-dispatch-input: ${{ inputs.halt-for-connection }}
+      - name: Set Platform
+        run: |
+          os=$(uname -s | awk '{print tolower($0)}')
+          arch=$(uname -m)
+
+          # Adjust name for Windows
+          if [[  $os  =~ "msys_nt" ]]; then
+            os="windows"
+          fi
+
+          echo "PLATFORM=${os}_${arch}" >> $GITHUB_ENV
+      - name: Download the artifacts built in the "build_artifacts" job
+        run: >-
+          mkdir -p $(pwd)/dist &&
+          gsutil -m cp -r gs://general-ml-ci-transient/jax-github-actions/"${{ github.workflow }}"/${{ github.run_number }}/${{ github.run_attempt }}/$PLATFORM/python${JAXCI_HERMETIC_PYTHON_VERSION}/*.whl $(pwd)/dist/
+      - name: Install pytest
+        env:
+          JAXCI_PYTHON: python${{ matrix.python }}
+        run: $JAXCI_PYTHON -m pip install pytest
+      - name: Install dependencies
+        env:
+          JAXCI_PYTHON: python${{ matrix.python }}
+        run: $JAXCI_PYTHON -m pip install -r build/requirements.in
+      - name: Run Pytest CPU tests
+        run: ./ci/run_pytest_cpu.sh
