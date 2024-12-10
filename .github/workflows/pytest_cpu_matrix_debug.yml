@@ -25,9 +25,18 @@ jobs:
     strategy:
         fail-fast: false # don't cancel all jobs on failure
         matrix:
-          workflow_call_runner: ["linux-x86-n2-64", "linux-arm64-c4a-64", "windows-x86-n2-64"]
-          python: ["3.10", "3.11", "3.12",]
+          runner: ["linux-x86-n2-16", "linux-arm64-c4a-64", "windows-x86-n2-16"]
+          artifact: ["jaxlib"]
+          python: ["3.10", "3.11", "3.12", "3.13"]
+          exclude:
+            # Windows doesn't support CUDA artifacts
+            - runner: "windows-x86-n2-16"
+              artifact: "jax-cuda-pjrt"
+            - runner: "windows-x86-n2-16"
+              artifact: "jax-cuda-plugin"
     with:
+      runner: ${{ matrix.runner }}
+      python: ${{ matrix.python }}
       clone_main_xla: 1
       upload_artifacts: true
       upload_destination_prefix: '${{ github.workflow }}/${{ github.run_number }}/${{ github.run_attempt }}'
@@ -43,7 +52,7 @@ jobs:
       fail-fast: false # don't cancel all jobs on failure
       matrix:
         runner: ["linux-x86-n2-64", "linux-arm64-c4a-64", "windows-x86-n2-64"]
-        python: ["3.10", "3.11", "3.12",]
+        python: ["3.10", "3.11", "3.12", "3.13"]
 
     runs-on: ${{ matrix.runner }}
     container: ${{ (contains(matrix.runner, 'linux-x86') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest') ||

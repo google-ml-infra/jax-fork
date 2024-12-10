@@ -16,6 +16,21 @@ on:
         - 'no'
   workflow_call:
     inputs:
+      runner:
+        description: "Which runner should the workflow run on?"
+        type: string
+        required: true
+        default: "linux-x86-n2-16"
+      artifact:
+        description: "Which JAX artifact to build?"
+        type: string
+        required: true
+        default: "jaxlib"
+      python-version:
+        description: "Which python version should the artifact be built for?"
+        type: string
+        required: true
+        default: "3.12"
       clone_main_xla:
         description: "Should latest XLA be used? (1 to enable, 0 to disable)"
         type: string
@@ -33,29 +48,7 @@ on:
         type: string
 
 jobs:
-  determine_matrix:
-    runs-on: "linux-x86-n2-16"
-    container: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest"
-    outputs:
-      artifact_matrix: ${{ steps.set-matrix.outputs.artifact_matrix }}
-      python_matrix: ${{ steps.set-matrix.outputs.python_matrix }}
-      platform_matrix: ${{ steps.set-matrix.outputs.platform_matrix }}
-    defaults:
-      run:
-        shell: bash
-    steps:
-      # Halt for testing
-      - name: Wait For Connection
-        uses: google-ml-infra/actions/ci_connection@main
-        with:
-          halt-dispatch-input: ${{ inputs.halt-for-connection }}
-      - name: "Determine the matrix"
-        id: set-matrix
-        run: |
-            echo ${{ matrix.workflow_call_runner }}
-
   build_artifacts:
-    needs: determine_matrix
     defaults:
       run:
         # Explicitly set the shell to bash to override the default Windows environment, i.e, cmd.
@@ -63,7 +56,7 @@ jobs:
     strategy:
       fail-fast: false # don't cancel all jobs on failure
       matrix:
-        runner: ${{ fromJSON(needs.determine_matrix.outputs.platform_matrix) }}
+        runner: ${{ }}
         artifact: ${{ fromJSON(needs.determine_matrix.outputs.artifact_matrix) }}
         python: ${{ fromJSON(needs.determine_matrix.outputs.python_matrix) }}
         exclude:
@@ -73,7 +66,7 @@ jobs:
           - runner: "windows-x86-n2-16"
             artifact: "jax-cuda-plugin"
 
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ inputs.runner }}
 
     container: ${{ (contains(matrix.runner, 'linux-x86') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest') ||
                    (contains(matrix.runner, 'linux-arm64') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build-arm64:latest') ||
