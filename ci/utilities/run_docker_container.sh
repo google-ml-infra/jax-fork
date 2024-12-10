@@ -16,15 +16,15 @@
 # Sets up a Docker container for JAX CI.
 
 # This script creates and starts a Docker container named "jax" for internal
-# JAX CI jobs. These jobs primarily handle building and publishing JAX artifacts
+# JAX CI jobs. These jobs primarily handle building and publishing JAX artifacts 
 # to PyPI and/or GCS.
 
-# Note: GitHub Actions workflows do not utilize this script, as they leverage
-# built-in containerization features to run jobs within a container. However,
-# they use the same Docker image to maintain consistency. This script also helps
+# Note: GitHub Actions workflows do not utilize this script, as they leverage 
+# built-in containerization features to run jobs within a container. However, 
+# they use the same Docker image to maintain consistency. This script also helps 
 # ensure that local build environments mirror the behavior of CI builds.
 # Usage:
-#     ./ci/utilities/run_docker_container.sh
+#     source ci/envs/docker.env && ./ci/utilities/run_docker_container.sh
 #     docker exec -it jax <build-script>
 #     E.g: docker exec -it jax ./ci/build_artifacts.sh jaxlib
 #
@@ -51,22 +51,17 @@ if ! docker container inspect jax >/dev/null 2>&1 ; then
     export IP_ADDR=$(powershell -command "(Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias 'vEthernet (nat)').IPAddress")
     netsh interface portproxy add v4tov4 listenaddress=$IP_ADDR listenport=80 connectaddress=169.254.169.254 connectport=80
     JAXCI_DOCKER_ARGS="$JAXCI_DOCKER_ARGS -e GCE_METADATA_HOST=$IP_ADDR"
-  fi
-
-  # Create a temporary file to store all JAXCI variables
-  JAXCI_TEMP_ENVFILE_DIR=$(mktemp)
-  env | grep "JAXCI_" > "$JAXCI_TEMP_ENVFILE_DIR"
-
-  # On Windows, convert MSYS Linux-like paths to Windows paths.
-  if [[ "$(uname -s)" =~ "MSYS_NT" ]]; then
-    echo 'Converting MSYS Linux-like paths to Windows paths (for Bazel, Python, etc.)'
-    # Convert all "JAXCI.*DIR" variables
-    source <(python ./ci/utilities/convert_msys_paths_to_win_paths.py --convert $(env | grep "JAXCI.*DIR" | awk -F= '{print $1}'))
+  else
+    # The volume mapping flag below shares the user's gcloud credentials, if any,
+    # with the container, in case the user has credentials stored there.
+    # This would allow Bazel to authenticate for RBE.
+    # Note: JAX's CI does not have any credentials stored there.
+    JAXCI_DOCKER_ARGS="$JAXCI_DOCKER_ARGS -v $HOME/.config/gcloud:/root/.config/gcloud"
   fi
 
   # Start the container.
   docker run $JAXCI_DOCKER_ARGS --name jax \
-          --env-file $JAXCI_TEMP_ENVFILE_DIR \
+          --env-file <(env | grep JAXCI_) \
           -w "$JAXCI_DOCKER_WORK_DIR" -itd --rm \
           -v "$JAXCI_JAX_GIT_DIR:$JAXCI_DOCKER_WORK_DIR" \
           "$JAXCI_DOCKER_IMAGE" \
