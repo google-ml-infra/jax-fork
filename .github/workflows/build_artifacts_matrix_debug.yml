@@ -64,6 +64,8 @@ jobs:
       JAXCI_HERMETIC_PYTHON_VERSION: "${{ inputs.python }}"
       JAXCI_CLONE_MAIN_XLA: "${{ inputs.clone_main_xla }}"
 
+    name: Build ${{ inputs.artifact }} (${{ inputs.runner }}, Python ${{ inputs.python }}, Clone Main XLA=${{ inputs.clone_main_xla }})
+
     steps:
       - uses: actions/checkout@v3
       - name: Enable RBE if building on Linux x86 or Windows x86
