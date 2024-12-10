@@ -28,12 +28,6 @@ jobs:
           runner: ["linux-x86-n2-16", "linux-arm64-c4a-64", "windows-x86-n2-16"]
           artifact: ["jaxlib"]
           python: ["3.10", "3.11", "3.12", "3.13"]
-          exclude:
-            # Windows doesn't support CUDA artifacts
-            - runner: "windows-x86-n2-16"
-              artifact: "jax-cuda-pjrt"
-            - runner: "windows-x86-n2-16"
-              artifact: "jax-cuda-plugin"
     with:
       runner: ${{ matrix.runner }}
       python: ${{ matrix.python }}
