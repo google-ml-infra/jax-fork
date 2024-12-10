@@ -1,4 +1,4 @@
-name: Run Pytest CPU tests
+name: Run Pytest CPU tests (matrix debug)
 
 on:
   pull_request:
@@ -21,12 +21,12 @@ concurrency:
 jobs:
   build_jaxlib_artifact:
     name: "Build the jaxlib aritfact using latest XLA"
-    uses: ./.github/workflows/build_artifacts.yml
+    uses: ./.github/workflows/build_artifacts_matrix_debug.yml      
     strategy:
         fail-fast: false # don't cancel all jobs on failure
         matrix:
           runner: ["linux-x86-n2-64", "linux-arm64-c4a-64", "windows-x86-n2-64"]
-          python: ["3.10", "3.11", "3.12", "3.13"]
+          python: ["3.10", "3.11", "3.12",]
     with:
       clone_main_xla: 1
       upload_artifacts: true
@@ -43,7 +43,7 @@ jobs:
       fail-fast: false # don't cancel all jobs on failure
       matrix:
         runner: ["linux-x86-n2-64", "linux-arm64-c4a-64", "windows-x86-n2-64"]
-        python: ["3.10", "3.11", "3.12", "3.13"]
+        python: ["3.10", "3.11", "3.12",]
 
     runs-on: ${{ matrix.runner }}
     container: ${{ (contains(matrix.runner, 'linux-x86') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest') ||

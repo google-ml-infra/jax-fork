@@ -1,0 +1,91 @@
+name: Build JAX Artifacts (matrix debug)
+
+on:
+  # pull_request:
+  #   branches:
+  #     - main
+  workflow_dispatch:
+    inputs:
+      halt-for-connection:
+        description: 'Should this workflow run wait for a remote connection?'
+        type: choice
+        required: true
+        default: 'no'
+        options:
+        - 'yes'
+        - 'no'
+  workflow_call:
+    inputs:
+      clone_main_xla:
+        description: "Should latest XLA be used? (1 to enable, 0 to disable)"
+        type: string
+        required: false
+        default: "0"
+      upload_artifacts:
+        description: "Should the artifacts be uploaded to a GCS bucket?"
+        required: false
+        default: false
+        type: boolean
+      upload_destination_prefix:
+        description: "GCS location prefix to where the artifacts should be uploaded"
+        required: false
+        default: '${{ github.workflow }}/${{ github.run_number }}/${{ github.run_attempt }}'
+        type: string
+
+jobs:
+  build_artifacts:
+    defaults:
+      run:
+        # Explicitly set the shell to bash to override the default Windows environment, i.e, cmd.
+        shell: bash
+    strategy:
+      fail-fast: false # don't cancel all jobs on failure
+      matrix:
+        runner: ["windows-x86-n2-16", "linux-x86-n2-16", "linux-arm64-c4a-64"]
+        artifact: ["jaxlib", "jax-cuda-pjrt", "jax-cuda-plugin"]
+        python: ["3.10", "3.11", "3.12", "3.13"]
+        exclude:
+          # Windows doesn't support CUDA artifacts
+          - runner: "windows-x86-n2-16"
+            artifact: "jax-cuda-pjrt"
+          - runner: "windows-x86-n2-16"
+            artifact: "jax-cuda-plugin"
+
+    runs-on: ${{ matrix.runner }}
+
+    container: ${{ (contains(matrix.runner, 'linux-x86') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest') ||
+                   (contains(matrix.runner, 'linux-arm64') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build-arm64:latest') ||
+                   (contains(matrix.runner, 'windows-x86') && null) }}
+
+    env:
+      JAXCI_HERMETIC_PYTHON_VERSION: "${{ matrix.python }}"
+      JAXCI_CLONE_MAIN_XLA: "${{ inputs.clone_main_xla }}"
+
+    steps:
+      - uses: actions/checkout@v3
+      - name: Enable RBE if building on Linux x86 or Windows x86
+        if: contains(matrix.runner, 'linux-x86') || contains(matrix.runner, 'windows-x86')
+        run: echo "JAXCI_BUILD_ARTIFACT_WITH_RBE=1" >> $GITHUB_ENV
+      # Halt for testing
+      - name: Wait For Connection
+        uses: google-ml-infra/actions/ci_connection@main
+        with:
+          halt-dispatch-input: ${{ inputs.halt-for-connection }}
+      - name: Build ${{ matrix.artifact }}
+        run: ./ci/build_artifacts.sh "${{ matrix.artifact }}"
+      - name: Set PLATFORM env var for use in upload destination 
+        run: |
+          os=$(uname -s | awk '{print tolower($0)}')
+          arch=$(uname -m)
+
+          # Adjust name for Windows
+          if [[  $os  =~ "msys_nt" ]]; then
+            os="windows"
+
+          fi
+
+          echo "PLATFORM=${os}_${arch}" >> $GITHUB_ENV
+      - name: Upload artifacts to GCS bucket
+        if: inputs.upload_artifacts
+        run:  gsutil -m cp -r $(pwd)/dist/*.whl gs://general-ml-ci-transient/jax-github-actions/"${{ inputs.upload_destination_prefix }}"/$PLATFORM/python${JAXCI_HERMETIC_PYTHON_VERSION}/
+      
