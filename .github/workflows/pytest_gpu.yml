@@ -52,6 +52,9 @@ jobs:
         run: $JAXCI_PYTHON -m pip install -r build/requirements.in
       - name: Run Pytest GPU tests
         run: ./ci/run_pytest_gpu.sh
+      - name: Run Multiprocess GPU Test
+        run: |
+          python -m pytest tests/multiprocess_gpu_test.py
   
   # run_tests:
   #   needs: build_artifacts
