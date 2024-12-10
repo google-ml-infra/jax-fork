@@ -30,6 +30,7 @@ jobs:
           python: ["3.10", "3.11", "3.12", "3.13"]
     with:
       runner: ${{ matrix.runner }}
+      artifact: ${{ matrix.artifact }}
       python: ${{ matrix.python }}
       clone_main_xla: 1
       upload_artifacts: true
