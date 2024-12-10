@@ -33,7 +33,29 @@ on:
         type: string
 
 jobs:
+  determine_matrix:
+    runs-on: "linux-x86-n2-16"
+    container: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest"
+    outputs:
+      artifact_matrix: ${{ steps.set-matrix.outputs.artifact_matrix }}
+      python_matrix: ${{ steps.set-matrix.outputs.python_matrix }}
+      platform_matrix: ${{ steps.set-matrix.outputs.platform_matrix }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # Halt for testing
+      - name: Wait For Connection
+        uses: google-ml-infra/actions/ci_connection@main
+        with:
+          halt-dispatch-input: ${{ inputs.halt-for-connection }}
+      - name: "Determine the matrix"
+        id: set-matrix
+        run: |
+            echo ${{ matrix.workflow_call_runner }}
+
   build_artifacts:
+    needs: determine_matrix
     defaults:
       run:
         # Explicitly set the shell to bash to override the default Windows environment, i.e, cmd.
@@ -41,9 +63,9 @@ jobs:
     strategy:
       fail-fast: false # don't cancel all jobs on failure
       matrix:
-        runner: ["windows-x86-n2-16", "linux-x86-n2-16", "linux-arm64-c4a-64"]
-        artifact: ["jaxlib", "jax-cuda-pjrt", "jax-cuda-plugin"]
-        python: ["3.10", "3.11", "3.12", "3.13"]
+        runner: ${{ fromJSON(needs.determine_matrix.outputs.platform_matrix) }}
+        artifact: ${{ fromJSON(needs.determine_matrix.outputs.artifact_matrix) }}
+        python: ${{ fromJSON(needs.determine_matrix.outputs.python_matrix) }}
         exclude:
           # Windows doesn't support CUDA artifacts
           - runner: "windows-x86-n2-16"
