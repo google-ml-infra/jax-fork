@@ -67,10 +67,6 @@ on:
         default: '${{ github.workflow }}/${{ github.run_number }}/${{ github.run_attempt }}'
         type: string
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
-  cancel-in-progress: true
-
 jobs:
   build_artifacts:
     defaults:
