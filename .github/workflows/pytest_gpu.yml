@@ -21,12 +21,18 @@ concurrency:
 
 jobs:
   build_artifacts:
-    name: "Build the jaxlib and CUDA plugins using latest XLA"
-    uses: ./.github/workflows/build_artifacts.yml
+    name: "Build the jaxlib and CUDA aritfacts with latest XLA"
+    uses: ./.github/workflows/build_artifacts.yml      
+    strategy:
+        fail-fast: false # don't cancel all jobs on failure
+        matrix:
+          runner: ["linux-x86-n2-16"]
+          artifact: ["jaxlib", "jax-cuda-plugin", "jax-cuda-pjrt"]
+          python: ["3.10",] # "3.11", "3.12", "3.13"]
     with:
-      wheel_list: "jaxlib,jax-cuda-plugin,jax-cuda-pjrt"
-      python_list: "3.10"
-      platform_list: "linux_x86"
+      runner: ${{ matrix.runner }}
+      artifact: ${{ matrix.artifact }}
+      python: ${{ matrix.python }}
       clone_main_xla: 1
       upload_artifacts: true
       upload_destination_prefix: '${{ github.workflow }}/${{ github.run_number }}/${{ github.run_attempt }}'
@@ -43,14 +49,17 @@ jobs:
           image: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/nosla-cuda12.1-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest"},
           ]
         python: ["3.10"]
+        enable-x_64: [1, 0]
 
     runs-on: ${{ matrix.test_env.runner }}
     container:
       image: ${{ matrix.test_env.image }}
     
-    name: "Pytest GPU (Test on CUDA ${{ matrix.test_env.cuda_version }})"
+    name: "Pytest GPU (${{ matrix.test_env.runner }}, CUDA ${{ matrix.test_env.cuda_version }}, Python ${{ matrix.python }}, x64=${{ matrix.enable-x_64 }})"
+
     env:
       JAXCI_HERMETIC_PYTHON_VERSION: ${{ matrix.python }}
+      JAXCI_ENABLE_X64: ${{ matrix.enable-x_64 }}
 
     steps:
       - uses: actions/checkout@v3
@@ -71,12 +80,8 @@ jobs:
           fi
 
           echo "PLATFORM=${os}_${arch}" >> $GITHUB_ENV
-      - name: Download the artifacts built in the "build_artifacts" job
+      - name: Download artifacts built in the "build_artifacts" job
         run: mkdir -p $(pwd)/dist && gsutil -m cp -r gs://general-ml-ci-transient/jax-github-actions/"${{ github.workflow }}"/${{ github.run_number }}/${{ github.run_attempt }}/$PLATFORM/python${JAXCI_HERMETIC_PYTHON_VERSION}/*.whl $(pwd)/dist/
-      - name: Install pytest
-        env:
-          JAXCI_PYTHON: python${{ matrix.python }}
-        run: $JAXCI_PYTHON -m pip install pytest
       - name: Install dependencies
         env:
           JAXCI_PYTHON: python${{ matrix.python }}
