@@ -21,7 +21,6 @@ concurrency:
 
 jobs:
   build_artifacts:
-    name: "Build the jaxlib and CUDA aritfacts with latest XLA"
     uses: ./.github/workflows/build_artifacts.yml      
     strategy:
         fail-fast: false # don't cancel all jobs on failure
