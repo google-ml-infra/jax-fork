@@ -110,10 +110,10 @@ jobs:
 
           echo "PLATFORM=${os}_${arch}" >> $GITHUB_ENV
       - name: Upload artifacts to GCS bucket (non-Windows)
-        if: inputs.upload_artifacts && !contains(inputs.runner, 'windows-x86')
+        if: inputs.upload_artifacts && ${{ !contains(inputs.runner, 'windows-x86') }}
         run:  gsutil -m cp -r $(pwd)/dist/*.whl gs://general-ml-ci-transient/jax-github-actions/"${{ inputs.upload_destination_prefix }}"/$PLATFORM/python${JAXCI_HERMETIC_PYTHON_VERSION}/
       - name: Upload artifacts to GCS bucket (Windows)
-        if: inputs.upload_artifacts && contains(inputs.runner, 'windows-x86')
+        if: inputs.upload_artifacts && ${{ contains(inputs.runner, 'windows-x86') }}
         shell: cmd
         run:  gsutil -m cp -r dist/*.whl gs://general-ml-ci-transient/jax-github-actions/"${{ inputs.upload_destination_prefix }}"/$PLATFORM/python${JAXCI_HERMETIC_PYTHON_VERSION}/
       

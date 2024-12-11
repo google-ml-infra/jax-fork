@@ -80,12 +80,12 @@ jobs:
 
           echo "PLATFORM=${os}_${arch}" >> $GITHUB_ENV
       - name: Download artifacts built in the "build_artifacts" job (non-Windows runs)
-        if: ! contains(matrix.runner, 'windows-x86')
+        if: ${{ !contains(matrix.runner, 'windows-x86') }}
         run: >-
           mkdir -p $(pwd)/dist
           gsutil -m cp -r gs://general-ml-ci-transient/jax-github-actions/"${{ github.workflow }}"/${{ github.run_number }}/${{ github.run_attempt }}/$PLATFORM/python${JAXCI_HERMETIC_PYTHON_VERSION}/*.whl $(pwd)/dist/
       - name: Download artifacts built in the "build_artifacts" job (Windows runs)
-        if: contains(matrix.runner, 'windows-x86')
+        if: ${{ contains(matrix.runner, 'windows-x86') }}
         shell: cmd
         run: >-
           mkdir dist
