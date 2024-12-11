@@ -28,7 +28,6 @@ jobs:
       matrix:
         runner: ["linux-x86-n2-16"]
         enable-x_64: [1, 0]
-        enable-x_64: [1, 0]
 
     runs-on: ${{ matrix.runner }}
     container: 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest'
