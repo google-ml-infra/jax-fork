@@ -80,7 +80,7 @@ jobs:
           apt-get install -y docker-ce docker-ce-cli containerd.io
 
       - name: Pull Docker image
-        run: docker pull us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest
+        run: parallel --ungroup --retries 3 --delay 15 --nonall -- docker pull us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest
       - name: Run Docker container for build and test
         run: |
           docker run --detach --name=xla_ci --rm --interactive --tty --volume=./xla:/github/xla --workdir=/github/xla us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest bash
