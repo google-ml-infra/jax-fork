@@ -1,9 +1,6 @@
 name: Build JAX Artifacts
 
 on:
-  pull_request:
-    branches:
-      - main
   workflow_dispatch:
     inputs:
       runner:
@@ -118,5 +115,3 @@ jobs:
           ${{ inputs.upload_artifacts &&  contains(inputs.runner, 'windows-x86') }}
         shell: cmd
         run:  gsutil -m cp -r dist/*.whl gs://general-ml-ci-transient/jax-github-actions/"${{ inputs.upload_destination_prefix }}"/$PLATFORM/python${JAXCI_HERMETIC_PYTHON_VERSION}/
-      
-      
