@@ -6,38 +6,38 @@ on:
       - main
 
 jobs:
-  jax-build:
-    strategy:
-      matrix:
-        runner: ["linux-x86-g2-48-l4-4gpu"]
+  # jax-build:
+  #   strategy:
+  #     matrix:
+  #       runner: ["linux-x86-g2-48-l4-4gpu"]
 
-    runs-on: ${{ matrix.runner }}
-    container:
-      image: "gcr.io/tensorflow-testing/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest"
+  #   runs-on: ${{ matrix.runner }}
+  #   container:
+  #     image: "gcr.io/tensorflow-testing/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest"
 
-    env:
-      JAXCI_HERMETIC_PYTHON_VERSION: 3.11
+  #   env:
+  #     JAXCI_HERMETIC_PYTHON_VERSION: 3.11
 
-    steps:
-      - name: Checkout JAX Fork
-        uses: actions/checkout@v3
-        with:
-          repository: 'google-ml-infra/jax-fork'
-          path: jax-fork
+  #   steps:
+  #     - name: Checkout JAX Fork
+  #       uses: actions/checkout@v3
+  #       with:
+  #         repository: 'google-ml-infra/jax-fork'
+  #         path: jax-fork
 
-      - name: Install JAX Dependencies
-        working-directory: jax-fork
-        run: |
-          python -m pip install --upgrade pip
-          pip install pytest
-          pip install absl-py
-          pip install "jax[cuda12_pip]"  # Adjust CUDA version if needed
-          pip install google-benchmark
+  #     - name: Install JAX Dependencies
+  #       working-directory: jax-fork
+  #       run: |
+  #         python -m pip install --upgrade pip
+  #         pip install pytest
+  #         pip install absl-py
+  #         pip install "jax[cuda12_pip]"  # Adjust CUDA version if needed
+  #         pip install google-benchmark
 
-      - name: Run JAX Multiprocess GPU Test
-        working-directory: jax-fork
-        continue-on-error: true
-        run: python -m pytest tests/multiprocess_gpu_test.py
+  #     - name: Run JAX Multiprocess GPU Test
+  #       working-directory: jax-fork
+  #       continue-on-error: true
+  #       run: python -m pytest tests/multiprocess_gpu_test.py
       
       # - name: Build XLA GPU Atomic Test
       #   working-directory: xla
@@ -79,8 +79,8 @@ jobs:
           apt-get update -y
           apt-get install -y docker-ce docker-ce-cli containerd.io
 
-      - name: Pull Docker image (with parallel)
-        run: parallel --ungroup --retries 3 --delay 15 --nonall docker pull us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest
+      - name: Pull Docker image
+        run: docker pull us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest
       - name: Run Docker container for build and test
         run: |
           docker run --detach --name=xla_ci --rm --interactive --tty --volume=./xla:/github/xla --workdir=/github/xla us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest bash
