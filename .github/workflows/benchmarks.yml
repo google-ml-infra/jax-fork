@@ -49,10 +49,8 @@ jobs:
       #   continue-on-error: true
       #   run: bazel test -c opt --config=cuda //xla/service/gpu/tests:gpu_atomic_test
   xla-gpu-ci:
-    runs-on: linux-x86-g2-48-l4-4gpu
-    # container:
-    #   image: "gcr.io/tensorflow-testing/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest"
-    #   options: --gpus all --privileged
+    runs-on: "linux-x86-g2-48-l4-4gpu"
+    container: "gcr.io/tensorflow-testing/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest"
     steps:
       - name: Checkout XLA
         uses: actions/checkout@v3
