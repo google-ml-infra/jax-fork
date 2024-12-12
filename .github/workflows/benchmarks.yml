@@ -91,10 +91,10 @@ jobs:
       #   working-directory: xla
       #   continue-on-error: true
       #   run: nvidia-smi
-      # - name: Wait For Connection
-      #   uses: google-ml-infra/actions/ci_connection@main
-      #   with:
-      #     halt-dispatch-input: ${{ inputs.halt-for-connection }}
+      - name: Wait For Connection
+        uses: google-ml-infra/actions/ci_connection@main
+        with:
+          halt-dispatch-input: ${{ inputs.halt-for-connection }}
 
       - name: Configure XLA
         working-directory: xla
