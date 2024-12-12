@@ -54,14 +54,19 @@ jobs:
       image: docker:dind  # Use Docker-in-Docker
       options: --gpus all
     steps:
-      - name: Checkout XLA
+      - name: Checkout XLA with submodules
         uses: actions/checkout@v3
         with:
-          repository: openxla/xla  # Or your XLA fork
+          repository: openxla/xla
           path: xla
+          submodules: recursive
+
+      - name: Make script executable
+        working-directory: xla
+        run: chmod +x .kokoro/generate_index_html.sh
 
       - name: Generate index.html
-        working-directory: xla 
+        working-directory: xla
         run: ./.kokoro/generate_index_html.sh index.html 
 
       - name: Check GPU Information
