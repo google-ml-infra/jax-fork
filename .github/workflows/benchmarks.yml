@@ -78,7 +78,12 @@ jobs:
 
           apt-get update -y
           apt-get install -y docker-ce docker-ce-cli containerd.io
-
+      - name: Start Docker daemon
+        run: |
+          sudo dockerd &  # Start Docker in the background
+          # Wait for Docker to be ready (might need adjustment)
+          sleep 5 
+          docker info  # Verify Docker is running
       - name: Pull Docker image
         run: docker pull us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest
       - name: Run Docker container for build and test
