@@ -51,8 +51,8 @@ jobs:
   xla-gpu-ci:
     runs-on: linux-x86-g2-48-l4-4gpu  # Or another suitable GPU runner
     container:
-      image: docker:dind  # Use Docker-in-Docker
-      options: --gpus all
+       image: "gcr.io/tensorflow-testing/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest"
+
     steps:
       - name: Checkout XLA with submodules
         uses: actions/checkout@v3
@@ -61,11 +61,8 @@ jobs:
           path: xla
           submodules: recursive
 
-      - name: Check GPU Information
-        run: nvidia-smi
-
       - name: Pull Docker image
-        run: docker pull us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest
+        run: docker run --name xla_gpu -w /xla -it -d --rm -v $PWD:/xla tensorflow/build:latest-python3.9 bash
 
       - name: Run XLA build and test in container
         run: |
