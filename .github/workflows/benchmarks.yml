@@ -61,14 +61,6 @@ jobs:
           path: xla
           submodules: recursive
 
-      - name: Make script executable
-        working-directory: xla
-        run: chmod +x .kokoro/generate_index_html.sh
-
-      - name: Generate index.html
-        working-directory: xla
-        run: .kokoro/generate_index_html.sh 
-
       - name: Check GPU Information
         run: nvidia-smi
 
