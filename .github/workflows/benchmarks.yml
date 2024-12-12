@@ -4,6 +4,16 @@ on:
   pull_request:
     branches:
       - main
+  workflow_dispatch:
+    inputs:
+      halt-for-connection:
+        description: 'Should this workflow run wait for a remote connection?'
+        type: choice
+        required: true
+        default: 'no'
+        options:
+        - 'yes'
+        - 'no'
 
 jobs:
   # jax-build:
@@ -61,7 +71,10 @@ jobs:
         with:
           repository: openxla/xla  # Replace with your fork if needed
           path: xla
-
+      - name: Wait For Connection
+        uses: google-ml-infra/actions/ci_connection@main
+        with:
+          halt-dispatch-input: ${{ inputs.halt-for-connection }}
       - name: Install dependencies
         working-directory: xla
         run: |
@@ -84,9 +97,4 @@ jobs:
       - name: Build XLA with GPU support
         working-directory: xla
         run: bazel build -c opt --config=cuda //xla/...
-
-  
-
- 
-  
 
