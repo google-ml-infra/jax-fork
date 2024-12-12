@@ -52,38 +52,13 @@ jobs:
   build-xla-gpu:
     runs-on: linux-x86-g2-48-l4-4gpu # Use a GPU-enabled runner
     container:
-      image: nvidia/cuda:12.0-base-ubuntu20.04-devel  # Choose appropriate CUDA version and base image
-      options: --gpus all --privileged  # Might need privileged mode, use with caution
+      image: "gcr.io/tensorflow-testing/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest"
 
     steps:
-      - name: Checkout XLA
-        uses: actions/checkout@v3
-        with:
-          repository: openxla/xla  # Replace with your fork if needed
-          path: xla
-
-      - name: Install dependencies
+      - name: Initialize gcloud
         working-directory: xla
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y python3 python3-dev python3-pip  # Add other required packages
+        run: gcloud init
 
-      - name: Install Python dependencies
-        working-directory: xla
-        run: |
-          python3 -m pip install --upgrade pip
-          pip3 install wheel setuptools numpy  # Add other required Python packages
-
-      - name: Configure Bazel
-        working-directory: xla
-        run: |
-          echo "build --action_env PYTHON_BIN_PATH=\"/usr/bin/python3\"" >> ~/.bazelrc
-          echo "build --python_path=\"/usr/bin/python3\"" >> ~/.bazelrc
-          # Add other Bazel configuration options if needed
-
-      - name: Build XLA with GPU support
-        working-directory: xla
-        run: bazel build -c opt --config=cuda //xla/...
-
+ 
   
 
