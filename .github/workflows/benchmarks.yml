@@ -52,7 +52,7 @@ jobs:
   build-xla-gpu:
     runs-on: linux-x86-g2-48-l4-4gpu # Use a GPU-enabled runner
     container:
-      image: nvidia/cuda:12.0-base-ubuntu20.04-devel  # Choose appropriate CUDA version and base image
+      image: "gcr.io/tensorflow-testing/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest"
       options: --gpus all --privileged  # Might need privileged mode, use with caution
 
     steps:
