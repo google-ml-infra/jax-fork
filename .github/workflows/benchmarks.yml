@@ -72,10 +72,10 @@ jobs:
           repository: openxla/xla  # Replace with your fork if needed
           path: xla
       
-      # - name: Wait For Connection
-      #   uses: google-ml-infra/actions/ci_connection@main
-      #   with:
-      #     halt-dispatch-input: ${{ inputs.halt-for-connection }}
+      - name: Wait For Connection
+        uses: google-ml-infra/actions/ci_connection@main
+        with:
+          halt-dispatch-input: ${{ inputs.halt-for-connection }}
 
       - name: Build XLA with GPU support
         working-directory: xla
