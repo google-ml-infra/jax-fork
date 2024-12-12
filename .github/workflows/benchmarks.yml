@@ -50,9 +50,9 @@ jobs:
       #   run: bazel test -c opt --config=cuda //xla/service/gpu/tests:gpu_atomic_test
   xla-gpu-ci:
     runs-on: linux-x86-g2-48-l4-4gpu
-    container:
-      image: "gcr.io/tensorflow-testing/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest"
-      options: --gpus all --privileged
+    # container:
+    #   image: "gcr.io/tensorflow-testing/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest"
+    #   options: --gpus all --privileged
     steps:
       - name: Checkout XLA
         uses: actions/checkout@v3
@@ -60,30 +60,30 @@ jobs:
           repository: 'openxla/xla'
           path: xla
           
-      - name: Install Docker
-        run: |
-          apt-get update -y
-          apt-get install -y \
-            ca-certificates \
-            curl \
-            gnupg \
-            lsb-release
+      # - name: Install Docker
+      #   run: |
+      #     apt-get update -y
+      #     apt-get install -y \
+      #       ca-certificates \
+      #       curl \
+      #       gnupg \
+      #       lsb-release
 
-          ## Add this line to import the Docker GPG key:
-          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+      #     ## Add this line to import the Docker GPG key:
+      #     curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
 
-          echo \
-            "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu \
-            $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+      #     echo \
+      #       "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu \
+      #       $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
 
-          apt-get update -y
-          apt-get install -y docker-ce docker-ce-cli containerd.io
-      - name: Start Docker daemon
-        run: |
-          sudo dockerd &  # Start Docker in the background
-          # Wait for Docker to be ready (might need adjustment)
-          sleep 5 
-          docker info  # Verify Docker is running
+      #     apt-get update -y
+      #     apt-get install -y docker-ce docker-ce-cli containerd.io
+      # - name: Start Docker daemon
+      #   run: |
+      #     sudo dockerd &  # Start Docker in the background
+      #     # Wait for Docker to be ready (might need adjustment)
+      #     sleep 5 
+      #     docker info  # Verify Docker is running
       - name: Pull Docker image
         run: docker pull us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest
       - name: Run Docker container for build and test
