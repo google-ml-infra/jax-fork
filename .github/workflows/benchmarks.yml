@@ -54,10 +54,94 @@ jobs:
     container:
       image: "gcr.io/tensorflow-testing/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest"
 
+    name: Benchmarks
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  # jax-build:
+  #   strategy:
+  #     matrix:
+  #       runner: ["linux-x86-g2-48-l4-4gpu"]
+
+  #   runs-on: ${{ matrix.runner }}
+  #   container:
+  #     image: "gcr.io/tensorflow-testing/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest"
+
+  #   env:
+  #     JAXCI_HERMETIC_PYTHON_VERSION: 3.11
+
+  #   steps:
+  #     - name: Checkout JAX Fork
+  #       uses: actions/checkout@v3
+  #       with:
+  #         repository: 'google-ml-infra/jax-fork'
+  #         path: jax-fork
+
+  #     - name: Install JAX Dependencies
+  #       working-directory: jax-fork
+  #       run: |
+  #         python -m pip install --upgrade pip
+  #         pip install pytest
+  #         pip install absl-py
+  #         pip install "jax[cuda12_pip]"  # Adjust CUDA version if needed
+  #         pip install google-benchmark
+
+  #     - name: Run JAX Multiprocess GPU Test
+  #       working-directory: jax-fork
+  #       continue-on-error: true
+  #       run: python -m pytest tests/multiprocess_gpu_test.py
+      
+      # - name: Build XLA GPU Atomic Test
+      #   working-directory: xla
+      #   continue-on-error: true
+      #   run: bazel build -c opt --config=cuda //xla/service/gpu/tests:gpu_atomic_test
+      
+      # - name: Run XLA GPU Atomic Test
+      #   working-directory: xla
+      #   continue-on-error: true
+      #   run: bazel test -c opt --config=cuda //xla/service/gpu/tests:gpu_atomic_test
+
+  build-xla-gpu:
+    runs-on: linux-x86-g2-48-l4-4gpu # Use a GPU-enabled runner
+    container:
+      image: nvidia/cuda:12.0-base-ubuntu20.04-devel  # Choose appropriate CUDA version and base image
+      options: --gpus all --privileged  # Might need privileged mode, use with caution
+
     steps:
-      - name: Initialize gcloud
+      - name: Checkout XLA
+        uses: actions/checkout@v3
+        with:
+          repository: openxla/xla  # Replace with your fork if needed
+          path: xla
+
+      - name: Install dependencies
         working-directory: xla
-        run: gcloud init
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y python3 python3-dev python3-pip  # Add other required packages
+
+      - name: Install Python dependencies
+        working-directory: xla
+        run: |
+          python3 -m pip install --upgrade pip
+          pip3 install wheel setuptools numpy  # Add other required Python packages
+
+      - name: Configure Bazel
+        working-directory: xla
+        run: |
+          echo "build --action_env PYTHON_BIN_PATH=\"/usr/bin/python3\"" >> ~/.bazelrc
+          echo "build --python_path=\"/usr/bin/python3\"" >> ~/.bazelrc
+          # Add other Bazel configuration options if needed
+
+      - name: Build XLA with GPU support
+        working-directory: xla
+        run: bazel build -c opt --config=cuda //xla/...
+
+  
 
  
   
