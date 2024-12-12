@@ -60,12 +60,9 @@ jobs:
           repository: openxla/xla  # Or your XLA fork
           path: xla
 
-      - name: Generate index.html (if needed)
-        run: |
-          # Replace with the appropriate path if $KOKORO_ARTIFACTS_DIR is set in your environment
-          # Otherwise, adjust this step to get generate_index_html.sh
-          # or remove it if not needed.
-          .kokoro/generate_index_html.sh index.html 
+      - name: Generate index.html
+        working-directory: xla 
+        run: ./.kokoro/generate_index_html.sh index.html 
 
       - name: Check GPU Information
         run: nvidia-smi
