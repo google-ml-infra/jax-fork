@@ -14,9 +14,6 @@ on:
         options:
         - 'yes'
         - 'no'
-  pull_request:
-    branches:
-      - main
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
