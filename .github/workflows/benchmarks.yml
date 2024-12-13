@@ -17,11 +17,7 @@ on:
 
 jobs:
   jax-build-and-test:
-    strategy:
-      matrix:
-        runner: ["linux-x86-g2-48-l4-4gpu"]
-
-    runs-on: ${{ matrix.runner }}
+    runs-on: linux-x86-g2-48-l4-4gpu # Use a GPU-enabled runner
     container:
       image: "gcr.io/tensorflow-testing/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest"
 
@@ -119,9 +115,7 @@ jobs:
         continue-on-error: true
         run: |
           find xla/service/gpu -name "*.hlo" -print0 | while IFS= read -r -d $'\0' hlo_file; do
-            echo "Running: $hlo_file"
             ./bazel-bin/xla/tools/run_hlo_module --input_format=hlo --platform=GPU "$hlo_file"
-            echo "--------------------------------------------------"
           done
 
       # - name: Build hlo_runner_main
