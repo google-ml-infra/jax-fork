@@ -136,4 +136,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: gpu-benchmark-logs
-          path: openxla/xla/gpu_benchmark_logs
+          path: xla/gpu_benchmark_logs
