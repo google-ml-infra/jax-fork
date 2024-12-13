@@ -74,7 +74,7 @@ jobs:
         
       - name: Create results directory
         working-directory: xla
-        run: mkdir results
+        run: mkdir -p results
         
       - name: Get GPU spec
         working-directory: xla
@@ -89,9 +89,9 @@ jobs:
         working-directory: xla
         run: echo "TF_CPP_MAX_VLOG_LEVEL=1" >> $GITHUB_ENV
           
-      - name: Build run_hlo_module with GPU
-        working-directory: xla
-        run: bazel build -c opt --dynamic_mode=off xla/tools:run_hlo_module --config=cuda
+      # - name: Build run_hlo_module with GPU
+      #   working-directory: xla
+      #   run: bazel build -c opt --dynamic_mode=off xla/tools:run_hlo_module --config=cuda
 
       # - name: Wait For Connection
       #   uses: google-ml-infra/actions/ci_connection@main
@@ -109,21 +109,20 @@ jobs:
               echo "Skipping benchmark on $file"
               continue
             fi
-            echo "Running benchmark on $file"
-            ./bazel-bin/xla/tools/run_hlo_module --input_format=hlo --platform=GPU "$file" &> results/"$file".log
+            echo "Running benchmark on $file" &> results/"$file".log
+            # ./bazel-bin/xla/tools/run_hlo_module --input_format=hlo --platform=GPU "$file" &> results/"$file".log
           done
-      - name: Check files
-        working-directory: xla
-        continue-on-error: true
-        run: |
-          ls xla/results
-      - name: Run HLO Module Benchmarks withg GPU in xla/service/gpu
-        working-directory: xla
-        continue-on-error: true
-        run: |
-          find xla/service/gpu -name "*.hlo" -print0 | while IFS= read -r -d $'\0' file; do
-            ./bazel-bin/xla/tools/run_hlo_module --input_format=hlo --platform=GPU "$file" &> results/"$(basename "$file")".log
-          done
+      - name: Wait For Connection
+        uses: google-ml-infra/actions/ci_connection@main
+        with:
+          halt-dispatch-input: ${{ inputs.halt-for-connection }}
+      # - name: Run HLO Module Benchmarks withg GPU in xla/service/gpu
+      #   working-directory: xla
+      #   continue-on-error: true
+      #   run: |
+      #     find xla/service/gpu -name "*.hlo" -print0 | while IFS= read -r -d $'\0' file; do
+      #       ./bazel-bin/xla/tools/run_hlo_module --input_format=hlo --platform=GPU "$file" &> results/"$(basename "$file")".log
+      #     done
       # - name: Build hlo_runner_main
       #   working-directory: xla
       #   run: bazel build -c opt --config=cuda --dynamic_mode=off //xla/tools/multihost_hlo_runner:hlo_runner_main
