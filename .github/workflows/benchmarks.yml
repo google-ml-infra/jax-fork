@@ -91,24 +91,23 @@ jobs:
         working-directory: xla
         continue-on-error: true
         run: nvidia-smi
-      - name: Wait For Connection
-        uses: google-ml-infra/actions/ci_connection@main
-        with:
-          halt-dispatch-input: ${{ inputs.halt-for-connection }}
         
-      - name: Configure XLA
-        working-directory: xla
-        run: ./configure.py --backend CUDA --nccl
+      # - name: Configure XLA
+      #   working-directory: xla
+      #   run: ./configure.py --backend CUDA --nccl
 
-      - name: Set TF_CPP_MAX_VLOG_LEVEL
-        working-directory: xla
-        run: echo "TF_CPP_MAX_VLOG_LEVEL=1" >> $GITHUB_ENV
-        
-
+      # - name: Set TF_CPP_MAX_VLOG_LEVEL
+      #   working-directory: xla
+      #   run: echo "TF_CPP_MAX_VLOG_LEVEL=1" >> $GITHUB_ENV
           
       - name: Build run_hlo_module with GPU
         working-directory: xla
         run: bazel build -c opt --dynamic_mode=off xla/tools:run_hlo_module --config=cuda
+
+      - name: Wait For Connection
+        uses: google-ml-infra/actions/ci_connection@main
+        with:
+          halt-dispatch-input: ${{ inputs.halt-for-connection }}
 
       - name: Run HLO Module Benchmarks withg GPU in xla/tests/fuzz
         working-directory: xla
@@ -135,16 +134,16 @@ jobs:
             echo "--------------------------------------------------"
           done
 
-      - name: Build hlo_runner_main
-        working-directory: xla
-        run: bazel build -c opt --config=cuda --dynamic_mode=off //xla/tools/multihost_hlo_runner:hlo_runner_main
+      # - name: Build hlo_runner_main
+      #   working-directory: xla
+      #   run: bazel build -c opt --config=cuda --dynamic_mode=off //xla/tools/multihost_hlo_runner:hlo_runner_main
       
-      - name: Run XLA GPU microbenchmarks with hlo_runner_main
-        working-directory: xla
-        continue-on-error: true
-        run: |
-          for file in xla/tools/multihost_hlo_runner/data/*.hlo; do
-            filename=$(basename "$file")
-            echo "Running benchmark on $file"
-            bazel-bin/xla/tools/multihost_hlo_runner/hlo_runner_main "$file"
-          done
+      # - name: Run XLA GPU microbenchmarks with hlo_runner_main
+      #   working-directory: xla
+      #   continue-on-error: true
+      #   run: |
+      #     for file in xla/tools/multihost_hlo_runner/data/*.hlo; do
+      #       filename=$(basename "$file")
+      #       echo "Running benchmark on $file"
+      #       bazel-bin/xla/tools/multihost_hlo_runner/hlo_runner_main "$file"
+      #     done
