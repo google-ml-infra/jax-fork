@@ -114,9 +114,7 @@ jobs:
         working-directory: xla
         continue-on-error: true
         run: |
-          find xla/service/gpu -name "*.hlo" -print0 | while IFS= read -r -d $'\0' hlo_file; do
-            ./bazel-bin/xla/tools/run_hlo_module --input_format=hlo --platform=GPU "$hlo_file"
-          done
+          find xla/service/gpu -name "*.hlo" -print0 | xargs -0 -I {} ./bazel-bin/xla/tools/run_hlo_module --input_format=hlo --platform=GPU {}
 
       # - name: Build hlo_runner_main
       #   working-directory: xla
