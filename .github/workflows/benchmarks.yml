@@ -48,16 +48,6 @@ jobs:
         working-directory: jax-fork
         continue-on-error: true
         run: python -m pytest tests/multiprocess_gpu_test.py
-      
-      - name: Build XLA GPU Atomic Test
-        working-directory: xla
-        continue-on-error: true
-        run: bazel build -c opt --config=cuda //xla/service/gpu/tests:gpu_atomic_test
-      
-      - name: Run XLA GPU Atomic Test
-        working-directory: xla
-        continue-on-error: true
-        run: bazel test -c opt --config=cuda //xla/service/gpu/tests:gpu_atomic_test
 
   build-xla-gpu-and-test:
     runs-on: linux-x86-g2-48-l4-4gpu # Use a GPU-enabled runner
