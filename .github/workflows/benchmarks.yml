@@ -107,11 +107,11 @@ jobs:
 
           
       - name: Build run_hlo_module with GPU
-        working-directory: openxla
+        working-directory: xla
         run: bazel build -c opt --dynamic_mode=off xla/tools:run_hlo_module --config=cuda
 
       - name: Run HLO Module Benchmarks withg GPU in xla/tests/fuzz
-        working-directory: openxla
+        working-directory: xla
         continue-on-error: true
         run: |
           for file in xla/tests/fuzz/*.hlo; do
@@ -126,7 +126,7 @@ jobs:
           done
 
       - name: Run HLO Module Benchmarks withg GPU in xla/service/gpu
-        working-directory: openxla
+        working-directory: xla
         continue-on-error: true
         run: |
           find xla/service/gpu -name "*.hlo" -print0 | while IFS= read -r -d $'\0' hlo_file; do
