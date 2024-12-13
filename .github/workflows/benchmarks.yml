@@ -90,10 +90,10 @@ jobs:
         working-directory: xla
         run: bazel build -c opt --dynamic_mode=off xla/tools:run_hlo_module --config=cuda
 
-      # - name: Wait For Connection
-      #   uses: google-ml-infra/actions/ci_connection@main
-      #   with:
-      #     halt-dispatch-input: ${{ inputs.halt-for-connection }}
+      - name: Wait For Connection
+        uses: google-ml-infra/actions/ci_connection@main
+        with:
+          halt-dispatch-input: ${{ inputs.halt-for-connection }}
 
       - name: Run HLO Module Benchmarks withg GPU in xla/tests/fuzz
         working-directory: xla
@@ -108,7 +108,7 @@ jobs:
               continue
             fi
             echo "Running benchmark on $file"
-            ./bazel-bin/xla/tools/run_hlo_module --input_format=hlo --platform=GPU "$file" &> gpu_benchmark_logs/xla_tests_fuzz/"$filename".log
+            ./bazel-bin/xla/tools/run_hlo_module --input_format=hlo --platform=GPU "$file"  &> gpu_benchmark_logs/xla_tests_fuzz/"$filename".log
           done
 
       - name: Run HLO Module Benchmarks withg GPU in xla/service/gpu
@@ -116,8 +116,7 @@ jobs:
         continue-on-error: true
         run: |
           mkdir -p gpu_benchmark_logs/xla_service_gpu
-          find xla/service/gpu -name "*.hlo" -print0 | xargs -0 -I {} sh -c 'filename=$(basename "$1"); ./bazel-bin/xla/tools/run_hlo_module --input_format=hlo --platform=GPU "$1" &> gpu_benchmark_logs/xla_service_gpu/"$filename".log' {}
-
+          find xla/service/gpu -name "*.hlo" -print0 | xargs -0 -I {} sh -c 'filename=$(basename "$1"); ./bazel-bin/xla/tools/run_hlo_module --input_format=hlo --platform=GPU "$1" &> gpu_benchmark_logs/xla_service_gpu/"$filename".log' sh {}
       # - name: Build hlo_runner_main
       #   working-directory: xla
       #   run: bazel build -c opt --config=cuda --dynamic_mode=off //xla/tools/multihost_hlo_runner:hlo_runner_main
