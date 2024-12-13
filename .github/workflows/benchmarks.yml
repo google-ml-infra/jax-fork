@@ -16,7 +16,7 @@ on:
         - 'no'
 
 jobs:
-  jax-build-and-test:
+  gpu-jax-build-and-test:
     runs-on: linux-x86-g2-48-l4-4gpu # Use a GPU-enabled runner
     container:
       image: "gcr.io/tensorflow-testing/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest"
@@ -45,7 +45,7 @@ jobs:
         continue-on-error: true
         run: python -m pytest tests/multiprocess_gpu_test.py
 
-  build-xla-gpu-and-test:
+  gpu-xla-build-and-test:
     runs-on: linux-x86-g2-48-l4-4gpu # Use a GPU-enabled runner
     container:
       image: "gcr.io/tensorflow-testing/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest"
@@ -99,6 +99,7 @@ jobs:
         working-directory: xla
         continue-on-error: true
         run: |
+          mkdir -p gpu_benchmark_logs/xla_tests_fuzz
           for file in xla/tests/fuzz/*.hlo; do
             filename=$(basename "$file")
             # Skip expected failed hlo files.
@@ -107,14 +108,15 @@ jobs:
               continue
             fi
             echo "Running benchmark on $file"
-            ./bazel-bin/xla/tools/run_hlo_module --input_format=hlo --platform=GPU "$file"
+            ./bazel-bin/xla/tools/run_hlo_module --input_format=hlo --platform=GPU "$file" &> gpu_benchmark_logs/xla_tests_fuzz/"$filename".log
           done
 
       - name: Run HLO Module Benchmarks withg GPU in xla/service/gpu
         working-directory: xla
         continue-on-error: true
         run: |
-          find xla/service/gpu -name "*.hlo" -print0 | xargs -0 -I {} ./bazel-bin/xla/tools/run_hlo_module --input_format=hlo --platform=GPU {}
+          mkdir -p gpu_benchmark_logs/xla_service_gpu
+          find xla/service/gpu -name "*.hlo" -print0 | xargs -0 -I {} sh -c 'filename=$(basename "$1"); ./bazel-bin/xla/tools/run_hlo_module --input_format=hlo --platform=GPU "$1" &> gpu_benchmark_logs/xla_service_gpu/"$filename".log' {}
 
       # - name: Build hlo_runner_main
       #   working-directory: xla
@@ -129,3 +131,9 @@ jobs:
       #       echo "Running benchmark on $file"
       #       bazel-bin/xla/tools/multihost_hlo_runner/hlo_runner_main "$file"
       #     done
+
+      - name: Upload Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-benchmark-logs
+          path: gpu_benchmark_logs
