@@ -12,6 +12,8 @@ on:
 
 jobs:
   asan:
+    # Don't execute in fork due to runner type
+    if: github.repository == 'jax-ml/jax'
     runs-on: linux-x86-n2-64
     container:
       image: us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest # ratchet:ubuntu:24.04
