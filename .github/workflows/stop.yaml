@@ -1,0 +1,37 @@
+name: Benchmarks
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      halt-for-connection:
+        description: 'Should this workflow run wait for a remote connection?'
+        type: choice
+        required: true
+        default: 'no'
+        options:
+        - 'yes'
+        - 'no'
+
+jobs:
+  jax-build-and-test:
+    runs-on: linux-arm64-c4a-16
+    container:
+      image: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest"
+
+    env:
+      JAXCI_HERMETIC_PYTHON_VERSION: 3.11
+
+    steps:
+      - name: Checkout JAX Fork
+        uses: actions/checkout@v3
+        with:
+          repository: 'google-ml-infra/jax-fork'
+          path: jax-fork
+
+      - name: Sleep
+        working-directory: jax-fork
+        run: |
+          sleep 100000
