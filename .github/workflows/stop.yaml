@@ -1,4 +1,4 @@
-name: Benchmarks
+name: Test stopping workflow
 
 on:
   pull_request:
