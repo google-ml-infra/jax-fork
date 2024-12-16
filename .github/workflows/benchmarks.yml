@@ -76,10 +76,10 @@ jobs:
         working-directory: xla
         run: mkdir -p results
         
-      - name: Get GPU spec
-        working-directory: xla
-        continue-on-error: true
-        run: nvidia-smi
+      # - name: Get GPU spec
+      #   working-directory: xla
+      #   continue-on-error: true
+      #   run: nvidia-smi
         
       - name: Configure XLA
         working-directory: xla
