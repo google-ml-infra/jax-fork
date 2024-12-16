@@ -16,33 +16,33 @@ on:
         - 'no'
 
 jobs:
-  # jax-build-and-test:
-  #   runs-on: linux-x86-g2-48-l4-4gpu # Use a GPU-enabled runner
-  #   container:
-  #     image: "gcr.io/tensorflow-testing/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest"
+  jax-build-and-test:
+    runs-on: linux-x86-g2-48-l4-4gpu # Use a GPU-enabled runner
+    container:
+      image: "gcr.io/tensorflow-testing/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest"
 
-  #   env:
-  #     JAXCI_HERMETIC_PYTHON_VERSION: 3.11
+    env:
+      JAXCI_HERMETIC_PYTHON_VERSION: 3.11
 
-  #   steps:
-  #     - name: Checkout JAX Fork
-  #       uses: actions/checkout@v3
-  #       with:
-  #         repository: 'google-ml-infra/jax-fork'
-  #         path: jax-fork
+    steps:
+      - name: Checkout JAX Fork
+        uses: actions/checkout@v3
+        with:
+          repository: 'google-ml-infra/jax-fork'
+          path: jax-fork
 
-  #     - name: Install JAX Dependencies
-  #       working-directory: jax-fork
-  #       run: |
-  #         python -m pip install --upgrade pip
-  #         pip install pytest
-  #         pip install absl-py
-  #         pip install "jax[cuda12_pip]"  # Adjust CUDA version if needed
-  #         pip install google-benchmark
-  #     - name: Run JAX Multiprocess GPU Test
-  #       working-directory: jax-fork
-  #       continue-on-error: true
-  #       run: python -m pytest tests/multiprocess_gpu_test.py
+      - name: Install JAX Dependencies
+        working-directory: jax-fork
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest
+          pip install absl-py
+          pip install "jax[cuda12_pip]"  # Adjust CUDA version if needed
+          pip install google-benchmark
+      - name: Run JAX Multiprocess GPU Test
+        working-directory: jax-fork
+        continue-on-error: true
+        run: python -m pytest tests/multiprocess_gpu_test.py
 
   build-xla-gpu-and-test:
     runs-on: linux-x86-g2-48-l4-4gpu # Use a GPU-enabled runner
@@ -56,21 +56,6 @@ jobs:
         with:
           repository: openxla/xla  # Replace with your fork if needed
           path: xla
-      
-      - name: Build XLA with GPU support with RBE
-        working-directory: xla
-        continue-on-error: true
-        run: bazel build --build_tag_filters=-no_oss,requires-gpu-nvidia,gpu,-rocm-only --test_tag_filters=-no_oss,requires-gpu-nvidia,gpu,-rocm-only,requires-gpu-sm75-only,requires-gpu-sm60,requires-gpu-sm70,-requires-gpu-sm80,-requires-gpu-sm80-only,-requires-gpu-sm90,-requires-gpu-sm90-only,-requires-gpu-sm100,-requires-gpu-sm100-only,-requires-gpu-amd --config=warnings --config=rbe_linux_cuda_nvcc --run_under=//tools/ci_build/gpu_build:parallel_gpu_execute --repo_env=TF_CUDA_COMPUTE_CAPABILITIES=7.5 --@cuda_driver//:enable_forward_compatibility=true --test_output=errors --verbose_failures --keep_going --nobuild_tests_only --profile=profile.json.gz --flaky_test_attempts=3 --jobs=150 --bes_upload_mode=fully_async --nobuild -- //xla/... //build_tools/... @tsl//tsl/...
-     
-      - name: Run XLA tests with GPU support with RBE
-        working-directory: xla
-        continue-on-error: true
-        run: bazel test --build_tag_filters=-no_oss,requires-gpu-nvidia,gpu,-rocm-only --test_tag_filters=-no_oss,requires-gpu-nvidia,gpu,-rocm-only,requires-gpu-sm75-only,requires-gpu-sm60,requires-gpu-sm70,-requires-gpu-sm80,-requires-gpu-sm80-only,-requires-gpu-sm90,-requires-gpu-sm90-only,-requires-gpu-sm100,-requires-gpu-sm100-only,-requires-gpu-amd --config=warnings --config=rbe_linux_cuda_nvcc --run_under=//tools/ci_build/gpu_build:parallel_gpu_execute --repo_env=TF_CUDA_COMPUTE_CAPABILITIES=7.5 --@cuda_driver//:enable_forward_compatibility=true --test_output=errors --verbose_failures --keep_going --nobuild_tests_only --profile=profile.json.gz --flaky_test_attempts=3 --jobs=150 --bes_upload_mode=fully_async -- //xla/... //build_tools/... @tsl//tsl/...
-
-      - name: Run Profile Analysis
-        working-directory: xla
-        continue-on-error: true
-        run: bazel analyze-profile profile.json.gz
         
       - name: Create results directory
         working-directory: xla
@@ -84,19 +69,23 @@ jobs:
       - name: Configure XLA
         working-directory: xla
         run: ./configure.py --backend CUDA --nccl
-
+      
       - name: Set TF_CPP_MAX_VLOG_LEVEL
         working-directory: xla
-        run: echo "TF_CPP_MAX_VLOG_LEVEL=1" >> $GITHUB_ENV
-          
-      - name: Build run_hlo_module with GPU
+        run: export TF_CPP_MAX_VLOG_LEVEL=1
+        
+      - name: Check TF_CPP_MAX_VLOG_LEVEL
         working-directory: xla
-        run: bazel build -c opt --dynamic_mode=off xla/tools:run_hlo_module --config=cuda
+        run: echo "$TF_CPP_MAX_VLOG_LEVEL"
 
-      - name: Wait For Connection
-        uses: google-ml-infra/actions/ci_connection@main
-        with:
-          halt-dispatch-input: ${{ inputs.halt-for-connection }}
+      - name: Build hlo_runner_main
+        working-directory: xla
+        run: bazel build -c opt --config=cuda --dynamic_mode=off //xla/tools/multihost_hlo_runner:hlo_runner_main
+
+      # - name: Wait For Connection
+      #   uses: google-ml-infra/actions/ci_connection@main
+      #   with:
+      #     halt-dispatch-input: ${{ inputs.halt-for-connection }}
 
       - name: Run HLO Module Benchmarks withg GPU in xla/tests/fuzz
         working-directory: xla
@@ -109,33 +98,10 @@ jobs:
               echo "Skipping benchmark on $file"
               continue
             fi
-            echo "Running benchmark on $file" &> results/"$file".log
-            # ./bazel-bin/xla/tools/run_hlo_module --input_format=hlo --platform=GPU "$file" &> results/"$filename".log
+            echo "Running benchmark on $file" &> results/"$filename".log
+            ./bazel-bin/xla/tools/multihost_hlo_runner/hlo_runner_main --device_type=gpu --use_spmd_partitioning "$file" &> results/"$filename".log
           done
-      # - name: Wait For Connection
-      #   uses: google-ml-infra/actions/ci_connection@main
-      #   with:
-      #     halt-dispatch-input: ${{ inputs.halt-for-connection }}
-      - name: Run HLO Module Benchmarks withg GPU in xla/service/gpu
-        working-directory: xla
-        continue-on-error: true
-        run: |
-          find xla/service/gpu -name "*.hlo" -print0 | while IFS= read -r -d $'\0' file; do
-            ./bazel-bin/xla/tools/run_hlo_module --input_format=hlo --platform=GPU "$file" &> results/"$(basename "$file")".log
-          done
-      # - name: Build hlo_runner_main
-      #   working-directory: xla
-      #   run: bazel build -c opt --config=cuda --dynamic_mode=off //xla/tools/multihost_hlo_runner:hlo_runner_main
-      
-      # - name: Run XLA GPU microbenchmarks with hlo_runner_main
-      #   working-directory: xla
-      #   continue-on-error: true
-      #   run: |
-      #     for file in xla/tools/multihost_hlo_runner/data/*.hlo; do
-      #       filename=$(basename "$file")
-      #       echo "Running benchmark on $file"
-      #       bazel-bin/xla/tools/multihost_hlo_runner/hlo_runner_main "$file"
-      #     done
+
       - name: Upload Results
         uses: actions/upload-artifact@v4
         with:
