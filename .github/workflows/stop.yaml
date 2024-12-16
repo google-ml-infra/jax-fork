@@ -4,22 +4,12 @@ on:
   pull_request:
     branches:
       - main
-  workflow_dispatch:
-    inputs:
-      halt-for-connection:
-        description: 'Should this workflow run wait for a remote connection?'
-        type: choice
-        required: true
-        default: 'no'
-        options:
-        - 'yes'
-        - 'no'
 
 jobs:
   jax-build-and-test:
     runs-on: linux-arm64-c4a-16
     container:
-      image: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest"
+      image: "ubuntu:22.04"
 
     env:
       JAXCI_HERMETIC_PYTHON_VERSION: 3.11
