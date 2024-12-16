@@ -34,4 +34,4 @@ jobs:
       - name: Mark GitHub repo as safe
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Build all artifacts with a single invocation of build CLI
-        run: python build/build.py build --wheels=jax-cuda-plugin,jax-cuda-pjrt,jaxlib --bazel_options=--config=ci_linux_x86_64_cuda --python_version=$JAXCI_HERMETIC_PYTHON_VERSION --verbose
+        run: python build/build.py build --wheels=jaxlib,jax-cuda-plugin,jax-cuda-pjrt --bazel_options=--config=ci_linux_x86_64_cuda --python_version=$JAXCI_HERMETIC_PYTHON_VERSION --verbose
