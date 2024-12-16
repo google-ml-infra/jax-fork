@@ -93,10 +93,10 @@ jobs:
         working-directory: xla
         run: bazel build -c opt --dynamic_mode=off xla/tools:run_hlo_module --config=cuda
 
-      # - name: Wait For Connection
-      #   uses: google-ml-infra/actions/ci_connection@main
-      #   with:
-      #     halt-dispatch-input: ${{ inputs.halt-for-connection }}
+      - name: Wait For Connection
+        uses: google-ml-infra/actions/ci_connection@main
+        with:
+          halt-dispatch-input: ${{ inputs.halt-for-connection }}
 
       - name: Run HLO Module Benchmarks withg GPU in xla/tests/fuzz
         working-directory: xla
