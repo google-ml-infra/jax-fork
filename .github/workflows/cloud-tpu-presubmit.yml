@@ -43,7 +43,7 @@ jobs:
 
     runs-on: ${{ matrix.runner }}
 
-    container: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:702526224"
+    container: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest"
 
     env:
       # Do not run Docker container for Linux runners. Linux runners already run in a Docker container.
