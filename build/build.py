@@ -454,13 +454,13 @@ async def main():
     wheel_build_command_base.append(f"--action_env=CLANG_COMPILER_PATH=\"{clang_path}\"")
     wheel_build_command_base.append(f"--repo_env=CC=\"{clang_path}\"")
     wheel_build_command_base.append(f"--repo_env=BAZEL_COMPILER=\"{clang_path}\"")
+
+    # Do not apply --config=clang on Mac as these settings do not apply to
+    # Apple Clang.
+    if os_name != "darwin":
+      wheel_build_command_base.append("--config=clang")
   else:
     logging.debug("Use Clang: False")
-
-  # Do not apply --config=clang on Mac as these settings do not apply to
-  # Apple Clang.
-  if os_name != "darwin":
-    wheel_build_command_base.append("--config=clang")
 
   if not args.disable_mkl_dnn:
     logging.debug("Enabling MKL DNN")
@@ -498,9 +498,10 @@ async def main():
 
   if "cuda" in args.wheels:
     wheel_build_command_base.append("--config=cuda")
-    wheel_build_command_base.append(
-          f"--action_env=CLANG_CUDA_COMPILER_PATH=\"{clang_path}\""
-      )
+    if args.use_clang:
+      wheel_build_command_base.append(
+            f"--action_env=CLANG_CUDA_COMPILER_PATH=\"{clang_path}\""
+        )
     if args.build_cuda_with_clang:
       logging.debug("Building CUDA with Clang")
       wheel_build_command_base.append("--config=build_cuda_with_clang")
