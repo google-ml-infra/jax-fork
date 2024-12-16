@@ -60,4 +60,4 @@ jobs:
       - name: Another Test
         run: ls
       - name: Another Test
-        run: sleep 500
+        run: sleep 10000
