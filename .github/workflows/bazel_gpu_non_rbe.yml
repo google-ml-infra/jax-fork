@@ -1,9 +1,9 @@
 name: Run Bazel GPU tests (non RBE)
 
 on:
-  # pull_request:
-  #   branches:
-  #     - main
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       halt-for-connection:
@@ -40,7 +40,8 @@ jobs:
         enable-x_64: [1] #, 0]
         container-list: [
                         {name: "nosla", image: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest"},
-                        {name: "ml-build", image: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest"}
+                        {name: "ml-build", image: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest"},
+                        {name: "ml-build-rbe", image: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build-rbe:latest"}
                         ]
     container: 
       image: ${{ matrix.container-list.image }}
