@@ -454,7 +454,10 @@ async def main():
     wheel_build_command_base.append(f"--action_env=CLANG_COMPILER_PATH=\"{clang_path}\"")
     wheel_build_command_base.append(f"--repo_env=CC=\"{clang_path}\"")
     wheel_build_command_base.append(f"--repo_env=BAZEL_COMPILER=\"{clang_path}\"")
-    wheel_build_command_base.append("--config=clang")
+    if clang_major_version >= 16:
+        # Enable clang settings that needed for the build to work with newer
+        # versions of Clang.
+        wheel_build_command_base.append("--config=clang")
   else:
     logging.debug("Use Clang: False")
 
