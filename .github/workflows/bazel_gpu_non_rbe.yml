@@ -21,15 +21,20 @@ concurrency:
 
 jobs:
   build_artifacts:
-    name: "Build the jaxlib and CUDA plugins using latest XLA"
-    uses: ./.github/workflows/build_artifacts.yml
-    with:
-      wheel_list: "jaxlib,jax-cuda-plugin,jax-cuda-pjrt"
-      python_list: "3.11"
-      platform_list: "linux_x86"
-      clone_main_xla: 1
-      upload_artifacts: true
-      upload_destination_prefix: '${{ github.workflow }}/${{ github.run_number }}/${{ github.run_attempt }}'
+      uses: ./.github/workflows/build_artifacts.yml      
+      strategy:
+          fail-fast: false # don't cancel all jobs on failure
+          matrix:
+            runner: ["linux-x86-n2-16"]
+            artifact: ["jaxlib", "jax-cuda-plugin", "jax-cuda-pjrt"]
+            python: ["3.10",] # "3.11", "3.12", "3.13"]
+      with:
+        runner: ${{ matrix.runner }}
+        artifact: ${{ matrix.artifact }}
+        python: ${{ matrix.python }}
+        clone_main_xla: 1
+        upload_artifacts: true
+        upload_destination_prefix: '${{ github.workflow }}/${{ github.run_number }}/${{ github.run_attempt }}'
     
   run_bazel_tests:
     needs: build_artifacts
