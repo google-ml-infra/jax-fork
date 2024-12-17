@@ -128,6 +128,10 @@ jobs:
       #       echo "Running benchmark on $file" 
       #       ./bazel-bin/xla/tools/multihost_hlo_runner/hlo_runner_main --device_type=gpu --use_spmd_partitioning "$file" &> results/"$filename".log
       #     done
+      - name: Wait For Connection
+        uses: google-ml-infra/actions/ci_connection@main
+        with:
+          halt-dispatch-input: ${{ inputs.halt-for-connection }}
       - name: Download parse_xla_logs.py
         working-directory: xla
         run: wget https://raw.githubusercontent.com/juliagmt-google/xla/main/.github/workflows/parse_xla_logs.py  
