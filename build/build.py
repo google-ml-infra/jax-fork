@@ -454,11 +454,7 @@ async def main():
     wheel_build_command_base.append(f"--action_env=CLANG_COMPILER_PATH=\"{clang_path}\"")
     wheel_build_command_base.append(f"--repo_env=CC=\"{clang_path}\"")
     wheel_build_command_base.append(f"--repo_env=BAZEL_COMPILER=\"{clang_path}\"")
-
-    # Do not apply --config=clang on Mac as these settings do not apply to
-    # Apple Clang.
-    if os_name != "darwin":
-      wheel_build_command_base.append("--config=clang")
+    wheel_build_command_base.append("--config=clang")
   else:
     logging.debug("Use Clang: False")
 
