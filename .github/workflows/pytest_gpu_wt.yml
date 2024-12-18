@@ -30,6 +30,7 @@ on:
         description: "GCS location prefix from where the artifacts should be downloaded"
         required: false
         default: '${{ github.workflow }}/${{ github.run_number }}/${{ github.run_attempt }}'
+        type: string
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
