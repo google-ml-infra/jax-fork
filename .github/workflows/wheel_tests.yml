@@ -25,11 +25,11 @@ jobs:
     strategy:
         fail-fast: false # don't cancel all jobs on failure
         matrix:
-        # Runner and Python values need to match the matrix stategy in the CPU tests job
-        # Enable Windows after we have fixed the runner issue
-        runner: ["linux-x86-n2-16", "linux-arm64-c4a-64",] # "windows-x86-n2-16"]
-        artifact: ["jaxlib"]
-        python: ["3.10"]
+            # Runner and Python values need to match the matrix stategy in the CPU tests job
+            # Enable Windows after we have fixed the runner issue
+            runner: ["linux-x86-n2-16", "linux-arm64-c4a-64",] # "windows-x86-n2-16"]
+            artifact: ["jaxlib"]
+            python: ["3.10"]
     with:
     runner: ${{ matrix.runner }}
     artifact: ${{ matrix.artifact }}
