@@ -31,12 +31,12 @@ jobs:
             artifact: ["jaxlib"]
             python: ["3.10"]
     with:
-    runner: ${{ matrix.runner }}
-    artifact: ${{ matrix.artifact }}
-    python: ${{ matrix.python }}
-    clone_main_xla: 1
-    upload_artifacts: true
-    upload_destination_prefix: '${{ github.workflow }}/${{ github.run_number }}/${{ github.run_attempt }}'
+        runner: ${{ matrix.runner }}
+        artifact: ${{ matrix.artifact }}
+        python: ${{ matrix.python }}
+        clone_main_xla: 1
+        upload_artifacts: true
+        upload_destination_prefix: '${{ github.workflow }}/${{ github.run_number }}/${{ github.run_attempt }}'
 
   build_cuda_artifacts:
     uses: ./.github/workflows/build_artifacts.yml      
