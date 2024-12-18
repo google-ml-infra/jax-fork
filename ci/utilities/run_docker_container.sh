@@ -14,19 +14,17 @@
 # limitations under the License.
 # ==============================================================================
 # Sets up a Docker container for JAX CI.
-
+#
 # This script creates and starts a Docker container named "jax" for internal
-# JAX CI jobs. These jobs primarily handle building and publishing JAX artifacts 
-# to PyPI and/or GCS.
-
-# Note: GitHub Actions workflows do not utilize this script, as they leverage 
-# built-in containerization features to run jobs within a container. However, 
-# they use the same Docker image to maintain consistency. This script also helps 
-# ensure that local build environments mirror the behavior of CI builds.
+# JAX CI jobs.
+#
+# Note: While GitHub action workflows use the same Docker images, they do not
+# run this script as they leverage built-in containerization features to run
+# jobs within a container.
 # Usage:
-#     source ci/envs/docker.env && ./ci/utilities/run_docker_container.sh
-#     docker exec -it jax <build-script>
-#     E.g: docker exec -it jax ./ci/build_artifacts.sh jaxlib
+#     ./ci/utilities/run_docker_container.sh
+#     docker exec jax <build-script>
+#     E.g: docker exec jax ./ci/build_artifacts.sh jaxlib
 #
 # -e: abort script if one command fails
 # -u: error if undefined variable used
@@ -45,23 +43,30 @@ if ! docker container inspect jax >/dev/null 2>&1 ; then
   docker pull "$JAXCI_DOCKER_IMAGE" || sleep 15
   docker pull "$JAXCI_DOCKER_IMAGE"
 
+  # Docker on Windows doesn't support the `host` networking mode, and so
+  # port-forwarding is required for the container to detect it's running on GCE.
+  # This is needed for RBE configs to work.
   if [[ "$(uname -s)" =~ "MSYS_NT" ]]; then
-    # Docker on Windows doesn't support the `host` networking mode, and so
-    # port-forwarding is required for the container to detect it's running on GCE.
     export IP_ADDR=$(powershell -command "(Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias 'vEthernet (nat)').IPAddress")
     netsh interface portproxy add v4tov4 listenaddress=$IP_ADDR listenport=80 connectaddress=169.254.169.254 connectport=80
     JAXCI_DOCKER_ARGS="$JAXCI_DOCKER_ARGS -e GCE_METADATA_HOST=$IP_ADDR"
-  else
-    # The volume mapping flag below shares the user's gcloud credentials, if any,
-    # with the container, in case the user has credentials stored there.
-    # This would allow Bazel to authenticate for RBE.
-    # Note: JAX's CI does not have any credentials stored there.
-    JAXCI_DOCKER_ARGS="$JAXCI_DOCKER_ARGS -v $HOME/.config/gcloud:/root/.config/gcloud"
+  fi
+
+  # Create a temporary file to pass any user defined JAXCI_ variables to the
+  # container.
+  JAXCI_TEMP_ENVFILE_DIR=$(mktemp)
+  env | grep "JAXCI_" > "$JAXCI_TEMP_ENVFILE_DIR"
+
+  # On Windows, convert MSYS Linux-like paths to Windows paths.
+  if [[ "$(uname -s)" =~ "MSYS_NT" ]]; then
+    echo 'Converting MSYS Linux-like paths to Windows paths for setting up the Docker container'
+    # Convert all "JAXCI.*DIR" variables
+    source <(python ./ci/utilities/convert_msys_paths_to_win_paths.py --convert $(env | grep "JAXCI.*DIR" | awk -F= '{print $1}'))
   fi
 
   # Start the container.
   docker run $JAXCI_DOCKER_ARGS --name jax \
-          --env-file <(env | grep JAXCI_) \
+          --env-file "$JAXCI_TEMP_ENVFILE_DIR" \
           -w "$JAXCI_DOCKER_WORK_DIR" -itd --rm \
           -v "$JAXCI_JAX_GIT_DIR:$JAXCI_DOCKER_WORK_DIR" \
           "$JAXCI_DOCKER_IMAGE" \
