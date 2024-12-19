@@ -515,8 +515,8 @@ async def main():
     wheel_build_command_base.append("--config=cuda")
     if args.use_clang:
       wheel_build_command_base.append(
-            f"--action_env=CLANG_CUDA_COMPILER_PATH=\"{clang_path}\""
-        )
+          f"--action_env=CLANG_CUDA_COMPILER_PATH=\"{clang_path}\""
+      )
       if args.build_cuda_with_clang:
         logging.debug("Building CUDA with Clang")
         wheel_build_command_base.append("--config=build_cuda_with_clang")
@@ -546,6 +546,20 @@ async def main():
           f"--repo_env=HERMETIC_CUDA_COMPUTE_CAPABILITIES={args.cuda_compute_capabilities}"
       )
 
+  if "rocm" in args.wheels:
+    wheel_build_command_base.append("--config=rocm_base")
+    if args.use_clang:
+      wheel_build_command_base.append("--config=rocm")
+      wheel_build_command_base.append(f"--action_env=CLANG_COMPILER_PATH=\"{clang_path}\"")
+    if args.rocm_path:
+      logging.debug("ROCm tookit path: %s", args.rocm_path)
+      wheel_build_command_base.append(f"--action_env=ROCM_PATH=\"{args.rocm_path}\"")
+    if args.rocm_amdgpu_targets:
+      logging.debug("ROCm AMD GPU targets: %s", args.rocm_amdgpu_targets)
+      wheel_build_command_base.append(
+          f"--action_env=TF_ROCM_AMDGPU_TARGETS={args.rocm_amdgpu_targets}"
+      )
+
   # Append additional build options at the end to override any options set in
   # .bazelrc or above.
   if args.bazel_options:
@@ -571,8 +585,6 @@ async def main():
 
     # Wheel build command execution
     for wheel in args.wheels.split(","):
-      wheel_build_command = copy.deepcopy(wheel_build_command_base)
-
       # Allow CUDA/ROCm wheels without the "jax-" prefix.
       if ("plugin" in wheel or "pjrt" in wheel) and "jax" not in wheel:
         wheel = "jax-" + wheel
@@ -585,6 +597,7 @@ async def main():
         )
         sys.exit(1)
 
+      wheel_build_command = copy.deepcopy(wheel_build_command_base)
       print("\n")
       logger.info(
         "Building %s for %s %s...",
