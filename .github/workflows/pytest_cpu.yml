@@ -1,6 +1,9 @@
 name: Run Pytest CPU tests
 
 on:
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       halt-for-connection:
@@ -10,7 +13,6 @@ on:
         default: 'no'
         options:
         - 'yes'
-        - 'no'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
