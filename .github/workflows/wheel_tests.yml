@@ -36,7 +36,7 @@ jobs:
         python: ${{ matrix.python }}
         clone_main_xla: 1
         upload_artifacts: true
-        upload_destination_prefix: '${{ github.workflow }}/${{ github.run_number }}/${{ github.run_attempt }}'
+        upload_destination_prefix: '${{ github.workflow }}/${{ github.run_number }}'
 
   build_cuda_artifacts:
     uses: ./.github/workflows/build_artifacts.yml      
@@ -53,7 +53,7 @@ jobs:
       python: ${{ matrix.python }}
       clone_main_xla: 1
       upload_artifacts: true
-      upload_destination_prefix: '${{ github.workflow }}/${{ github.run_number }}/${{ github.run_attempt }}'
+      upload_destination_prefix: '${{ github.workflow }}/${{ github.run_number }}'
  
   run_pytest_cpu:
     needs: build_jaxlib_artifact
@@ -69,16 +69,16 @@ jobs:
       runner: ${{ matrix.runner }}
       python: ${{ matrix.python }}
       enable-x64:  ${{ matrix.enable-x64 }}
-      download_url_prefix: '${{ github.workflow }}/${{ github.run_number }}/${{ github.run_attempt }}'
+      download_url_prefix: '${{ github.workflow }}/${{ github.run_number }}'
 
 
   run_pytest_gpu:
     needs: [build_jaxlib_artifact, build_cuda_artifacts]
-    uses: ./.github/workflows/pytest_gpu_wt.yml      
+    uses: ./.github/workflows/pytest_cuda_wt.yml      
     strategy:
         fail-fast: false # don't cancel all jobs on failure
         matrix:
-          # Python values need to match the matrix stategy in the build_jaxlib_artifact job above
+          # Python values need to match the matrix stategy in the build artifacts job above
           runner: ["linux-x86-g2-48-l4-4gpu",]
           python: ["3.10",]
           cuda: ["12.3", "12.1"]
@@ -88,4 +88,20 @@ jobs:
       python: ${{ matrix.python }}
       cuda:  ${{ matrix.cuda }}
       enable-x64:  ${{ matrix.enable-x64 }}
-      download_url_prefix: '${{ github.workflow }}/${{ github.run_number }}/${{ github.run_attempt }}'
+      download_url_prefix: '${{ github.workflow }}/${{ github.run_number }}'
+
+  run_bazel_test_gpu:
+    needs: [build_jaxlib_artifact, build_cuda_artifacts]
+    uses: ./.github/workflows/bazel_cuda_non_rbe_wt.yml      
+    strategy:
+        fail-fast: false # don't cancel all jobs on failure
+        matrix:
+          # Python values need to match the matrix stategy in the build artifacts job above
+          runner: ["linux-x86-g2-48-l4-4gpu",]
+          python: ["3.10",]
+          enable-x64: [1, 0]
+    with:
+      runner: ${{ matrix.runner }}
+      python: ${{ matrix.python }}
+      enable-x64:  ${{ matrix.enable-x64 }}
+      download_url_prefix: '${{ github.workflow }}/${{ github.run_number }}'

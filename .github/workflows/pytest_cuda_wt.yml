@@ -1,4 +1,4 @@
-name: Run Pytest GPU tests
+name: CI - Pytest CUDA
 
 on:
   pull_request:
@@ -68,7 +68,7 @@ jobs:
           os=$(uname -s | awk '{print tolower($0)}')
           arch=$(uname -m)
           echo "PLATFORM=${os}_${arch}" >> $GITHUB_ENV
-      - name: Download artifacts built in the "build_artifacts" job
+      - name: Download the wheel artifacts from GCS
         run: mkdir -p $(pwd)/dist && gsutil -m cp -r gs://general-ml-ci-transient/jax-github-actions/"${{ inputs.download_url_prefix }}"/$PLATFORM/python${JAXCI_HERMETIC_PYTHON_VERSION}/*.whl $(pwd)/dist/
       - name: Install dependencies
         run: $JAXCI_PYTHON -m pip install -r build/requirements.in

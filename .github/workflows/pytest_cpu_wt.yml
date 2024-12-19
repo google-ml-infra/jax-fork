@@ -1,4 +1,4 @@
-name: Run Pytest CPU tests
+name: CI - Pytest CPU
 
 on:
   pull_request:
@@ -75,17 +75,17 @@ jobs:
           fi
 
           echo "PLATFORM=${os}_${arch}" >> $GITHUB_ENV
-      - name: Download artifacts built in the "build_artifacts" job (non-Windows runs)
+      - name: Download the jaxlib wheel from GCS (non-Windows runs)
         if: ${{ !contains(inputs.runner, 'windows-x86') }}
         run: >-
           mkdir -p $(pwd)/dist &&
-          gsutil -m cp -r gs://general-ml-ci-transient/jax-github-actions/"${{ inputs.download_url_prefix }}"/$PLATFORM/python${JAXCI_HERMETIC_PYTHON_VERSION}/*.whl $(pwd)/dist/
-      - name: Download artifacts built in the "build_artifacts" job (Windows runs)
+          gsutil -m cp -r gs://general-ml-ci-transient/jax-github-actions/"${{ inputs.download_url_prefix }}"/$PLATFORM/python${JAXCI_HERMETIC_PYTHON_VERSION}/jaxlib*.whl $(pwd)/dist/
+      - name: Download the jaxlib wheel from GCS (Windows runs)
         if: ${{ contains(inputs.runner, 'windows-x86') }}
         shell: cmd
         run: >-
           mkdir dist &&
-          gsutil -m cp -r gs://general-ml-ci-transient/jax-github-actions/"${{ inputs.download_url_prefix }}"/$PLATFORM/python${JAXCI_HERMETIC_PYTHON_VERSION}/*.whl dist/
+          gsutil -m cp -r gs://general-ml-ci-transient/jax-github-actions/"${{ inputs.download_url_prefix }}"/$PLATFORM/python${JAXCI_HERMETIC_PYTHON_VERSION}/jaxlib*.whl dist/
       - name: Install dependencies
         run: $JAXCI_PYTHON -m pip install -r build/requirements.in
       - name: Run Pytest CPU tests
