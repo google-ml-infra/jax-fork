@@ -26,6 +26,11 @@ on:
         type: string
         required: true
         default: "3.12"
+      enable-x64:
+        description: "Should x64 mode be enabled?"
+        type: string
+        required: true
+        default: "0"
       download_url_prefix:
         description: "GCS location prefix from where the artifacts should be downloaded"
         required: false
@@ -42,22 +47,18 @@ jobs:
       run:
         # Explicitly set the shell to bash to override the default Windows environment, i.e, cmd.
         shell: bash
-    strategy:
-      fail-fast: false # don't cancel all jobs on failure
-      matrix:
-        enable-x_64: [1, 0]
 
     runs-on: ${{ inputs.runner }}
     container: ${{ (contains(inputs.runner, 'linux-x86') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest') ||
                    (contains(inputs.runner, 'linux-arm64') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build-arm64:latest') ||
                    (contains(inputs.runner, 'windows-x86') && null) }}
 
-    name: "Pytest CPU (${{ inputs.runner }}, Python ${{ inputs.python }}, x64=${{ matrix.enable-x_64 }})"
+    name: "Pytest CPU (${{ inputs.runner }}, Python ${{ inputs.python }}, x64=${{ inputs.enable-x64 }})"
 
     env:
       JAXCI_HERMETIC_PYTHON_VERSION: "${{ inputs.python }}"
       JAXCI_PYTHON: "python${{ inputs.python }}"
-      JAXCI_ENABLE_X64: ${{ matrix.enable-x_64 }}
+      JAXCI_ENABLE_X64: ${{ inputs.enable-x64 }}
 
     
     steps:

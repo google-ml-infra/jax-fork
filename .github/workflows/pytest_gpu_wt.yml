@@ -22,13 +22,23 @@ on:
         required: true
         default: "linux-x86-n2-16"
       python:
-        description: "Which python version should the artifact be built for?"
+        description: "Which python version to test?"
         type: string
         required: true
         default: "3.12"
+      cuda:
+        description: "Which CUDA version to test?"
+        type: string
+        required: true
+        default: "12.3"
+      enable-x64:
+        description: "Should x64 mode be enabled?"
+        type: string
+        required: true
+        default: "0"
       download_url_prefix:
         description: "GCS location prefix from where the artifacts should be downloaded"
-        required: false
+        required: true
         default: '${{ github.workflow }}/${{ github.run_number }}/${{ github.run_attempt }}'
         type: string
 
@@ -38,26 +48,17 @@ concurrency:
 
 jobs:
   run-tests:
-    strategy:
-      fail-fast: false # don't cancel all jobs on failure
-      matrix:
-        test_env: [
-          {cuda_version: "12.3",
-          image: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest"},
-          {cuda_version: "12.1",
-          image: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/nosla-cuda12.1-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest"},
-          ]
-        enable-x_64: [1, 0]
 
     runs-on: ${{ inputs.runner }}
-    container: ${{ matrix.test_env.image }}
+    container:  ${{ (contains(inputs.cuda, '12.3') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest') ||
+                (contains(inputs.cuda, '12.1') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/nosla-cuda12.1-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest') }}
     
-    name: "Pytest GPU (${{ inputs.runner }}, CUDA ${{ matrix.test_env.cuda_version }}, Python ${{ inputs.python }}, x64=${{ matrix.enable-x_64 }})"
+    name: "Pytest GPU (${{ inputs.runner }}, CUDA ${{ inputs.cuda }}, Python ${{ inputs.python }}, x64=${{ inputs.enable-x64 }})"
 
     env:
       JAXCI_HERMETIC_PYTHON_VERSION: "${{ inputs.python }}"
       JAXCI_PYTHON: "python${{ inputs.python }}"
-      JAXCI_ENABLE_X64: ${{ matrix.enable-x_64 }}
+      JAXCI_ENABLE_X64: ${{ inputs.enable-x64 }}
 
     steps:
       - uses: actions/checkout@v3
