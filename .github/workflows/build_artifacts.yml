@@ -61,7 +61,7 @@ on:
       upload_destination_prefix:
         description: "GCS location prefix to where the artifacts should be uploaded"
         required: false
-        default: '${{ github.workflow }}/${{ github.run_number }}/${{ github.run_attempt }}'
+        default: 'jax-fork/${{ github.workflow }}/${{ github.run_number }}/${{ github.run_attempt }}'
         type: string
 
 jobs:

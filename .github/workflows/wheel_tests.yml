@@ -27,7 +27,7 @@ jobs:
         matrix:
             # Runner and Python values need to match the matrix stategy in the CPU tests job
             # Enable Windows after we have fixed the runner issue
-            runner: ["linux-x86-n2-16", "linux-arm64-c4a-64",] # "windows-x86-n2-16"]
+            runner: ["linux-x86-n2-16", "linux-x86-t2a-48-dev",] # "windows-x86-n2-16"]
             artifact: ["jaxlib"]
             python: ["3.10"]
     with:
@@ -36,7 +36,7 @@ jobs:
         python: ${{ matrix.python }}
         clone_main_xla: 1
         upload_artifacts: true
-        upload_destination_prefix: '${{ github.workflow }}/${{ github.run_number }}'
+        upload_destination_prefix: 'jax-fork/${{ github.workflow }}/${{ github.run_number }}'
 
   build_cuda_artifacts:
     uses: ./.github/workflows/build_artifacts.yml      
@@ -53,7 +53,7 @@ jobs:
       python: ${{ matrix.python }}
       clone_main_xla: 1
       upload_artifacts: true
-      upload_destination_prefix: '${{ github.workflow }}/${{ github.run_number }}'
+      upload_destination_prefix: 'jax-fork/${{ github.workflow }}/${{ github.run_number }}'
  
   run_pytest_cpu:
     needs: build_jaxlib_artifact
@@ -69,7 +69,7 @@ jobs:
       runner: ${{ matrix.runner }}
       python: ${{ matrix.python }}
       enable-x64:  ${{ matrix.enable-x64 }}
-      download_url_prefix: '${{ github.workflow }}/${{ github.run_number }}'
+      download_url_prefix: 'jax-fork/${{ github.workflow }}/${{ github.run_number }}'
 
 
   run_pytest_gpu:
@@ -88,7 +88,7 @@ jobs:
       python: ${{ matrix.python }}
       cuda:  ${{ matrix.cuda }}
       enable-x64:  ${{ matrix.enable-x64 }}
-      download_url_prefix: '${{ github.workflow }}/${{ github.run_number }}'
+      download_url_prefix: 'jax-fork/${{ github.workflow }}/${{ github.run_number }}'
 
   run_bazel_test_gpu:
     needs: [build_jaxlib_artifact, build_cuda_artifacts]
@@ -104,4 +104,4 @@ jobs:
       runner: ${{ matrix.runner }}
       python: ${{ matrix.python }}
       enable-x64:  ${{ matrix.enable-x64 }}
-      download_url_prefix: '${{ github.workflow }}/${{ github.run_number }}'
+      download_url_prefix: 'jax-fork/${{ github.workflow }}/${{ github.run_number }}'

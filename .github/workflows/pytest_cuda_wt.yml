@@ -39,7 +39,7 @@ on:
       download_url_prefix:
         description: "GCS location prefix from where the artifacts should be downloaded"
         required: true
-        default: '${{ github.workflow }}/${{ github.run_number }}/${{ github.run_attempt }}'
+        default: 'jax-fork/${{ github.workflow }}/${{ github.run_number }}/${{ github.run_attempt }}'
         type: string
 
 jobs:
