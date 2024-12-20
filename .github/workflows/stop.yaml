@@ -7,7 +7,7 @@ on:
 
 jobs:
   jax-build-and-test:
-    runs-on: linux-arm64-c4a-16
+    runs-on: linux-x86-n2-32-dev
     container:
       image: "ubuntu:22.04"
 
