@@ -61,7 +61,7 @@ on:
       upload_destination_prefix:
         description: "GCS location prefix to where the artifacts should be uploaded"
         required: false
-        default: '${{ github.workflow }}/${{ github.run_number }}/${{ github.run_attempt }}'
+        default: 'jax-fork/${{ github.workflow }}/${{ github.run_number }}/${{ github.run_attempt }}'
         type: string
 
 jobs:
@@ -115,5 +115,3 @@ jobs:
           ${{ inputs.upload_artifacts &&  contains(inputs.runner, 'windows-x86') }}
         shell: cmd
         run:  gsutil -m cp -r dist/*.whl gs://general-ml-ci-transient/jax-github-actions/"${{ inputs.upload_destination_prefix }}"/$PLATFORM/python${JAXCI_HERMETIC_PYTHON_VERSION}/
-      
-      

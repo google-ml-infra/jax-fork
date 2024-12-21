@@ -1,0 +1,92 @@
+name: CI - Pytest CPU
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      halt-for-connection:
+        description: 'Should this workflow run wait for a remote connection?'
+        type: choice
+        required: true
+        default: 'no'
+        options:
+        - 'yes'
+        - 'no'
+  workflow_call:
+    inputs:
+      runner:
+        description: "Which runner should the workflow run on?"
+        type: string
+        required: true
+        default: "linux-x86-n2-16"
+      python:
+        description: "Which python version should the artifact be built for?"
+        type: string
+        required: true
+        default: "3.12"
+      enable-x64:
+        description: "Should x64 mode be enabled?"
+        type: string
+        required: true
+        default: "0"
+      download_url_prefix:
+        description: "GCS location prefix from where the artifacts should be downloaded"
+        required: false
+        default: 'jax-fork/${{ github.workflow }}/${{ github.run_number }}/${{ github.run_attempt }}'
+        type: string
+
+jobs:
+  run-tests:
+    defaults:
+      run:
+        # Explicitly set the shell to bash to override the default Windows environment, i.e, cmd.
+        shell: bash
+
+    runs-on: ${{ inputs.runner }}
+    container: ${{ (contains(inputs.runner, 'linux-x86-n2') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest') ||
+                   (contains(inputs.runner, 'linux-x86-t2a') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build-arm64:latest') ||
+                   (contains(inputs.runner, 'windows-x86') && null) }}
+
+    name: "Pytest CPU (${{ inputs.runner }}, Python ${{ inputs.python }}, x64=${{ inputs.enable-x64 }})"
+
+    env:
+      JAXCI_HERMETIC_PYTHON_VERSION: "${{ inputs.python }}"
+      JAXCI_PYTHON: "python${{ inputs.python }}"
+      JAXCI_ENABLE_X64: ${{ inputs.enable-x64 }}
+
+    
+    steps:
+      - uses: actions/checkout@v3
+      # Halt for testing
+      - name: Wait For Connection
+        uses: google-ml-infra/actions/ci_connection@main
+        with:
+          halt-dispatch-input: ${{ inputs.halt-for-connection }}
+      - name: Set PLATFORM env var for use in artifact download URL
+        run: |
+          os=$(uname -s | awk '{print tolower($0)}')
+          arch=$(uname -m)
+
+          # Adjust name for Windows
+          if [[  $os  =~ "msys_nt" ]]; then
+            os="windows"
+          fi
+
+          echo "PLATFORM=${os}_${arch}" >> $GITHUB_ENV
+      - name: Download the jaxlib wheel from GCS (non-Windows runs)
+        if: ${{ !contains(inputs.runner, 'windows-x86') }}
+        run: >-
+          mkdir -p $(pwd)/dist &&
+          gsutil -m cp -r gs://general-ml-ci-transient/jax-github-actions/"${{ inputs.download_url_prefix }}"/$PLATFORM/python${JAXCI_HERMETIC_PYTHON_VERSION}/jaxlib*.whl $(pwd)/dist/
+      - name: Download the jaxlib wheel from GCS (Windows runs)
+        if: ${{ contains(inputs.runner, 'windows-x86') }}
+        shell: cmd
+        run: >-
+          mkdir dist &&
+          gsutil -m cp -r gs://general-ml-ci-transient/jax-github-actions/"${{ inputs.download_url_prefix }}"/$PLATFORM/python${JAXCI_HERMETIC_PYTHON_VERSION}/jaxlib*.whl dist/
+      - name: Install dependencies
+        run: $JAXCI_PYTHON -m pip install -r build/requirements.in
+      - name: Run Pytest CPU tests
+        run: ./ci/run_pytest_cpu.sh
