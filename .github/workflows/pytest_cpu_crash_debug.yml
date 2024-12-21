@@ -1,4 +1,4 @@
-name: CI - Pytest CPU
+name: CI - Pytest CPU (crash debug)
 
 on:
   pull_request:
@@ -45,10 +45,10 @@ jobs:
       - name: Mark GitHub workspace as safe
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-      - name: Set PLATFORM env var for use in artifact download URL
+      - name: Build jaxlib
         run: |
             $JAXCI_PYTHON build/build.py build --wheels=jaxlib \
-                        --bazel_options=--config=rbe_linux_x86_64 \
+                        --bazel_options=--config=ci_linux_aarch64 \
                         --local_xla_path="$(pwd)/xla" \
                         --verbose
       - name: Install dependencies
