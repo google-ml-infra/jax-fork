@@ -12,15 +12,6 @@
 
 name: CI - Cloud TPU (nightly)
 on:
-<<<<<<< HEAD
-#   schedule:
-#     - cron: "0 */2 * * *" # Run every 2 hours
-#   workflow_dispatch: # allows triggering the workflow run manually
-# # This should also be set to read-only in the project settings, but it's nice to
-# # document and enforce the permissions here.
-# permissions:
-#   contents: read
-=======
   schedule:
     - cron: "0 2,14 * * *" # Run at 7am and 7pm PST
   workflow_dispatch: # allows triggering the workflow run manually
@@ -28,7 +19,6 @@ on:
 # document and enforce the permissions here.
 permissions:
   contents: read
->>>>>>> 402814b10b8f0df268910e1628b72cbe252aa045
 jobs:
   cloud-tpu-test:
     strategy:
