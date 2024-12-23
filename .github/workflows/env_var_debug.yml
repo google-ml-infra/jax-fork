@@ -12,11 +12,11 @@ jobs:
         fail-fast: false # don't cancel all jobs on failure
         matrix:
           # Python values need to match the matrix stategy in the build artifacts job above
-          runner: ["linux-x86-n2-16", "linux-x86-g2-48-l4-4gpu",]
+          runner: ["linux-x86-g2-48-l4-4gpu",]
           python: ["3.10",]
 
     runs-on: ${{ matrix.runner }}
-    container:  "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest"
+    container:  "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest"
     
     name: "Debug env var setting"
 
