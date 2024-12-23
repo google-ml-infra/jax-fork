@@ -61,7 +61,15 @@ jobs:
         run: |
           os=$(uname -s | awk '{print tolower($0)}')
           arch=$(uname -m)
-          echo "PLATFORM=${os}_${arch}" >> $GITHUB_ENV
+          
+          # Get the major and minor version of Python.
+          # E.g if JAXCI_HERMETIC_PYTHON_VERSION=3.10, then python_major_minor=310
+          echo 
+          python_major_minor="${JAXCI_HERMETIC_PYTHON_VERSION//./}"
+
+          echo "OS=${os}" >> $GITHUB_ENV
+          echo "ARCH=${arch}" >> $GITHUB_ENV
+          echo "PYTHON_MAJOR_MINOR=${python_major_minor}" >> $GITHUB_ENV
       - name: Download the wheel artifacts from GCS
         run: mkdir -p $(pwd)/dist && gsutil -m cp -r "${{ inputs.gcs_download_uri }}"/*${PYTHON_MAJOR_MINOR}*${OS}*${ARCH}*.whl $(pwd)/dist/
       - name: Run Bazel tests

@@ -67,9 +67,10 @@ jobs:
         run: |
           os=$(uname -s | awk '{print tolower($0)}')
           arch=$(uname -m)
-
+          
           # Get the major and minor version of Python.
           # E.g if JAXCI_HERMETIC_PYTHON_VERSION=3.10, then python_major_minor=310
+          echo $os $arch "${JAXCI_HERMETIC_PYTHON_VERSION}"
           python_major_minor="${JAXCI_HERMETIC_PYTHON_VERSION//./}"
 
           echo "OS=${os}" >> $GITHUB_ENV
