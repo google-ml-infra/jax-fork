@@ -36,10 +36,10 @@ on:
         type: string
         required: true
         default: "0"
-      download_url_prefix:
-        description: "GCS location prefix from where the artifacts should be downloaded"
+      gcs_download_uri:
+        description: "GCS location URI from where the artifacts should be downloaded"
         required: true
-        default: 'jax-fork/${{ github.workflow }}/${{ github.run_number }}/${{ github.run_attempt }}'
+        default: 'gs://general-ml-ci-transient/jax-github-actions/jax-fork/${{ github.workflow }}/${{ github.run_number }}'
         type: string
 
 jobs:
@@ -57,19 +57,26 @@ jobs:
       JAXCI_ENABLE_X64: ${{ inputs.enable-x64 }}
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       # Halt for testing
       - name: Wait For Connection
         uses: google-ml-infra/actions/ci_connection@main
         with:
           halt-dispatch-input: ${{ inputs.halt-for-connection }}
-      - name: Set PLATFORM env var for use in artifact download URL
+      - name: Set env vars for use in artifact download URL
         run: |
           os=$(uname -s | awk '{print tolower($0)}')
           arch=$(uname -m)
-          echo "PLATFORM=${os}_${arch}" >> $GITHUB_ENV
+
+          # Get the major and minor version of Python.
+          # E.g if JAXCI_HERMETIC_PYTHON_VERSION=3.10, then python_major_minor=310
+          python_major_minor="${JAXCI_HERMETIC_PYTHON_VERSION//./}"
+
+          echo "OS=${os}" >> $GITHUB_ENV
+          echo "ARCH=${arch}" >> $GITHUB_ENV
+          echo "PYTHON_MAJOR_MINOR=${python_major_minor}" >> $GITHUB_ENV
       - name: Download the wheel artifacts from GCS
-        run: mkdir -p $(pwd)/dist && gsutil -m cp -r gs://general-ml-ci-transient/jax-github-actions/"${{ inputs.download_url_prefix }}"/$PLATFORM/python${JAXCI_HERMETIC_PYTHON_VERSION}/*.whl $(pwd)/dist/
+        run: mkdir -p $(pwd)/dist && gsutil -m cp -r "${{ inputs.gcs_download_uri }}"/*${PYTHON_MAJOR_MINOR}*${OS}*${ARCH}*.whl $(pwd)/dist/
       - name: Install dependencies
         run: $JAXCI_PYTHON -m pip install -r build/requirements.in
       - name: Run Pytest GPU tests
