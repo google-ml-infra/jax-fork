@@ -1,0 +1,41 @@
+name: CI - Debug
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  run-tests:
+
+    strategy:
+        fail-fast: false # don't cancel all jobs on failure
+        matrix:
+          # Python values need to match the matrix stategy in the build artifacts job above
+          runner: ["linux-x86-n2-16", "linux-x86-g2-48-l4-4gpu",]
+          python: ["3.10",]
+
+    runs-on: ${{ matrix.runner }}
+    container:  "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest"
+    
+    name: "Debug env var setting"
+
+    env:
+      JAXCI_HERMETIC_PYTHON_VERSION: "${{ matrix.python }}"
+      JAXCI_PYTHON: "python${{ matrix.python }}"
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set env vars for use in artifact download URL
+        run: |
+            os=$(uname -s | awk '{print tolower($0)}')
+            arch=$(uname -m)
+            
+            # Get the major and minor version of Python.
+            # E.g if JAXCI_HERMETIC_PYTHON_VERSION=3.10, then python_major_minor=310
+            echo $os $arch $JAXCI_HERMETIC_PYTHON_VERSION
+            python_major_minor="${JAXCI_HERMETIC_PYTHON_VERSION//./}"
+
+            echo "OS=${os}" >> $GITHUB_ENV
+            echo "ARCH=${arch}" >> $GITHUB_ENV
+            echo "PYTHON_MAJOR_MINOR=${python_major_minor}" >> $GITHUB_ENV
