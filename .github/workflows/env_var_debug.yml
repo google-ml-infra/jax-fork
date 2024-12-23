@@ -13,7 +13,7 @@ jobs:
         matrix:
           # Python values need to match the matrix stategy in the build artifacts job above
           runner: ["linux-x86-g2-48-l4-4gpu",]
-          python: ["3.10",]
+          python: ["3.11",]
 
     runs-on: ${{ matrix.runner }}
     container:  "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest"
