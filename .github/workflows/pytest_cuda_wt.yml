@@ -70,13 +70,17 @@ jobs:
             
             # Get the major and minor version of Python.
             # E.g if JAXCI_HERMETIC_PYTHON_VERSION=3.10, then python_major_minor=310
-            python_major_minor="$(echo "$JAXCI_HERMETIC_PYTHON_VERSION" | tr -d '.')"
+            python_major_minor=$(echo "$JAXCI_HERMETIC_PYTHON_VERSION" | tr -d '.')
 
             echo "OS=${os}" >> $GITHUB_ENV
             echo "ARCH=${arch}" >> $GITHUB_ENV
             echo "PYTHON_MAJOR_MINOR=${python_major_minor}" >> $GITHUB_ENV
       - name: Download the wheel artifacts from GCS
-        run: mkdir -p $(pwd)/dist && gsutil -m cp -r "${{ inputs.gcs_download_uri }}"/*${PYTHON_MAJOR_MINOR}*${OS}*${ARCH}*.whl $(pwd)/dist/
+        run: >-
+          mkdir -p $(pwd)/dist && 
+          gsutil -m cp -r "${{ inputs.gcs_download_uri }}"/jaxlib*${PYTHON_MAJOR_MINOR}*${OS}*${ARCH}*.whl $(pwd)/dist/ &&
+          gsutil -m cp -r "${{ inputs.gcs_download_uri }}"/jax*cuda*plugin*${PYTHON_MAJOR_MINOR}*${OS}*${ARCH}*.whl $(pwd)/dist/ &&
+          gsutil -m cp -r "${{ inputs.gcs_download_uri }}"/jax*cuda*pjrt*${OS}*${ARCH}*.whl $(pwd)/dist/
       - name: Install dependencies
         run: $JAXCI_PYTHON -m pip install -r build/requirements.in
       - name: Run Pytest GPU tests
