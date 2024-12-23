@@ -32,7 +32,7 @@ on:
         required: true
         default: "0"
       gcs_download_uri:
-        description: "GCS location prefix from where the artifacts should be downloaded"
+        description: "GCS location URI from where the artifacts should be downloaded"
         required: false
         default: 'gs://general-ml-ci-transient/jax-github-actions/jax-fork/${{ github.workflow }}/${{ github.run_number }}'
         type: string
@@ -77,7 +77,7 @@ jobs:
           
           # Get the major and minor version of Python.
           # E.g if JAXCI_HERMETIC_PYTHON_VERSION=3.10, then python_major_minor=310
-          python_major_minor="${JAXCI_HERMETIC_PYTHON_VERSION//./}"
+          python_major_minor=$(echo "$JAXCI_HERMETIC_PYTHON_VERSION" | tr -d '.')
 
           echo "OS=${os}" >> $GITHUB_ENV
           echo "ARCH=${arch}" >> $GITHUB_ENV

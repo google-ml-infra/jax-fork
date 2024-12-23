@@ -64,8 +64,7 @@ jobs:
           
           # Get the major and minor version of Python.
           # E.g if JAXCI_HERMETIC_PYTHON_VERSION=3.10, then python_major_minor=310
-          echo 
-          python_major_minor="${JAXCI_HERMETIC_PYTHON_VERSION//./}"
+          python_major_minor=$(echo "$JAXCI_HERMETIC_PYTHON_VERSION" | tr -d '.')
 
           echo "OS=${os}" >> $GITHUB_ENV
           echo "ARCH=${arch}" >> $GITHUB_ENV
