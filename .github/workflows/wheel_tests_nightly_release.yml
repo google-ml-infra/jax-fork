@@ -16,7 +16,7 @@ concurrency:
 
 jobs: 
   run_pytest_cpu:
-    uses: ./.github/workflows/pytest_cpu_wt.yml      
+    uses: ./.github/workflows/pytest_cpu.yml      
     strategy:
         fail-fast: false # don't cancel all jobs on failure
         matrix:
@@ -32,7 +32,7 @@ jobs:
 
 
   run_pytest_gpu:
-    uses: ./.github/workflows/pytest_cuda_wt.yml      
+    uses: ./.github/workflows/pytest_cuda.yml      
     strategy:
         fail-fast: false # don't cancel all jobs on failure
         matrix:

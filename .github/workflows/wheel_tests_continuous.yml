@@ -57,7 +57,7 @@ jobs:
  
   run_pytest_cpu:
     needs: build_jaxlib_artifact
-    uses: ./.github/workflows/pytest_cpu_wt.yml      
+    uses: ./.github/workflows/pytest_cpu.yml      
     strategy:
         fail-fast: false # don't cancel all jobs on failure
         matrix:
@@ -74,7 +74,7 @@ jobs:
 
   run_pytest_gpu:
     needs: [build_jaxlib_artifact, build_cuda_artifacts]
-    uses: ./.github/workflows/pytest_cuda_wt.yml      
+    uses: ./.github/workflows/pytest_cuda.yml      
     strategy:
         fail-fast: false # don't cancel all jobs on failure
         matrix:
@@ -92,7 +92,7 @@ jobs:
 
   run_bazel_test_gpu:
     needs: [build_jaxlib_artifact, build_cuda_artifacts]
-    uses: ./.github/workflows/bazel_cuda_non_rbe_wt.yml      
+    uses: ./.github/workflows/bazel_cuda_non_rbe.yml      
     strategy:
         fail-fast: false # don't cancel all jobs on failure
         matrix:
