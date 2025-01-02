@@ -1,4 +1,4 @@
-name: CI - Wheel Tests
+name: CI - Wheel Tests (Continuous)
 
 on:
   pull_request:
