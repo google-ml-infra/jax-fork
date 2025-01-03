@@ -1,9 +1,6 @@
 name: CI - Pytest CPU
 
 on:
-  pull_request:
-    branches:
-      - main
   workflow_dispatch:
     inputs:
       halt-for-connection:
