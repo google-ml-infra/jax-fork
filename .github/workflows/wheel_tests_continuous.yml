@@ -70,6 +70,7 @@ jobs:
       python: ${{ matrix.python }}
       enable-x64:  ${{ matrix.enable-x64 }}
       gcs_download_uri: 'gs://general-ml-ci-transient/jax-github-actions/jax-fork/${{ github.workflow }}/${{ github.run_number }}'
+      install_jax_current_commit: "1"
 
 
   run_pytest_gpu:
@@ -89,6 +90,7 @@ jobs:
       cuda:  ${{ matrix.cuda }}
       enable-x64:  ${{ matrix.enable-x64 }}
       gcs_download_uri: 'gs://general-ml-ci-transient/jax-github-actions/jax-fork/${{ github.workflow }}/${{ github.run_number }}'
+      install_jax_current_commit: "1"
 
   run_bazel_test_gpu:
     needs: [build_jaxlib_artifact, build_cuda_artifacts]
