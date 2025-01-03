@@ -90,13 +90,13 @@ jobs:
           echo "PYTHON_MAJOR_MINOR=${python_major_minor}" >> $GITHUB_ENV
       - name: Download wheel artifacts from GCS (non-Windows runs)
         if: ${{ !contains(inputs.runner, 'windows-x86') }}
-        run: >-
+        run: |
           mkdir -p $(pwd)/dist &&
           gsutil -m cp -r "${{ inputs.gcs_download_uri }}"/jaxlib*${PYTHON_MAJOR_MINOR}*${OS}*${ARCH}*.whl $(pwd)/dist/
           
           # Download the "jax" wheel from GCS if inputs.install_latest_jax is not set to 1
           if [[ ${{ inputs.install_jax_current_commit }} != 1 ]]; then
-            gsutil -m cp -r "${{ inputs.gcs_download_uri }}"/jax*py3*none*.whl $(pwd)/dist/
+            gsutil -m cp -r "${{ inputs.gcs_download_uri }}"/jax*py3*none*any*.whl $(pwd)/dist/
           fi
       - name: Download the jaxlib wheel from GCS (Windows runs)
         if: ${{ contains(inputs.runner, 'windows-x86') }}

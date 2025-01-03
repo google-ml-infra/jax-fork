@@ -82,7 +82,7 @@ jobs:
             echo "ARCH=${arch}" >> $GITHUB_ENV
             echo "PYTHON_MAJOR_MINOR=${python_major_minor}" >> $GITHUB_ENV
       - name: Download the wheel artifacts from GCS
-        run: >-
+        run: |
           mkdir -p $(pwd)/dist && 
           gsutil -m cp -r "${{ inputs.gcs_download_uri }}"/jaxlib*${PYTHON_MAJOR_MINOR}*${OS}*${ARCH}*.whl $(pwd)/dist/ &&
           gsutil -m cp -r "${{ inputs.gcs_download_uri }}"/jax*cuda*plugin*${PYTHON_MAJOR_MINOR}*${OS}*${ARCH}*.whl $(pwd)/dist/ &&
@@ -90,7 +90,7 @@ jobs:
           
           # Download the "jax" wheel from GCS if 
           if [[ ${{ inputs.install_jax_current_commit }} != 1 ]]; then
-            gsutil -m cp -r "${{ inputs.gcs_download_uri }}"/jax*py3*none*.whl $(pwd)/dist/
+            gsutil -m cp -r "${{ inputs.gcs_download_uri }}"/jax*py3*none*any*.whl $(pwd)/dist/
           fi
       - name: Install dependencies
         run: $JAXCI_PYTHON -m pip install -r build/requirements.in
