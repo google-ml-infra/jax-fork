@@ -36,6 +36,14 @@ on:
         type: string
         required: true
         default: "0"
+      # If enabled, install "jax" at the current commit in editable mode (used in
+      # continuous test jobs). If disabled, installs "jax" from a GCS bucket (used in 
+      # nightly/release test jobs)
+      install_jax_current_commit:
+        description: "Should the 'jax' package be installed at the current commit?"
+        type: string
+        required: true
+        default: "1"
       gcs_download_uri:
         description: "GCS location URI from where the artifacts should be downloaded"
         required: true
@@ -55,6 +63,7 @@ jobs:
       JAXCI_HERMETIC_PYTHON_VERSION: "${{ inputs.python }}"
       JAXCI_PYTHON: "python${{ inputs.python }}"
       JAXCI_ENABLE_X64: ${{ inputs.enable-x64 }}
+      JAXCI_INSTALL_JAX_CURRENT_COMMIT: ${{ inputs.install_jax_current_commit }}
 
     steps:
       - uses: actions/checkout@v4
@@ -81,6 +90,11 @@ jobs:
           gsutil -m cp -r "${{ inputs.gcs_download_uri }}"/jaxlib*${PYTHON_MAJOR_MINOR}*${OS}*${ARCH}*.whl $(pwd)/dist/ &&
           gsutil -m cp -r "${{ inputs.gcs_download_uri }}"/jax*cuda*plugin*${PYTHON_MAJOR_MINOR}*${OS}*${ARCH}*.whl $(pwd)/dist/ &&
           gsutil -m cp -r "${{ inputs.gcs_download_uri }}"/jax*cuda*pjrt*${OS}*${ARCH}*.whl $(pwd)/dist/
+          
+          # Download the "jax" wheel from GCS if 
+          if [[ ${{ inputs.install_jax_current_commit }} != 1 ]]; then
+            gsutil -m cp -r "${{ inputs.gcs_download_uri }}"/jax*py3*none*.whl $(pwd)/dist/
+          fi
       - name: Install dependencies
         run: $JAXCI_PYTHON -m pip install -r build/requirements.in
       - name: Run Pytest GPU tests

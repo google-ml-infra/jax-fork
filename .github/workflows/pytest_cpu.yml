@@ -31,6 +31,14 @@ on:
         type: string
         required: true
         default: "0"
+      # If enabled, install "jax" at the current commit in editable mode (used in
+      # continuous test jobs). If disabled, installs "jax" from a GCS bucket (used in 
+      # nightly/release test jobs)
+      install_jax_current_commit:
+        description: "Should the 'jax' package be installed at the current commit?"
+        type: string
+        required: true
+        default: "1"
       gcs_download_uri:
         description: "GCS location URI from where the artifacts should be downloaded"
         required: false
@@ -55,6 +63,7 @@ jobs:
       JAXCI_HERMETIC_PYTHON_VERSION: "${{ inputs.python }}"
       JAXCI_PYTHON: "python${{ inputs.python }}"
       JAXCI_ENABLE_X64: ${{ inputs.enable-x64 }}
+      JAXCI_INSTALL_JAX_CURRENT_COMMIT: ${{ inputs.install_jax_current_commit }}
 
     
     steps:
@@ -82,17 +91,27 @@ jobs:
           echo "OS=${os}" >> $GITHUB_ENV
           echo "ARCH=${arch}" >> $GITHUB_ENV
           echo "PYTHON_MAJOR_MINOR=${python_major_minor}" >> $GITHUB_ENV
-      - name: Download the jaxlib wheel from GCS (non-Windows runs)
+      - name: Download wheel artifacts from GCS (non-Windows runs)
         if: ${{ !contains(inputs.runner, 'windows-x86') }}
         run: >-
           mkdir -p $(pwd)/dist &&
           gsutil -m cp -r "${{ inputs.gcs_download_uri }}"/jaxlib*${PYTHON_MAJOR_MINOR}*${OS}*${ARCH}*.whl $(pwd)/dist/
+          
+          # Download the "jax" wheel from GCS if inputs.install_latest_jax is not set to 1
+          if [[ ${{ inputs.install_jax_current_commit }} != 1 ]]; then
+            gsutil -m cp -r "${{ inputs.gcs_download_uri }}"/jax*py3*none*.whl $(pwd)/dist/
+          fi
       - name: Download the jaxlib wheel from GCS (Windows runs)
         if: ${{ contains(inputs.runner, 'windows-x86') }}
         shell: cmd
         run: >-
           mkdir dist &&
           gsutil -m cp -r "${{ inputs.gcs_download_uri }}"/jaxlib*${PYTHON_MAJOR_MINOR}*${OS}*${ARCH}*.whl dist/
+          
+          # Download the "jax" wheel from GCS if inputs.install_latest_jax is not set to 1
+          if [[ ${{ inputs.install_jax_current_commit }} != 1 ]]; then
+            gsutil -m cp -r "${{ inputs.gcs_download_uri }}"/jax*py3*none*.whl $(pwd)/dist/
+          fi
       - name: Install dependencies
         run: $JAXCI_PYTHON -m pip install -r build/requirements.in
       - name: Run Pytest CPU tests
