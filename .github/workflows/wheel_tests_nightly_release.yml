@@ -29,6 +29,7 @@ jobs:
       python: ${{ matrix.python }}
       enable-x64:  ${{ matrix.enable-x64 }}
       gcs_download_uri: ${{inputs.gcs_download_uri}}
+      install_jax_current_commit: "0"
 
 
   run_pytest_gpu:
@@ -49,3 +50,4 @@ jobs:
       cuda:  ${{ matrix.cuda }}
       enable-x64:  ${{ matrix.enable-x64 }}
       gcs_download_uri: ${{inputs.gcs_download_uri}}
+      install_jax_current_commit: "0"
