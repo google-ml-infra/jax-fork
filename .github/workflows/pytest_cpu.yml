@@ -39,7 +39,7 @@ on:
       gcs_download_uri:
         description: "GCS location URI from where the artifacts should be downloaded"
         required: false
-        default: 'gs://general-ml-ci-transient/jax-github-actions/jax-fork/${{ github.workflow }}/${{ github.run_number }}'
+        default: 'gs://general-ml-ci-transient/jax-github-actions/jax-fork/${{ github.workflow }}/${{ github.run_number }}/${{ github.run_attempt }}'
         type: string
 
 jobs:
@@ -50,8 +50,8 @@ jobs:
         shell: bash
 
     runs-on: ${{ inputs.runner }}
-    container: ${{ (contains(inputs.runner, 'linux-x86-n2') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest') ||
-                   (contains(inputs.runner, 'linux-x86-t2a') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build-arm64:latest') ||
+    container: ${{ (contains(inputs.runner, 'linux-x86') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest') ||
+                   (contains(inputs.runner, 'linux-arm64') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build-arm64:latest') ||
                    (contains(inputs.runner, 'windows-x86') && null) }}
 
     name: "Pytest CPU (${{ inputs.runner }}, Python ${{ inputs.python }}, x64=${{ inputs.enable-x64 }})"
@@ -88,26 +88,14 @@ jobs:
           echo "OS=${os}" >> $GITHUB_ENV
           echo "ARCH=${arch}" >> $GITHUB_ENV
           echo "PYTHON_MAJOR_MINOR=${python_major_minor}" >> $GITHUB_ENV
-      - name: Download wheel artifacts from GCS (non-Windows runs)
-        if: ${{ !contains(inputs.runner, 'windows-x86') }}
+      - name: Download wheel artifacts from GCS
         run: |
-          mkdir -p $(pwd)/dist &&
-          gsutil -m cp -r "${{ inputs.gcs_download_uri }}"/jaxlib*${PYTHON_MAJOR_MINOR}*${OS}*${ARCH}*.whl $(pwd)/dist/
+          mkdir -p dist &&
+          gsutil -m cp -r "${{ inputs.gcs_download_uri }}/jaxlib*${PYTHON_MAJOR_MINOR}*${OS}*${ARCH}*.whl" dist/
           
           # Download the "jax" wheel from GCS if inputs.install_latest_jax is not set to 1
           if [[ ${{ inputs.install_jax_current_commit }} != 1 ]]; then
-            gsutil -m cp -r "${{ inputs.gcs_download_uri }}"/jax*py3*none*any*.whl $(pwd)/dist/
-          fi
-      - name: Download the jaxlib wheel from GCS (Windows runs)
-        if: ${{ contains(inputs.runner, 'windows-x86') }}
-        shell: cmd
-        run: >-
-          mkdir dist &&
-          gsutil -m cp -r "${{ inputs.gcs_download_uri }}"/jaxlib*${PYTHON_MAJOR_MINOR}*${OS}*${ARCH}*.whl dist/
-          
-          # Download the "jax" wheel from GCS if inputs.install_latest_jax is not set to 1
-          if [[ ${{ inputs.install_jax_current_commit }} != 1 ]]; then
-            gsutil -m cp -r "${{ inputs.gcs_download_uri }}"/jax*py3*none*.whl $(pwd)/dist/
+            gsutil -m cp -r "${{ inputs.gcs_download_uri }}/jax*py3*none*any*.whl" dist/
           fi
       - name: Install dependencies
         run: $JAXCI_PYTHON -m pip install -r build/requirements.in

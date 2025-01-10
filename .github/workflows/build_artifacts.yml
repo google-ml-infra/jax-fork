@@ -53,7 +53,7 @@ on:
         type: string
         required: false
         default: "0"
-      upload_artifacts:
+      upload_artifacts_to_gcs:
         description: "Should the artifacts be uploaded to a GCS bucket?"
         required: false
         default: false
@@ -61,8 +61,12 @@ on:
       gcs_upload_uri:
         description: "GCS location URI to where the artifacts should be uploaded"
         required: false
-        default: ' gs://general-ml-ci-transient/jax-github-actions/jax-fork/${{ github.workflow }}/${{ github.run_number }}'
+        default: ' gs://general-ml-ci-transient/jax-github-actions/jax-fork/${{ github.workflow }}/${{ github.run_number }}/${{ github.run_attempt }}'
         type: string
+    outputs:
+      gcs_upload_uri:
+        description: "GCS location prefix to where the artifacts were uploaded"
+        value: ${{ inputs.gcs_upload_uri }}
 
 jobs:
   build_artifacts:
@@ -95,12 +99,7 @@ jobs:
           halt-dispatch-input: ${{ inputs.halt-for-connection }}
       - name: Build ${{ inputs.artifact }}
         run: ./ci/build_artifacts.sh "${{ inputs.artifact }}"
-      - name: Upload artifacts to GCS bucket (non-Windows)
+      - name: Upload artifacts to GCS bucket
         if: >-
-          ${{ inputs.upload_artifacts && !contains(inputs.runner, 'windows-x86') }}
-        run:  gsutil -m cp -r $(pwd)/dist/*.whl "${{ inputs.gcs_upload_uri }}"/
-      - name: Upload artifacts to GCS bucket (Windows)
-        if: >-
-          ${{ inputs.upload_artifacts &&  contains(inputs.runner, 'windows-x86') }}
-        shell: cmd
-        run:  gsutil -m cp -r dist/*.whl "${{ inputs.gcs_upload_uri }}"/
+          ${{ inputs.upload_artifacts_to_gcs }}
+        run:  gsutil -m cp -r "dist/*.whl" "${{ inputs.gcs_upload_uri }}"/

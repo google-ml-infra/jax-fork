@@ -35,8 +35,8 @@ jobs:
         artifact: ${{ matrix.artifact }}
         python: ${{ matrix.python }}
         clone_main_xla: 1
-        upload_artifacts: true
-        gcs_upload_uri: 'gs://general-ml-ci-transient/jax-github-actions/jax-fork/${{ github.workflow }}/${{ github.run_number }}'
+        upload_artifacts_to_gcs: true
+        gcs_upload_uri: 'gs://general-ml-ci-transient/jax-github-actions/jax-fork/${{ github.workflow }}/${{ github.run_number }}/${{ github.run_attempt }}'
 
   build_cuda_artifacts:
     uses: ./.github/workflows/build_artifacts.yml      
@@ -52,8 +52,8 @@ jobs:
       artifact: ${{ matrix.artifact }}
       python: ${{ matrix.python }}
       clone_main_xla: 1
-      upload_artifacts: true
-      gcs_upload_uri: 'gs://general-ml-ci-transient/jax-github-actions/jax-fork/${{ github.workflow }}/${{ github.run_number }}'
+      upload_artifacts_to_gcs: true
+      gcs_upload_uri: 'gs://general-ml-ci-transient/jax-github-actions/jax-fork/${{ github.workflow }}/${{ github.run_number }}/${{ github.run_attempt }}'
  
   run_pytest_cpu:
     needs: build_jaxlib_artifact
@@ -69,7 +69,7 @@ jobs:
       runner: ${{ matrix.runner }}
       python: ${{ matrix.python }}
       enable-x64:  ${{ matrix.enable-x64 }}
-      gcs_download_uri: 'gs://general-ml-ci-transient/jax-github-actions/jax-fork/${{ github.workflow }}/${{ github.run_number }}'
+      gcs_download_uri: ${{ needs.build_jaxlib_artifact.outputs.gcs_upload_uri }}
       install_jax_current_commit: "1"
 
 
@@ -89,7 +89,8 @@ jobs:
       python: ${{ matrix.python }}
       cuda:  ${{ matrix.cuda }}
       enable-x64:  ${{ matrix.enable-x64 }}
-      gcs_download_uri: 'gs://general-ml-ci-transient/jax-github-actions/jax-fork/${{ github.workflow }}/${{ github.run_number }}'
+       # GCS upload URI is the same for both artifact build jobs
+      gcs_download_uri: ${{ needs.build_jaxlib_artifact.outputs.gcs_upload_uri }}
       install_jax_current_commit: "1"
 
   run_bazel_test_gpu:
@@ -106,4 +107,4 @@ jobs:
       runner: ${{ matrix.runner }}
       python: ${{ matrix.python }}
       enable-x64:  ${{ matrix.enable-x64 }}
-      gcs_download_uri: 'gs://general-ml-ci-transient/jax-github-actions/jax-fork/${{ github.workflow }}/${{ github.run_number }}'
+      gcs_download_uri: ${{ needs.build_jaxlib_artifact.outputs.gcs_upload_uri }}
