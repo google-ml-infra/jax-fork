@@ -95,7 +95,7 @@ jobs:
       - name: Enable Bazel remote cache (with writes enabled) if building on Linux Aarch64
         if: contains(inputs.runner, 'linux-arm64')
         run: echo "JAXCI_WRITE_TO_BAZEL_REMOTE_CACHE=1" >> $GITHUB_ENV
-      # Halt for testing
+      # Halt for testing,
       - name: Wait For Connection
         uses: google-ml-infra/actions/ci_connection@main
         with:
