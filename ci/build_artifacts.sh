@@ -81,7 +81,7 @@ if [[ "${allowed_artifacts[@]}" =~ "${artifact}" ]]; then
     # Build the artifact.
     python build/build.py build --wheels="$artifact" \
            --bazel_options=--config="$bazelrc_config" $remote_cache_flag \
-           --bazel_options=--config --python_version=$JAXCI_HERMETIC_PYTHON_VERSION \
+           --python_version=$JAXCI_HERMETIC_PYTHON_VERSION \
            --verbose --detailed_timestamped_log
 
     # If building `jaxlib` or `jax-cuda-plugin` or `jax-cuda-pjrt` for Linux, we
