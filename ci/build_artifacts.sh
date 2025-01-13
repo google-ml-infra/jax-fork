@@ -66,7 +66,7 @@ if [[ "${allowed_artifacts[@]}" =~ "${artifact}" ]]; then
 
       # Bazel remote cache can be used on platforms with no RBE support. Pushes to
       # the cache bucket is limited to JAX's CI system.
-      if [[ "$JAXCI_WRITE_TO_BAZEL_REMOTE_CACHE" == 1; ]]; then
+      if [[ "$JAXCI_WRITE_TO_BAZEL_REMOTE_CACHE" == 1 ]]; then
         remote_cache_flag="--bazel_options=--config=public_cache_push"
       else
         remote_cache_flag="--bazel_options=--config=public_cache"
