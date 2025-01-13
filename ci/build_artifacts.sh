@@ -56,11 +56,21 @@ if [[ "${allowed_artifacts[@]}" =~ "${artifact}" ]]; then
     # flags in the .bazelrc depending upon the platform we are building for.
     bazelrc_config="${os}_${arch}"
 
-    # TODO(b/379903748): Add remote cache options for Linux and Windows.
+    # Set remote_cache_flag to be empty by default to avoid unbound variable errors
+    remote_cache_flag=""
+
     if [[ "$JAXCI_BUILD_ARTIFACT_WITH_RBE" == 1 ]]; then
       bazelrc_config="rbe_${bazelrc_config}"
     else
       bazelrc_config="ci_${bazelrc_config}"
+
+      # Bazel remote cache can be used on platforms with no RBE support. Pushes to
+      # the cache bucket is limited to JAX's CI system.
+      if [[ "$JAXCI_WRITE_TO_BAZEL_REMOTE_CACHE" == 1; ]]; then
+        remote_cache_flag="--bazel_options=--config=public_cache_push"
+      else
+        remote_cache_flag="--bazel_options=--config=public_cache"
+      fi
     fi
 
     # Use the "_cuda" configs when building the CUDA artifacts.
@@ -69,7 +79,10 @@ if [[ "${allowed_artifacts[@]}" =~ "${artifact}" ]]; then
     fi
 
     # Build the artifact.
-    python build/build.py build --wheels="$artifact" --bazel_options=--config="$bazelrc_config" --python_version=$JAXCI_HERMETIC_PYTHON_VERSION --verbose --detailed_timestamped_log
+    python build/build.py build --wheels="$artifact" \
+           --bazel_options=--config="$bazelrc_config" $remote_cache_flag \
+           --bazel_options=--config --python_version=$JAXCI_HERMETIC_PYTHON_VERSION \
+           --verbose --detailed_timestamped_log
 
     # If building `jaxlib` or `jax-cuda-plugin` or `jax-cuda-pjrt` for Linux, we
     # run `auditwheel show` to verify manylinux compliance.

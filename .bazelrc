@@ -181,6 +181,9 @@ build:macos_cache --remote_cache="https://storage.googleapis.com/tensorflow-maco
 # Cache pushes are limited to JAX's CI system.
 build:macos_cache_push --config=macos_cache --remote_upload_local_results=true --google_default_credentials
 
+build:public_cache --remote_cache="https://storage.googleapis.com/jax-bazel-cache/" --remote_upload_local_results=false
+build:public_cache_push --config=public_cache --remote_upload_local_results=true --google_default_credentials
+
 # #############################################################################
 # CI Build config options below.
 # JAX uses these configs in CI builds for building artifacts and when running
