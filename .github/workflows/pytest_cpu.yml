@@ -47,7 +47,7 @@ jobs:
     defaults:
       run:
         # Explicitly set the shell to bash to override the default Windows environment, i.e, cmd.
-        shell: bash
+        shell: bash -e -o pipefail {0}
 
     runs-on: ${{ inputs.runner }}
     container: ${{ (contains(inputs.runner, 'linux-x86') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest') ||
