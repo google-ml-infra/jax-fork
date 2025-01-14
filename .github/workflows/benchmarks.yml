@@ -23,16 +23,16 @@ jobs:
       options: --gpus all --privileged  # Might need privileged mode, use with caution
 
     steps:
-      # - name: Checkout XLA
-      #   uses: actions/checkout@v3
-      #   with:
-      #     repository: openxla/xla  # Replace with your fork if needed
-      #     path: xla
-      - name: Checkout repository
+      - name: Checkout XLA
         uses: actions/checkout@v3
         with:
-          repository: juliagmt-google/xla  
+          repository: openxla/xla  # Replace with your fork if needed
           path: xla
+      # - name: Checkout repository
+      #   uses: actions/checkout@v3
+      #   with:
+      #     repository: juliagmt-google/xla  
+      #     path: xla
         
       - name: Create results directory
         working-directory: xla
@@ -57,7 +57,7 @@ jobs:
 
       - name: Build hlo_runner_main
         working-directory: xla
-        run: bazel build -c opt --config=cuda --dynamic_mode=off //xla/tools/multihost_hlo_runner:hlo_runner_main
+        run: bazel build -c opt --config=cuda --dynamic_mode=off //xla/tools/multihost_hlo_runner:hlo_runner_main_gpu
         
       # - name: Wait For Connection
       #   uses: google-ml-infra/actions/ci_connection@main
