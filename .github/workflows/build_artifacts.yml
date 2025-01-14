@@ -108,7 +108,9 @@ jobs:
         run:  |
           # Remove after Dockerfile is updated
           if [[ $(uname -s) =~ "MSYS_NT" ]]; then
-            alias gsutil='"C:\Program Files\google-cloud-sdk\bin\gsutil.cmd"'
+            alias gcloud=gcloud.cmd
+            alias gsutil=gsutil.cmd
+            alias bq=bq.cmd
           fi 
           upload_uri="${{ inputs.gcs_upload_uri }}/"
           # Replace spaces with underscore
