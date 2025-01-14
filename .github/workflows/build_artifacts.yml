@@ -61,7 +61,7 @@ on:
       gcs_upload_uri:
         description: "GCS location URI to where the artifacts should be uploaded"
         required: false
-        default: ' gs://general-ml-ci-transient/jax-github-actions/jax-fork/${{ github.workflow }}/${{ github.run_number }}/${{ github.run_attempt }}'
+        default: 'gs://general-ml-ci-transient/jax-github-actions/jax-fork/${{ github.workflow }}/${{ github.run_number }}/${{ github.run_attempt }}'
         type: string
     outputs:
       gcs_upload_uri:
@@ -105,4 +105,13 @@ jobs:
       - name: Upload artifacts to GCS bucket
         if: >-
           ${{ inputs.upload_artifacts_to_gcs }}
-        run:  gsutil -m cp -r "dist/*.whl" "${{ inputs.gcs_upload_uri }}"/
+        run:  |
+          # Remove after Dockerfile is updated
+          if [[ $(uname -s) =~ "MSYS_NT" ]]; then
+            alias gsutil="/c/Program\ Files/google-cloud-sdk/bin/gsutil.cmd"
+          fi 
+          upload_uri="${{ inputs.gcs_upload_uri }}/"
+          # Replace spaces with underscore
+          upload_uri=${upload_uri// /_}
+          
+          gsutil -m cp -r "dist/*.whl" "${upload_uri}"

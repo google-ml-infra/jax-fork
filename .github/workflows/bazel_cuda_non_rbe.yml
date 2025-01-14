@@ -67,10 +67,14 @@ jobs:
           echo "ARCH=${arch}" >> $GITHUB_ENV
           echo "PYTHON_MAJOR_MINOR=${python_major_minor}" >> $GITHUB_ENV
       - name: Download the wheel artifacts from GCS
-        run: >-
+        run: |
+          download_uri="${{ inputs.gcs_download_uri }}"
+          # Replace spaces with underscore
+          download_uri=${download_uri// /_}
+
           mkdir -p $(pwd)/dist && 
-          gsutil -m cp -r "${{ inputs.gcs_download_uri }}/jaxlib*${PYTHON_MAJOR_MINOR}*${OS}*${ARCH}*.whl" $(pwd)/dist/ &&
-          gsutil -m cp -r "${{ inputs.gcs_download_uri }}/jax*cuda*plugin*${PYTHON_MAJOR_MINOR}*${OS}*${ARCH}*.wh"l" $(pwd)/dist/ &&
-          gsutil -m cp -r "${{ inputs.gcs_download_uri }}/jax*cuda*pjrt*${OS}*${ARCH}*.whl" $(pwd)/dist/
+          gsutil -m cp -r "${download_uri}/jaxlib*${PYTHON_MAJOR_MINOR}*${OS}*${ARCH}*.whl" $(pwd)/dist/ &&
+          gsutil -m cp -r "${download_uri}/jax*cuda*plugin*${PYTHON_MAJOR_MINOR}*${OS}*${ARCH}*.wh"l" $(pwd)/dist/ &&
+          gsutil -m cp -r "${download_uri}/jax*cuda*pjrt*${OS}*${ARCH}*.whl" $(pwd)/dist/
       - name: Run Bazel tests
         run: ./ci/run_bazel_test_gpu_non_rbe.sh 

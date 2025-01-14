@@ -90,12 +90,21 @@ jobs:
           echo "PYTHON_MAJOR_MINOR=${python_major_minor}" >> $GITHUB_ENV
       - name: Download wheel artifacts from GCS
         run: |
+          # Remove after Dockerfile is updated
+          if [[ $(uname -s) =~ "MSYS_NT" ]]; then
+            alias gsutil="/c/Program\ Files/google-cloud-sdk/bin/gsutil.cmd"
+          fi 
+
+          download_uri="${{ inputs.gcs_download_uri }}"
+          # Replace spaces with underscore
+          download_uri=${download_uri// /_}
+
           mkdir -p dist &&
-          gsutil -m cp -r "${{ inputs.gcs_download_uri }}/jaxlib*${PYTHON_MAJOR_MINOR}*${OS}*${ARCH}*.whl" dist/
+          gsutil -m cp -r "${download_uri}/jaxlib*${PYTHON_MAJOR_MINOR}*${OS}*${ARCH}*.whl" dist/
           
           # Download the "jax" wheel from GCS if inputs.install_latest_jax is not set to 1
           if [[ ${{ inputs.install_jax_current_commit }} != 1 ]]; then
-            gsutil -m cp -r "${{ inputs.gcs_download_uri }}/jax*py3*none*any*.whl" dist/
+            gsutil -m cp -r "${download_uri}/jax*py3*none*any*.whl" dist/
           fi
       - name: Install dependencies
         run: $JAXCI_PYTHON -m pip install -r build/requirements.in
