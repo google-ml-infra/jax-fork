@@ -54,10 +54,15 @@ jobs:
       - name: Check TF_CPP_MAX_VLOG_LEVEL
         working-directory: xla
         run: echo "$TF_CPP_MAX_VLOG_LEVEL"
+      - name: Wait For Connection
+        uses: google-ml-infra/actions/ci_connection@main
+        with:
+          halt-dispatch-input: ${{ inputs.halt-for-connection }}
 
-      - name: Build hlo_runner_main
-        working-directory: xla
-        run: bazel build -c opt --config=cuda --dynamic_mode=off //xla/tools/multihost_hlo_runner:hlo_runner_main_gpu
+
+      # - name: Build hlo_runner_main
+      #   working-directory: xla
+      #   run: bazel build -c opt --config=cuda --dynamic_mode=off //xla/tools/multihost_hlo_runner:hlo_runner_main_gpu
         
       # - name: Wait For Connection
       #   uses: google-ml-infra/actions/ci_connection@main
