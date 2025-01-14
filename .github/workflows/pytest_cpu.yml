@@ -92,7 +92,7 @@ jobs:
         run: |
           # Remove after Dockerfile is updated
           if [[ $(uname -s) =~ "MSYS_NT" ]]; then
-            alias gsutil="/c/Program\ Files/google-cloud-sdk/bin/gsutil.cmd"
+            alias gsutil='"C:\Program Files\google-cloud-sdk\bin\gsutil.cmd"'
           fi 
 
           download_uri="${{ inputs.gcs_download_uri }}"
