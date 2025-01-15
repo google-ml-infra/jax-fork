@@ -60,16 +60,20 @@ jobs:
           halt-dispatch-input: ${{ inputs.halt-for-connection }}
 
 
-      # - name: Build hlo_runner_main
-      #   working-directory: xla
-      #   run: bazel build -c opt --config=cuda --dynamic_mode=off //xla/tools/multihost_hlo_runner:hlo_runner_main_gpu
+      - name: Build hlo_runner_main
+        working-directory: xla
+        run: bazel build -c opt --config=cuda --dynamic_mode=off //xla/tools/multihost_hlo_runner:hlo_runner_main_gpu
+
+      - name: Build test_gpu_profiler
+        working-directory: xla
+        run: bazel build -c opt --config=cuda --dynamic_mode=off //xla/tools/multihost_hlo_runner:test_gpu_profiler
         
       # - name: Wait For Connection
       #   uses: google-ml-infra/actions/ci_connection@main
       #   with:
       #     halt-dispatch-input: ${{ inputs.halt-for-connection }}
 
-      - name: Create gemm_006f564ad71b327343de5f090e801883.hlo
+      - name: Create isolated_convolution.hlo
         working-directory: xla
         run: |
           cat << EOF > isolated_convolution.hlo
@@ -81,10 +85,10 @@ jobs:
           }
           EOF
 
-      - name: Wait For Connection
-        uses: google-ml-infra/actions/ci_connection@main
-        with:
-          halt-dispatch-input: ${{ inputs.halt-for-connection }}
+      # - name: Wait For Connection
+      #   uses: google-ml-infra/actions/ci_connection@main
+      #   with:
+      #     halt-dispatch-input: ${{ inputs.halt-for-connection }}
 
       # - name: Run specific HLO file
       #   working-directory: xla
@@ -98,6 +102,11 @@ jobs:
         working-directory: xla
         run: |
           nvidia-smi --query-gpu=utilization.gpu --format=csv -l 1 > results/gpu_utilization.log & ./bazel-bin/xla/tools/multihost_hlo_runner/hlo_runner_main_gpu --device_type=gpu --log_output=True --use_spmd_partitioning isolated_convolution.hlo &> results/isolated_convolution.hlo.log
+
+      - name: Run test_gpu_profiler
+        working-directory: xla
+        run: |
+          nvidia-smi --query-gpu=utilization.gpu --format=csv -l 1 > results/gpu_utilization_profiler.log & ./bazel-bin/xla/tools/multihost_hlo_runner/test_gpu_profiler &> results/test_gpu_profiler.log
       - name: Wait For Connection
         uses: google-ml-infra/actions/ci_connection@main
         with:
