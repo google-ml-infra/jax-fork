@@ -54,15 +54,18 @@ jobs:
       - name: Check TF_CPP_MAX_VLOG_LEVEL
         working-directory: xla
         run: echo "$TF_CPP_MAX_VLOG_LEVEL"
-      - name: Wait For Connection
-        uses: google-ml-infra/actions/ci_connection@main
-        with:
-          halt-dispatch-input: ${{ inputs.halt-for-connection }}
+      # - name: Wait For Connection
+      #   uses: google-ml-infra/actions/ci_connection@main
+      #   with:
+      #     halt-dispatch-input: ${{ inputs.halt-for-connection }}
 
 
-      - name: Build hlo_runner_main
+      - name: Build hlo_runner_main_gpu
         working-directory: xla
         run: bazel build -c opt --config=cuda --dynamic_mode=off //xla/tools/multihost_hlo_runner:hlo_runner_main_gpu
+      - name: Build hlo_runner_main
+        working-directory: xla
+        run: bazel build -c opt --config=cuda --dynamic_mode=off //xla/tools/multihost_hlo_runner:hlo_runner_main
 
       - name: Build test_gpu_profiler
         working-directory: xla
@@ -93,15 +96,20 @@ jobs:
       # - name: Run specific HLO file
       #   working-directory: xla
       #   run: |
-      #     nvidia-smi --query-gpu=utilization.gpu --format=csv -l 1 > gpu_utilization.log & ./bazel-bin/xla/tools/multihost_hlo_runner/hlo_runner_main_gpu --device_type=gpu --log_output=True --use_spmd_partitioning gemm_00881937d6d49056045c3325a12b108b.hlo &> results/gemm_00881937d6d49056045c3325a12b108b.log
+      #     nvidia-smi --query-gpu=utilization.gpu --format=csv -l 1 > gpu_utilization.log & bazel run -c opt --config=cuda --dynamic_mode=off //xla/tools/multihost_hlo_runner:hlo_runner_main_gpu -- --device_type=gpu --log_output=True --use_spmd_partitioning isolated_convolution.hlo &> results/isolated_convolution.log
       # - name: Wait For Connection
       #   uses: google-ml-infra/actions/ci_connection@main
       #   with:
       #     halt-dispatch-input: ${{ inputs.halt-for-connection }}
-      - name: Run specific HLO file
+      - name: Run specific HLO file hlo_runner_main_gpu
         working-directory: xla
         run: |
-          nvidia-smi --query-gpu=utilization.gpu --format=csv -l 1 > results/gpu_utilization.log & ./bazel-bin/xla/tools/multihost_hlo_runner/hlo_runner_main_gpu --device_type=gpu --log_output=True --use_spmd_partitioning isolated_convolution.hlo &> results/isolated_convolution.hlo.log
+           nvidia-smi --query-gpu=utilization.gpu --format=csv -l 1 > results.gpu_utilization.log & bazel run -c opt --config=cuda --dynamic_mode=off //xla/tools/multihost_hlo_runner:hlo_runner_main_gpu -- --device_type=gpu --log_output=True --use_spmd_partitioning isolated_convolution.hlo &> results/hlo_runner_main_gpu_isolated_convolution.log
+
+      - name: Run specific HLO file hlo_runner_main
+        working-directory: xla
+        run: |
+           nvidia-smi --query-gpu=utilization.gpu --format=csv -l 1 > results/gpu_utilization_v2.log & bazel run -c opt --config=cuda --dynamic_mode=off //xla/tools/multihost_hlo_runner:hlo_runner_main -- --device_type=gpu --log_output=True --use_spmd_partitioning isolated_convolution.hlo &> results/hlo_runner_main_isolated_convolution.log
 
       - name: Run test_gpu_profiler
         working-directory: xla
