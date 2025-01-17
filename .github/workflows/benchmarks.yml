@@ -54,10 +54,10 @@ jobs:
       - name: Check TF_CPP_MAX_VLOG_LEVEL
         working-directory: xla
         run: echo "$TF_CPP_MAX_VLOG_LEVEL"
-      - name: Wait For Connection
-        uses: google-ml-infra/actions/ci_connection@main
-        with:
-          halt-dispatch-input: ${{ inputs.halt-for-connection }}
+      # - name: Wait For Connection
+      #   uses: google-ml-infra/actions/ci_connection@main
+      #   with:
+      #     halt-dispatch-input: ${{ inputs.halt-for-connection }}
 
       - name: Build hlo_runner_main
         working-directory: xla
@@ -89,10 +89,10 @@ jobs:
         run: |
            nvidia-smi --query-gpu=utilization.gpu --format=csv -l 1 > results/gpu_utilization_v2.log & ./bazel-bin/xla/tools/multihost_hlo_runner/hlo_runner_main --device_type=gpu --use_spmd_partitioning gpu_hlo_backend.hlo &> results/gpu_hlo_backend.log
 
-      - name: Wait For Connection
-        uses: google-ml-infra/actions/ci_connection@main
-        with:
-          halt-dispatch-input: ${{ inputs.halt-for-connection }}
+      # - name: Wait For Connection
+      #   uses: google-ml-infra/actions/ci_connection@main
+      #   with:
+      #     halt-dispatch-input: ${{ inputs.halt-for-connection }}
 
       - name: Download parse_xla_logs.py
         working-directory: xla
