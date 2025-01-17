@@ -68,27 +68,26 @@ jobs:
       #   with:
       #     halt-dispatch-input: ${{ inputs.halt-for-connection }}
 
-      - name: Create dot_dot_f32_f32_f32.hlo
+      - name: Create gpu_hlo_backend.hlo
         working-directory: xla
         run: |
-          cat << EOF > dot_dot_f32_f32_f32.hlo
-          HloModule dot_dot_f32_f32_f32
-          ENTRY main {
-            p_0 = f32[16,512,222264] parameter(0)
-            p_1 = f32[16,256,222264] parameter(1)
-            ROOT dot = f32[16,512,256] dot(p_0, p_1),
-              lhs_batch_dims={0},
-              lhs_contracting_dims={2},
-              rhs_batch_dims={0},
-              rhs_contracting_dims={2},
-              algorithm=dot_f32_f32_f32
+          cat << EOF > gpu_hlo_backend.hlo
+          HloModule module
+          // CHECK: is_scheduled=true
+          
+          ENTRY computation {
+              p = f32[5000,6000]{1,0} parameter(0)
+              e = f32[5000,6000]{1,0} sqrt(p)
+              c = f32[6000,5000] transpose(p), dimensions={1,0}
+              r = f32[300,20,5000] reshape(c)
+              ROOT out = (f32[5000,6000], f32[300,20,5000]) tuple(e,r)
           }
           EOF
 
       - name: Run specific HLO file
         working-directory: xla
         run: |
-           nvidia-smi --query-gpu=utilization.gpu --format=csv -l 1 > results/gpu_utilization_v2.log & ./bazel-bin/xla/tools/multihost_hlo_runner/hlo_runner_main --device_type=gpu --use_spmd_partitioning dot_dot_f32_f32_f32.hlo &> results/dot_dot_f32_f32_f32.log
+           nvidia-smi --query-gpu=utilization.gpu --format=csv -l 1 > results/gpu_utilization_v2.log & ./bazel-bin/xla/tools/multihost_hlo_runner/hlo_runner_main --device_type=gpu --use_spmd_partitioning gpu_hlo_backend.hlo &> results/gpu_hlo_backend.log
 
       - name: Wait For Connection
         uses: google-ml-infra/actions/ci_connection@main
@@ -101,7 +100,7 @@ jobs:
 
       - name: Parse XLA logs
         working-directory: xla
-        run: python parse_xla_logs.py results/dot_dot_f32_f32_f32.log
+        run: python parse_xla_logs.py results/gpu_hlo_backend.log
 
       - name: Upload Results
         uses: actions/upload-artifact@v4
