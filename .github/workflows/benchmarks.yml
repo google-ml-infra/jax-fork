@@ -54,10 +54,6 @@ jobs:
       - name: Check TF_CPP_MAX_VLOG_LEVEL
         working-directory: xla
         run: echo "$TF_CPP_MAX_VLOG_LEVEL"
-      # - name: Wait For Connection
-      #   uses: google-ml-infra/actions/ci_connection@main
-      #   with:
-      #     halt-dispatch-input: ${{ inputs.halt-for-connection }}
 
       - name: Build hlo_runner_main
         working-directory: xla
@@ -68,39 +64,50 @@ jobs:
       #   with:
       #     halt-dispatch-input: ${{ inputs.halt-for-connection }}
 
-      - name: Create gpu_hlo_backend.hlo
+      - name: Create gemm_006f564ad71b327343de5f090e801883.hlo
         working-directory: xla
         run: |
-          cat << EOF > gpu_hlo_backend.hlo
-          HloModule module
-          // CHECK: is_scheduled=true
+          cat << EOF > gemm_00881937d6d49056045c3325a12b108b.hlo
+          HloModule gemm_fusion_dot.542, entry_computation_layout={(bf16[1,8192,3072]{2,1,0}, s8[3072,6,512]{2,1,0})->bf16[1,8192,6,512]{3,2,1,0}}
+          %gemm_fusion_dot.542_computation.clone (parameter_0.543: bf16[1,8192,3072], parameter_1.543: s8[3072,6,512]) -> bf16[1,8192,6,512] {
+            %parameter_0.543 = bf16[1,8192,3072]{2,1,0} parameter(0)
+            %bitcast.69925 = bf16[8192,3072]{1,0} bitcast(bf16[1,8192,3072]{2,1,0} %parameter_0.543)
+            %parameter_1.543 = s8[3072,6,512]{2,1,0} parameter(1)
+            %bitcast.69926 = s8[3072,3072]{1,0} bitcast(s8[3072,6,512]{2,1,0} %parameter_1.543)
+            %convert.18528 = bf16[3072,3072]{1,0} convert(s8[3072,3072]{1,0} %bitcast.69926), metadata={op_name="pjit(_wrapped_fn)/jit(main)/tarzan_lm.apply/tarzan_lm.decode_with_params/lm/transformer/x_layers_0/self_attention/query/query.quantized_einsum/ABD,DNH->ABNH/convert_element_type[new_dtype=bfloat16 weak_type=False]" source_file="third_party/py/praxis/layers/quantization/operations.py" source_line=220}
+            %dot.4949 = bf16[8192,3072]{1,0} dot(bf16[8192,3072]{1,0} %bitcast.69925, bf16[3072,3072]{1,0} %convert.18528), lhs_contracting_dims={1}, rhs_contracting_dims={0}, metadata={op_name="pjit(_wrapped_fn)/jit(main)/tarzan_lm.apply/tarzan_lm.decode_with_params/lm/transformer/x_layers_0/self_attention/query/query.quantized_einsum/ABD,DNH->ABNH/dot_general[dimension_numbers=(((2,), (0,)), ((), ())) precision=None preferred_element_type=None]" source_file="third_party/py/praxis/layers/quantization/operations.py" source_line=220}
+            ROOT %bitcast.69927 = bf16[1,8192,6,512]{3,2,1,0} bitcast(bf16[8192,3072]{1,0} %dot.4949)
+          }
           
-          ENTRY computation {
-              p = f32[5000,6000]{1,0} parameter(0)
-              e = f32[5000,6000]{1,0} sqrt(p)
-              c = f32[6000,5000] transpose(p), dimensions={1,0}
-              r = f32[300,20,5000] reshape(c)
-              ROOT out = (f32[5000,6000], f32[300,20,5000]) tuple(e,r)
+          ENTRY %entry_computation (multiply.28104: bf16[1,8192,3072], Arg_51.52: s8[3072,6,512]) -> bf16[1,8192,6,512] {
+            %multiply.28104 = bf16[1,8192,3072]{2,1,0} parameter(0)
+            %Arg_51.52 = s8[3072,6,512]{2,1,0} parameter(1)
+            ROOT %micro_kernel = bf16[1,8192,6,512]{3,2,1,0} fusion(bf16[1,8192,3072]{2,1,0} %multiply.28104, s8[3072,6,512]{2,1,0} %Arg_51.52), kind=kCustom, calls=%gemm_fusion_dot.542_computation.clone, metadata={op_name="pjit(_wrapped_fn)/jit(main)/tarzan_lm.apply/tarzan_lm.decode_with_params/lm/transformer/x_layers_0/self_attention/query/query.quantized_einsum/ABD,DNH->ABNH/dot_general[dimension_numbers=(((2,), (0,)), ((), ())) precision=None preferred_element_type=None]" source_file="third_party/py/praxis/layers/quantization/operations.py" source_line=220}, backend_config={"operation_queue_id":"0","wait_on_operation_queues":[],"fusion_backend_config":{"kind":"__triton_gemm"},"force_earliest_schedule":false}
           }
           EOF
-
-      - name: Run specific HLO file
+          
+      - name: Wait For Connection
+        uses: google-ml-infra/actions/ci_connection@main
+        with:
+          halt-dispatch-input: ${{ inputs.halt-for-connection }}
+          
+      - name: Run an HLO file
         working-directory: xla
         run: |
-           nvidia-smi --query-gpu=utilization.gpu --format=csv -l 1 > results/gpu_utilization_v2.log & ./bazel-bin/xla/tools/multihost_hlo_runner/hlo_runner_main --device_type=gpu --use_spmd_partitioning gpu_hlo_backend.hlo &> results/gpu_hlo_backend.log
-
-      # - name: Wait For Connection
-      #   uses: google-ml-infra/actions/ci_connection@main
-      #   with:
-      #     halt-dispatch-input: ${{ inputs.halt-for-connection }}
-
+          ./bazel-bin/xla/tools/multihost_hlo_runner/hlo_runner_main --device_type=gpu --log_output=True --use_spmd_partitioning gemm_00881937d6d49056045c3325a12b108b.hlo &> results/gemm_00881937d6d49056045c3325a12b108b.hlo.log
+    
+      - name: Wait For Connection
+        uses: google-ml-infra/actions/ci_connection@main
+        with:
+          halt-dispatch-input: ${{ inputs.halt-for-connection }}
+   
       - name: Download parse_xla_logs.py
         working-directory: xla
         run: wget https://raw.githubusercontent.com/juliagmt-google/xla/main/.github/workflows/parse_xla_logs.py  
 
       - name: Parse XLA logs
         working-directory: xla
-        run: python parse_xla_logs.py results/gpu_hlo_backend.log
+        run: python parse_xla_logs.py results/gemm_00881937d6d49056045c3325a12b108b.hlo.log
 
       - name: Upload Results
         uses: actions/upload-artifact@v4
