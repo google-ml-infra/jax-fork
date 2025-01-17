@@ -21,6 +21,11 @@ jobs:
           repository: 'google-ml-infra/jax-fork'
           path: jax-fork
 
+      - name: ls
+        working-directory: jax-fork
+        run: |
+          ls -l
+
       - name: Sleep
         working-directory: jax-fork
         run: |
