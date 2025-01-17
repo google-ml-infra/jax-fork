@@ -29,4 +29,4 @@ jobs:
       - name: Sleep
         working-directory: jax-fork
         run: |
-          while true; do echo "Something"; sleep 10; done
+          ls abcd
