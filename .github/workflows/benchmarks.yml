@@ -38,9 +38,11 @@ jobs:
         working-directory: xla
         run: mkdir -p results
       - name: Run test script
+        working-directory: xla
         run: |
           echo "This is a test." > results/test.log
       - name: Check file contents
+        working-directory: xla
         run: cat results/test.log
         
       # - name: Get GPU spec
