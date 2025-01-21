@@ -37,13 +37,6 @@ jobs:
       - name: Create results directory
         working-directory: xla
         run: mkdir -p results
-      - name: Run test script
-        working-directory: xla
-        run: |
-          echo "This is a test." > results/test.log
-      - name: Check file contents
-        working-directory: xla
-        run: cat results/test.log
         
       # - name: Get GPU spec
       #   working-directory: xla
@@ -61,6 +54,10 @@ jobs:
       - name: Check TF_CPP_MAX_VLOG_LEVEL
         working-directory: xla
         run: echo "$TF_CPP_MAX_VLOG_LEVEL"
+      - name: Wait For Connection
+        uses: google-ml-infra/actions/ci_connection@main
+        with:
+          halt-dispatch-input: ${{ inputs.halt-for-connection }}
       - name: Wait For Connection
         uses: google-ml-infra/actions/ci_connection@main
         with:
