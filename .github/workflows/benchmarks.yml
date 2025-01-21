@@ -41,12 +41,14 @@ jobs:
         run: pip install kaggle
 
       - name: Create Kaggle directory and config file
+        working-directory: xla
         run: |
           mkdir -p ~/.kaggle
           echo "{\"username\":\"${{ secrets.KAGGLE_USERNAME }}\",\"key\":\"${{ secrets.KAGGLE_KEY }}\"}" > ~/.kaggle/kaggle.json
           chmod 600 ~/.kaggle/kaggle.json
 
       - name: List Kaggle datasets
+        working-directory: xla
         run: kaggle datasets download -d zillow/zecon
           
       # - name: Get GPU spec
