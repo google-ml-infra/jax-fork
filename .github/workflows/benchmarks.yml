@@ -37,7 +37,18 @@ jobs:
       - name: Create results directory
         working-directory: xla
         run: mkdir -p results
-        
+      - name: Install Kaggle API client
+        run: pip install kaggle
+
+      - name: Create Kaggle directory and config file
+        run: |
+          mkdir -p ~/.kaggle
+          echo "{\"username\":\"${{ secrets.KAGGLE_USERNAME }}\",\"key\":\"${{ secrets.KAGGLE_KEY }}\"}" > ~/.kaggle/kaggle.json
+          chmod 600 ~/.kaggle/kaggle.json
+
+      - name: List Kaggle datasets
+        run: kaggle datasets download -d zillow/zecon
+          
       # - name: Get GPU spec
       #   working-directory: xla
       #   continue-on-error: true
