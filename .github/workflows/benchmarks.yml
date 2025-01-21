@@ -37,6 +37,11 @@ jobs:
       - name: Create results directory
         working-directory: xla
         run: mkdir -p results
+      - name: Run test script
+        run: |
+          echo "This is a test." > results/test.log
+      - name: Check file contents
+        run: cat results/test.log
         
       # - name: Get GPU spec
       #   working-directory: xla
@@ -92,7 +97,7 @@ jobs:
       - name: Run an HLO file
         working-directory: xla
         run: |
-          nvidia-smi --query-gpu=utilization.gpu --format=csv -l 1 > results/gpu_utilization_gpu_backend.log & ./bazel-bin/xla/tools/multihost_hlo_runner/hlo_runner_main --device_type=gpu --log_output=True --use_spmd_partitioning gpu_hlo_backend.hlo &> results/gpu_hlo_backend.hlo.log
+          nvidia-smi --query-gpu=utilization.gpu --format=csv -l 1 > results/gpu_utilization_gpu_backend.log & ./bazel-bin/xla/tools/multihost_hlo_runner/hlo_runner_main --device_type=gpu --log_output=True --use_spmd_partitioning gpu_hlo_backend.hlo
 
           cd results
           ls
