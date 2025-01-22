@@ -97,7 +97,7 @@ jobs:
 
       - name: Parse XLA logs
         working-directory: xla
-        run: python parse_xla_logs.py results/gpu_hlo_backend.hlo.log
+        run: python parse_xla_logs.py results/gpu_hlo_backend.log
 
       - name: Upload Results
         uses: actions/upload-artifact@v4
