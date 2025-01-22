@@ -81,15 +81,15 @@ jobs:
         with:
           halt-dispatch-input: ${{ inputs.halt-for-connection }}
           
-      - name: Run an HLO file
-        working-directory: xla
-        run: |
-          ./bazel-bin/xla/tools/multihost_hlo_runner/hlo_runner_main --device_type=gpu --log_output=True --use_spmd_partitioning gpu_hlo_backend.hlo  &> results/gpu_hlo_backend.log
+      # - name: Run an HLO file
+      #   working-directory: xla
+      #   run: |
+      #     ./bazel-bin/xla/tools/multihost_hlo_runner/hlo_runner_main --device_type=gpu --log_output=True --use_spmd_partitioning gpu_hlo_backend.hlo  &> results/gpu_hlo_backend.log
     
-      - name: Wait For Connection
-        uses: google-ml-infra/actions/ci_connection@main
-        with:
-          halt-dispatch-input: ${{ inputs.halt-for-connection }}
+      # - name: Wait For Connection
+      #   uses: google-ml-infra/actions/ci_connection@main
+      #   with:
+      #     halt-dispatch-input: ${{ inputs.halt-for-connection }}
    
       - name: Download parse_xla_logs.py
         working-directory: xla
