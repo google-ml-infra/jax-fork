@@ -46,11 +46,11 @@ jobs:
       #   with:
       #     bazel-version: 'latest'
 
-      - name: Install updates and Python env
-        working-directory: xla/xla/backends/cpu/benchmarks/e2e/gemma2/flax_2b
-        run: |
-          sudo apt-get update
-          sudo apt install python3.10-venv
+      # - name: Install updates and Python env
+      #   working-directory: xla/xla/backends/cpu/benchmarks/e2e/gemma2/flax_2b
+      #   run: |
+      #     sudo apt-get update
+      #     sudo apt install python3.10-venv
 
       - name: Run setup.sh for E2E benchmarks flax_2b
         working-directory: xla/xla/backends/cpu/benchmarks/e2e/gemma2/flax_2b
