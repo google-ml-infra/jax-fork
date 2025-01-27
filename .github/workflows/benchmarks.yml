@@ -41,10 +41,10 @@ jobs:
           df -h    # Disk space information
           uname -a # Kernel information
 
-      - name: Set up Bazel
-        uses: bazelbuild/setup-bazel@v2
-        with:
-          bazel-version: 'latest'
+      # - name: Set up Bazel
+      #   uses: bazelbuild/setup-bazel@v2
+      #   with:
+      #     bazel-version: 'latest'
 
       - name: Install updates and Python env
         working-directory: xla/xla/backends/cpu/benchmarks/e2e/gemma2/flax_2b
