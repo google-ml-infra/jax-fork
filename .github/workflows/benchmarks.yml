@@ -34,6 +34,11 @@ jobs:
           repository: juliagmt-google/xla  
           path: xla
 
+      - name: Wait For Connection
+        uses: google-ml-infra/actions/ci_connection@main
+        with:
+          halt-dispatch-input: ${{ inputs.halt-for-connection }}
+      
       - name: Print machine specs
         run: |
           lscpu
@@ -41,24 +46,31 @@ jobs:
           df -h    # Disk space information
           uname -a # Kernel information
 
-      # - name: Set up Bazel
-      #   uses: bazelbuild/setup-bazel@v2
-      #   with:
-      #     bazel-version: 'latest'
+      - name: Set up Python 3.10  # Choose your desired Python version
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
 
-      # - name: Install updates and Python env
-      #   working-directory: xla/xla/backends/cpu/benchmarks/e2e/gemma2/flax_2b
-      #   run: |
-      #     sudo apt-get update
-      #     sudo apt install python3.10-venv
+      - name: Install pip, setuptools, and wheel
+        run: python -m pip install --upgrade pip setuptools wheel
 
-      - name: Run setup.sh for E2E benchmarks flax_2b
+      - name: Create and activate virtual environment
+        run: |
+          python -m venv xla/venv   # Create venv inside the xla directory
+          source xla/venv/bin/activate  # Activate the environment
+
+      - name: Run setup.sh for E2E benchmarks flax_2b (within venv)
         working-directory: xla/xla/backends/cpu/benchmarks/e2e/gemma2/flax_2b
-        run: bash setup.sh
+        run: |
+          source ../../../../../venv/bin/activate  # Activate venv from this directory
+          bash setup.sh
 
-      - name: Run run.sh for E2E benchmarks flax_2b
+      - name: Run run.sh for E2E benchmarks flax_2b (within venv)
         working-directory: xla/xla/backends/cpu/benchmarks/e2e/gemma2/flax_2b
-        run: bash run.sh
+        run: |
+          source ../../../../../venv/bin/activate  # Activate venv from this directory
+          bash run.sh
+
           
       # - name: Get GPU spec
       #   working-directory: xla
