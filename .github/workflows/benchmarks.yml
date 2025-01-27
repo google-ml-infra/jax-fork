@@ -23,16 +23,16 @@ jobs:
       options: --gpus all --privileged  # Might need privileged mode, use with caution
 
     steps:
-      # - name: Checkout XLA
-      #   uses: actions/checkout@v3
-      #   with:
-      #     repository: openxla/xla  # Replace with your fork if needed
-      #     path: xla
-      - name: Checkout repository
+      - name: Checkout XLA
         uses: actions/checkout@v3
         with:
-          repository: juliagmt-google/xla  
+          repository: openxla/xla  # Replace with your fork if needed
           path: xla
+      # - name: Checkout repository
+      #   uses: actions/checkout@v3
+      #   with:
+      #     repository: juliagmt-google/xla  
+      #     path: xla
 
       # - name: Wait For Connection
       #   uses: google-ml-infra/actions/ci_connection@main
@@ -45,14 +45,15 @@ jobs:
           free -h  # Memory information
           df -h    # Disk space information
           uname -a # Kernel information
+          
+      - name: Create results directory
+        working-directory: xla
+        run: mkdir results
 
       - name: Set up Python 3.10  # Choose your desired Python version
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
-
-      # - name: Install pip, setuptools, and wheel
-      #   run: python -m pip install --upgrade pip setuptools wheel
 
       - name: Create and activate virtual environment
         shell: bash  # Force the use of bash
@@ -67,11 +68,48 @@ jobs:
 
       - name: Run run.sh for E2E benchmarks flax_2b (within venv)
         working-directory: xla/xla/backends/cpu/benchmarks/e2e/gemma2/flax_2b
-        timeout-minutes: 30  # Set the timeout to 30 minutes
+        timeout-minutes: 30
+        shell: bash
         run: |
-          bash run.sh
+          source ../../../../../venv/bin/activate
+          output=$(bash run.sh)
+          echo "$output"
+      
+          # Extract metrics using Python and regex
+          python - << EOF
+            import re
+            import json
+            
+            text = \"\"\"${output}\"\"\"
+            
+            ttft_pattern = r"TTFT: ([\d.]+) ms ± ([\d.]+)%"
+            e2e_latency_pattern = r"E2E Latency: ([\d.]+) ms ± ([\d.]+)%"
+            tpot_pattern = r"TPOT: ([\d.]+) ms"
+            
+            ttft_match = re.search(ttft_pattern, text)
+            e2e_latency_match = re.search(e2e_latency_pattern, text)
+            tpot_match = re.search(tpot_pattern, text)
+            
+            metrics = {
+                "TTFT": {"value": ttft_match.group(1) if ttft_match else None, "std_dev": ttft_match.group(2) if ttft_match else None},
+                "E2E Latency": {"value": e2e_latency_match.group(1) if e2e_latency_match else None, "std_dev": e2e_latency_match.group(2) if e2e_latency_match else None},
+                "TPOT": {"value": tpot_match.group(1) if tpot_match else None},
+            }
+            
+            with open("metrics.json", "w") as f:
+                json.dump(metrics, f, indent=4)
+            
+            print(f"::set-output name=metrics::{json.dumps(metrics)}")
+            EOF
+            
+          # Copy the metrics.json file to the results directory
+          cp metrics.json xla/results/
 
-          
+
+      - name: Wait For Connection
+        uses: google-ml-infra/actions/ci_connection@main
+        with:
+          halt-dispatch-input: ${{ inputs.halt-for-connection }}
       # - name: Get GPU spec
       #   working-directory: xla
       #   continue-on-error: true
@@ -137,11 +175,11 @@ jobs:
       #   working-directory: xla
       #   run: python parse_xla_logs.py results/gpu_hlo_backend.log
 
-      # - name: Upload Results
-      #   uses: actions/upload-artifact@v4
-      #   with:
-      #     name: gpu-xla-benchmarks
-      #     path: xla/results
+      - name: Upload Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-xla-benchmarks
+          path: xla/results
   # # jax-build-and-test:
   # #   runs-on: linux-x86-g2-48-l4-4gpu # Use a GPU-enabled runner
   # #   container:
