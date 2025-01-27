@@ -33,23 +33,49 @@ jobs:
         with:
           repository: juliagmt-google/xla  
           path: xla
+
+      - name: Print machine specs
+        run: |
+          lscpu
+          free -h  # Memory information
+          df -h    # Disk space information
+          uname -a # Kernel information
+
+      - name: Set up Bazel
+        uses: bazelbuild/setup-bazel@v2
+        with:
+          bazel-version: 'latest'
+
+      - name: Install updates and Python env
+        working-directory: xla/xla/backends/cpu/benchmarks/e2e/gemma2/flax_2b
+        run: |
+          sudo apt-get update
+          sudo apt install python3.10-venv
+
+      - name: Run setup.sh for E2E benchmarks flax_2b
+        working-directory: xla/xla/backends/cpu/benchmarks/e2e/gemma2/flax_2b
+        run: bash setup.sh
+
+      - name: Run run.sh for E2E benchmarks flax_2b
+        working-directory: xla/xla/backends/cpu/benchmarks/e2e/gemma2/flax_2b
+        run: bash run.sh
           
-      - name: Get GPU spec
-        working-directory: xla
-        continue-on-error: true
-        run: nvidia-smi
+      # - name: Get GPU spec
+      #   working-directory: xla
+      #   continue-on-error: true
+      #   run: nvidia-smi
         
-      - name: Configure XLA
-        working-directory: xla
-        run: ./configure.py --backend CUDA --nccl
+      # - name: Configure XLA
+      #   working-directory: xla
+      #   run: ./configure.py --backend CUDA --nccl
 
-      - name: Set TF_CPP_MAX_VLOG_LEVEL
-        working-directory: xla
-        run: echo "TF_CPP_MAX_VLOG_LEVEL=1" >> $GITHUB_ENV  # Use GITHUB_ENV to persist across steps
+      # - name: Set TF_CPP_MAX_VLOG_LEVEL
+      #   working-directory: xla
+      #   run: echo "TF_CPP_MAX_VLOG_LEVEL=1" >> $GITHUB_ENV  # Use GITHUB_ENV to persist across steps
 
-      - name: Check TF_CPP_MAX_VLOG_LEVEL
-        working-directory: xla
-        run: echo "$TF_CPP_MAX_VLOG_LEVEL"
+      # - name: Check TF_CPP_MAX_VLOG_LEVEL
+      #   working-directory: xla
+      #   run: echo "$TF_CPP_MAX_VLOG_LEVEL"
 
       # - name: Build hlo_runner_main
       #   working-directory: xla
