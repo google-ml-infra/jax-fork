@@ -67,6 +67,7 @@ jobs:
 
       - name: Run run.sh for E2E benchmarks flax_2b (within venv)
         working-directory: xla/xla/backends/cpu/benchmarks/e2e/gemma2/flax_2b
+        timeout-minutes: 30  # Set the timeout to 30 minutes
         run: |
           bash run.sh
 
@@ -97,26 +98,26 @@ jobs:
       #   with:
       #     halt-dispatch-input: ${{ inputs.halt-for-connection }}
 
-      - name: Create gpu_hlo_backend.hlo
-        working-directory: xla
-        run: |
-          cat << EOF > gpu_hlo_backend.hlo
-          HloModule module
-          // CHECK: is_scheduled=true
+      # - name: Create gpu_hlo_backend.hlo
+      #   working-directory: xla
+      #   run: |
+      #     cat << EOF > gpu_hlo_backend.hlo
+      #     HloModule module
+      #     // CHECK: is_scheduled=true
           
-          ENTRY computation {
-              p = f32[5000,6000]{1,0} parameter(0)
-              e = f32[5000,6000]{1,0} sqrt(p)
-              c = f32[6000,5000] transpose(p), dimensions={1,0}
-              r = f32[300,20,5000] reshape(c)
-              ROOT out = (f32[5000,6000], f32[300,20,5000]) tuple(e,r)
-          }
-          EOF
+      #     ENTRY computation {
+      #         p = f32[5000,6000]{1,0} parameter(0)
+      #         e = f32[5000,6000]{1,0} sqrt(p)
+      #         c = f32[6000,5000] transpose(p), dimensions={1,0}
+      #         r = f32[300,20,5000] reshape(c)
+      #         ROOT out = (f32[5000,6000], f32[300,20,5000]) tuple(e,r)
+      #     }
+      #     EOF
           
-      - name: Wait For Connection
-        uses: google-ml-infra/actions/ci_connection@main
-        with:
-          halt-dispatch-input: ${{ inputs.halt-for-connection }}
+      # - name: Wait For Connection
+      #   uses: google-ml-infra/actions/ci_connection@main
+      #   with:
+      #     halt-dispatch-input: ${{ inputs.halt-for-connection }}
           
       # - name: Run an HLO file
       #   working-directory: xla
@@ -128,19 +129,19 @@ jobs:
       #   with:
       #     halt-dispatch-input: ${{ inputs.halt-for-connection }}
    
-      - name: Download parse_xla_logs.py
-        working-directory: xla
-        run: wget https://raw.githubusercontent.com/juliagmt-google/xla/main/.github/workflows/parse_xla_logs.py  
+      # - name: Download parse_xla_logs.py
+      #   working-directory: xla
+      #   run: wget https://raw.githubusercontent.com/juliagmt-google/xla/main/.github/workflows/parse_xla_logs.py  
 
-      - name: Parse XLA logs
-        working-directory: xla
-        run: python parse_xla_logs.py results/gpu_hlo_backend.log
+      # - name: Parse XLA logs
+      #   working-directory: xla
+      #   run: python parse_xla_logs.py results/gpu_hlo_backend.log
 
-      - name: Upload Results
-        uses: actions/upload-artifact@v4
-        with:
-          name: gpu-xla-benchmarks
-          path: xla/results
+      # - name: Upload Results
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: gpu-xla-benchmarks
+      #     path: xla/results
   # # jax-build-and-test:
   # #   runs-on: linux-x86-g2-48-l4-4gpu # Use a GPU-enabled runner
   # #   container:
