@@ -75,39 +75,39 @@ jobs:
           output=$(bash run.sh)
           echo "$output"
 
-    # Extract metrics using Python and regex
-    python - << EOF
-import re
-import json
+          # Extract metrics using Python and regex
+          python - << EOF
+          import re
+          import json
+          
+          text = \"\"\"${output}\"\"\"
+          
+          ttft_pattern = r"TTFT: ([\d.]+) ms ± ([\d.]+)%"
+          e2e_latency_pattern = r"E2E Latency: ([\d.]+) ms ± ([\d.]+)%"
+          tpot_pattern = r"TPOT: ([\d.]+) ms"
+          
+          ttft_match = re.search(ttft_pattern, text)
+          e2e_latency_match = re.search(e2e_latency_pattern, text)
+          tpot_match = re.search(tpot_pattern, text)
+          
+          metrics = {
+              "TTFT": {"value": ttft_match.group(1) if ttft_match else None, "std_dev": ttft_match.group(2) if ttft_match else None},
+              "E2E Latency": {"value": e2e_latency_match.group(1) if e2e_latency_match else None, "std_dev": e2e_latency_match.group(2) if e2e_latency_match else None},
+              "TPOT": {"value": tpot_match.group(1) if tpot_match else None},
+          }
+          
+          with open("metrics.json", "w") as f:
+              json.dump(metrics, f, indent=4)
+          
+          print(f"::set-output name=metrics::{json.dumps(metrics)}")
+          EOF
 
-text = \"\"\"${output}\"\"\"
-
-ttft_pattern = r"TTFT: ([\d.]+) ms ± ([\d.]+)%"
-e2e_latency_pattern = r"E2E Latency: ([\d.]+) ms ± ([\d.]+)%"
-tpot_pattern = r"TPOT: ([\d.]+) ms"
-
-ttft_match = re.search(ttft_pattern, text)
-e2e_latency_match = re.search(e2e_latency_pattern, text)
-tpot_match = re.search(tpot_pattern, text)
-
-metrics = {
-    "TTFT": {"value": ttft_match.group(1) if ttft_match else None, "std_dev": ttft_match.group(2) if ttft_match else None},
-    "E2E Latency": {"value": e2e_latency_match.group(1) if e2e_latency_match else None, "std_dev": e2e_latency_match.group(2) if e2e_latency_match else None},
-    "TPOT": {"value": tpot_match.group(1) if tpot_match else None},
-}
-
-with open("metrics.json", "w") as f:
-    json.dump(metrics, f, indent=4)
-
-print(f"::set-output name=metrics::{json.dumps(metrics)}")
-EOF
-
-    # Upload metrics as an artifact (optional)
-    # Create the results directory if it doesn't exist
-    mkdir -p ../../../../../results
-
-    # Copy the metrics.json file to the results directory
-    cp metrics.json ../../../../../results/
+          # Upload metrics as an artifact (optional)
+          # Create the results directory if it doesn't exist
+          mkdir -p ../../../../../results
+      
+          # Copy the metrics.json file to the results directory
+          cp metrics.json ../../../../../results/
 
       - name: Wait For Connection
         uses: google-ml-infra/actions/ci_connection@main
