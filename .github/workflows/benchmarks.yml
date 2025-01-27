@@ -55,6 +55,7 @@ jobs:
         run: python -m pip install --upgrade pip setuptools wheel
 
       - name: Create and activate virtual environment
+        working-directory: xla
         run: |
           python -m venv xla/venv   # Create venv inside the xla directory
           source xla/venv/bin/activate  # Activate the environment
