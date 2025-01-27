@@ -63,13 +63,11 @@ jobs:
       - name: Run setup.sh for E2E benchmarks flax_2b (within venv)
         working-directory: xla/xla/backends/cpu/benchmarks/e2e/gemma2/flax_2b
         run: |
-          source ../../../../../venv/bin/activate  # Activate venv from this directory
           bash setup.sh
 
       - name: Run run.sh for E2E benchmarks flax_2b (within venv)
         working-directory: xla/xla/backends/cpu/benchmarks/e2e/gemma2/flax_2b
         run: |
-          source ../../../../../venv/bin/activate  # Activate venv from this directory
           bash run.sh
 
           
