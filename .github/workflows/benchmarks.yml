@@ -63,6 +63,8 @@ jobs:
 
       - name: Run setup.sh for E2E benchmarks flax_2b (within venv)
         working-directory: xla/xla/backends/cpu/benchmarks/e2e/gemma2/flax_2b
+        timeout-minutes: 60
+        shell: bash
         run: |
           bash setup.sh
           bash run.sh > ../../../../../../../results/flax_2b.log
