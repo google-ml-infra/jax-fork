@@ -64,7 +64,6 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
-          distribution: 'temurin'
 
       - name: Run setup.sh for E2E benchmarks flax_2b (within venv)
         working-directory: xla/xla/backends/cpu/benchmarks/e2e/gemma2/flax_2b
