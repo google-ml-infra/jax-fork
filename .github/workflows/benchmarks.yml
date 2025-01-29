@@ -83,7 +83,7 @@ jobs:
       #     bash run.sh > ../../../../../../results/flax_2b.log
 
       - name: Build run_hlo_module
-        working-directory: xla
+        working-directory: xla/xla
         run: bazel build -c opt --dynamic_mode=off xla/tools:run_hlo_module
 
 
