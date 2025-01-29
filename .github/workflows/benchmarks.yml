@@ -70,10 +70,10 @@ jobs:
       #   run: |
       #     bash setup.sh
           
-      - name: Wait For Connection
-        uses: google-ml-infra/actions/ci_connection@main
-        with:
-          halt-dispatch-input: ${{ inputs.halt-for-connection }}
+      # - name: Wait For Connection
+      #   uses: google-ml-infra/actions/ci_connection@main
+      #   with:
+      #     halt-dispatch-input: ${{ inputs.halt-for-connection }}
 
       # - name: Run run.sh for E2E benchmarks flax_2b (within venv)
       #   working-directory: xla/backends/cpu/benchmarks/e2e/gemma2/flax_2b
@@ -83,11 +83,11 @@ jobs:
       #     bash run.sh > ../../../../../../results/flax_2b.log
 
       - name: Build run_hlo_module
-        working-directory: openxla
-        run: bazelisk build -c opt --dynamic_mode=off xla/tools:run_hlo_module
+        working-directory: openxla/xla
+        run: bazel build -c opt --dynamic_mode=off xla/tools:run_hlo_module
 
       - name: Run HLO Module Benchmarks
-        working-directory: openxla
+        working-directory: openxla/xla
         continue-on-error: true
         run: |
           for file in xla/tests/fuzz/*.hlo; do
