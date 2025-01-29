@@ -84,7 +84,7 @@ jobs:
 
       - name: Build run_hlo_module
         working-directory: xla
-        run: bazelisk build -c opt --dynamic_mode=off xla/tools:run_hlo_module
+        run: bazel build -c opt --dynamic_mode=off xla/tools:run_hlo_module
 
 
       # - name: Wait For Connection
