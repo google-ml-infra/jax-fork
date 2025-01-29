@@ -27,7 +27,6 @@ jobs:
         uses: actions/checkout@v3
         with:
           repository: openxla/xla  # Replace with your fork if needed
-          path: xla
       # - name: Checkout repository
       #   uses: actions/checkout@v3
       #   with:
@@ -66,7 +65,7 @@ jobs:
           python-version: '3.10'
 
       - name: Run setup.sh for E2E benchmarks flax_2b (within venv)
-        working-directory: xla/xla/backends/cpu/benchmarks/e2e/gemma2/flax_2b
+        working-directory: xla/backends/cpu/benchmarks/e2e/gemma2/flax_2b
         shell: bash
         run: |
           bash setup.sh
@@ -77,11 +76,11 @@ jobs:
       #     halt-dispatch-input: ${{ inputs.halt-for-connection }}
 
       - name: Run run.sh for E2E benchmarks flax_2b (within venv)
-        working-directory: xla/xla/backends/cpu/benchmarks/e2e/gemma2/flax_2b
+        working-directory: xla/backends/cpu/benchmarks/e2e/gemma2/flax_2b
         timeout-minutes: 30
         shell: bash
         run: |
-          bash run.sh > ../../../../../../../results/flax_2b.log
+          bash run.sh > ../../../../../../results/flax_2b.log
 
       # - name: Wait For Connection
       #   uses: google-ml-infra/actions/ci_connection@main
