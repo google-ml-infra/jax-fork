@@ -101,29 +101,29 @@ jobs:
       #       ./bazel-bin/xla/tools/run_hlo_module --input_format=hlo --platform=CPU "$file"
       #     done
 
-      - name: Build CPU Benchmarks
-        working-directory: xla
-        run: bazel build -c opt --dynamic_mode=off //xla/backends/cpu/benchmarks:*
+      # - name: Build CPU Benchmarks
+      #   working-directory: xla
+      #   run: bazel build -c opt --dynamic_mode=off //xla/backends/cpu/benchmarks:*
 
-      - name: Run CPU benchmarks
-        working-directory: xla
-        continue-on-error: true
-        run: |
-          find ./bazel-bin/xla/backends/cpu/benchmarks/ -maxdepth 1 -type f -executable -name "*_test" -print0 | while IFS= read -r -d $'\0' benchmark; do
-            benchmark_name=$(basename "$benchmark" | sed 's/_test$//') 
-            echo "Running benchmark: $benchmark_name"
+      # - name: Run CPU benchmarks
+      #   working-directory: xla
+      #   continue-on-error: true
+      #   run: |
+      #     find ./bazel-bin/xla/backends/cpu/benchmarks/ -maxdepth 1 -type f -executable -name "*_test" -print0 | while IFS= read -r -d $'\0' benchmark; do
+      #       benchmark_name=$(basename "$benchmark" | sed 's/_test$//') 
+      #       echo "Running benchmark: $benchmark_name"
 
-            # Run the benchmark with default parameters.
-            $benchmark --benchmark_filter=".*"
-            $benchmark --benchmark_filter=".*" > "results/$benchmark_name.log" 2>&1
+      #       # Run the benchmark with default parameters.
+      #       $benchmark --benchmark_filter=".*"
+      #       $benchmark --benchmark_filter=".*" > "results/$benchmark_name.log" 2>&1
 
-            # Check the exit code of the benchmark
-            if [ $? -ne 0 ]; then
-              echo "Error: Benchmark '$benchmark_name' failed. Check the log file: results/$benchmark_name.log"
-            else
-              echo "Benchmark '$benchmark_name' completed successfully."
-            fi
-          done
+      #       # Check the exit code of the benchmark
+      #       if [ $? -ne 0 ]; then
+      #         echo "Error: Benchmark '$benchmark_name' failed. Check the log file: results/$benchmark_name.log"
+      #       else
+      #         echo "Benchmark '$benchmark_name' completed successfully."
+      #       fi
+      #     done
 
 
       # - name: Wait For Connection
