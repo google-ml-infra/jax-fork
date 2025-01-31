@@ -20,6 +20,9 @@ name: CI - Wheel Tests (Continuous)
 on:
   schedule:
     - cron: "0 */2 * * *" # Run once every 2 hours
+  pull_request:
+    branches:
+      - main  
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
@@ -112,8 +115,4 @@ jobs:
       runner: ${{ matrix.runner }}
       python: ${{ matrix.python }}
       enable-x64:  ${{ matrix.enable-x64 }}
-<<<<<<< HEAD
       gcs_download_uri: ${{ needs.build_jaxlib_artifact.outputs.gcs_upload_uri }}
-=======
-      gcs_download_uri: 'gs://general-ml-ci-transient/jax-github-actions/jax-fork/${{ github.workflow }}/${{ github.run_number }}'
->>>>>>> 14246134e7f2ec1ae4eaba8a70315a0fc2e73cd4
