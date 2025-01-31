@@ -34,16 +34,8 @@ else
   "$JAXCI_PYTHON" -m pip install "${WHEELS[@]}"
 fi
 
-<<<<<<< HEAD
-if [[ $JAXCI_INSTALL_JAX_CURRENT_COMMIT == "1" ]]; then
-  echo "Installing the JAX package in editable mode at the current commit..."
-  # Install JAX package at the current commit.
-  "$JAXCI_PYTHON" -m pip install -U -e .
-fi 
-=======
 if [[ "$JAXCI_INSTALL_JAX_CURRENT_COMMIT" == "1" ]]; then
   echo "Installing the JAX package in editable mode at the current commit..."
   # Install JAX package at the current commit.
   "$JAXCI_PYTHON" -m pip install -U -e .
 fi
->>>>>>> 14246134e7f2ec1ae4eaba8a70315a0fc2e73cd4
