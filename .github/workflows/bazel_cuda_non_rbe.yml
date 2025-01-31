@@ -34,17 +34,16 @@ on:
         required: true
         default: 'gs://general-ml-ci-transient/jax-github-actions/jax-fork/${{ github.workflow }}/${{ github.run_number }}/${{ github.run_attempt }}'
         type: string
-
+      halt-for-connection:
+        description: 'Should this workflow run wait for a remote connection?'
+        type: boolean
+        required: false
+        default: false
 
 jobs:
   run-tests:
     runs-on: ${{ inputs.runner }}
-<<<<<<< HEAD
-
     container: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build-cudnn:720686788"
-=======
-    container: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest"
->>>>>>> 14246134e7f2ec1ae4eaba8a70315a0fc2e73cd4
 
     env:
       JAXCI_HERMETIC_PYTHON_VERSION: ${{ inputs.python }}
@@ -69,19 +68,6 @@ jobs:
           echo "ARCH=${arch}" >> $GITHUB_ENV
           echo "PYTHON_MAJOR_MINOR=${python_major_minor}" >> $GITHUB_ENV
       - name: Download the wheel artifacts from GCS
-<<<<<<< HEAD
-        run: |
-          download_uri="${{ inputs.gcs_download_uri }}"
-          # Replace spaces with underscore
-          download_uri=${download_uri// /_}
-
-          mkdir -p $(pwd)/dist && 
-          gsutil -m cp -r "${download_uri}/jaxlib*${PYTHON_MAJOR_MINOR}*${OS}*${ARCH}*.whl" $(pwd)/dist/ &&
-          gsutil -m cp -r "${download_uri}/jax*cuda*plugin*${PYTHON_MAJOR_MINOR}*${OS}*${ARCH}*.wh"l" $(pwd)/dist/ &&
-          gsutil -m cp -r "${download_uri}/jax*cuda*pjrt*${OS}*${ARCH}*.whl" $(pwd)/dist/
-      - name: Run Bazel tests
-        run: ./ci/run_bazel_test_gpu_non_rbe.sh 
-=======
         run: >-
           mkdir -p $(pwd)/dist &&
           gsutil -m cp -r "${{ inputs.gcs_download_uri }}/jaxlib*${PYTHON_MAJOR_MINOR}*${OS}*${ARCH}*.whl" $(pwd)/dist/ &&
@@ -95,4 +81,3 @@ jobs:
       - name: Run Bazel CUDA tests (Non-RBE)
         timeout-minutes: 60
         run: ./ci/run_bazel_test_cuda_non_rbe.sh
->>>>>>> 14246134e7f2ec1ae4eaba8a70315a0fc2e73cd4
