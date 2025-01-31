@@ -159,18 +159,18 @@ jobs:
       # - name: Create gpu_hlo_backend.hlo
       #   working-directory: xla
       #   run: |
-          cat << EOF > gpu_hlo_backend.hlo
-          HloModule module
-          // CHECK: is_scheduled=true
+          # cat << EOF > gpu_hlo_backend.hlo
+          # HloModule module
+          # // CHECK: is_scheduled=true
           
-          ENTRY computation {
-              p = f32[5000,6000]{1,0} parameter(0)
-              e = f32[5000,6000]{1,0} sqrt(p)
-              c = f32[6000,5000] transpose(p), dimensions={1,0}
-              r = f32[300,20,5000] reshape(c)
-              ROOT out = (f32[5000,6000], f32[300,20,5000]) tuple(e,r)
-          }
-          EOF
+          # ENTRY computation {
+          #     p = f32[5000,6000]{1,0} parameter(0)
+          #     e = f32[5000,6000]{1,0} sqrt(p)
+          #     c = f32[6000,5000] transpose(p), dimensions={1,0}
+          #     r = f32[300,20,5000] reshape(c)
+          #     ROOT out = (f32[5000,6000], f32[300,20,5000]) tuple(e,r)
+          # }
+          # EOF
           
       # - name: Wait For Connection
       #   uses: google-ml-infra/actions/ci_connection@main
