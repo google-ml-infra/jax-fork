@@ -89,15 +89,16 @@ class PgleTest(jtu.JaxTestCase):
     mesh = jtu.create_mesh((2,), ('x',))
     its = 500
 
+    compiler_options = {
+        'xla_gpu_enable_latency_hiding_scheduler': 'True',
+    }
+    # TODO(b/37664749): Remove this flag once the bug is fixed.
+    compiler_options['xla_gpu_enable_command_buffer'] = ''
     @partial(
         jax.jit,
         in_shardings=NamedSharding(mesh, PartitionSpec('x')),
         out_shardings=NamedSharding(mesh, PartitionSpec('x')),
-        compiler_options={
-            'xla_gpu_enable_latency_hiding_scheduler': 'True',
-            # TODO(b/37664749): Remove this flag once the bug is fixed.
-            'xla_gpu_enable_command_buffer': '',
-        },
+        compiler_options=compiler_options,
     )
     def f(x):
       agg = x
@@ -127,15 +128,17 @@ class PgleTest(jtu.JaxTestCase):
     mesh = jtu.create_mesh((2,), ('x',))
 
     with tempfile.TemporaryDirectory() as dump_dir:
+      compile_options = {
+          'xla_gpu_enable_latency_hiding_scheduler': 'True',
+          'xla_dump_to': dump_dir,
+          'xla_gpu_experimental_dump_fdo_profiles': 'True',
+      }
+      # TODO(b/376647494): Remove this flag once the bug is fixed.
       @partial(
           jax.jit,
           in_shardings=NamedSharding(mesh, PartitionSpec('x')),
           out_shardings=NamedSharding(mesh, PartitionSpec('x')),
-          compiler_options={
-              'xla_gpu_enable_latency_hiding_scheduler': 'True',
-              'xla_dump_to': dump_dir,
-              'xla_gpu_experimental_dump_fdo_profiles': 'True'
-          },
+          compiler_options=compile_options,
       )
       def f(x):
         return x * 2
@@ -209,15 +212,17 @@ class PgleTest(jtu.JaxTestCase):
     mesh = jtu.create_mesh((2,), ('x',))
 
     with tempfile.TemporaryDirectory() as dump_dir:
+      compiler_options = {
+          'xla_gpu_enable_latency_hiding_scheduler': 'True',
+          'xla_dump_to': dump_dir,
+          'xla_gpu_experimental_dump_fdo_profiles': 'True',
+      }
+      # TODO(b/376647494): Remove this flag once the bug is fixed.
       @partial(
           jax.jit,
           in_shardings=NamedSharding(mesh, PartitionSpec('x')),
           out_shardings=NamedSharding(mesh, PartitionSpec('x')),
-          compiler_options={
-              'xla_gpu_enable_latency_hiding_scheduler': 'True',
-              'xla_dump_to': dump_dir,
-              'xla_gpu_experimental_dump_fdo_profiles': 'True'
-          },
+          compiler_options=compiler_options,
       )
       def f(x):
         agg = x

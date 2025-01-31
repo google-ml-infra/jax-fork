@@ -19,7 +19,7 @@ load(
     "//jaxlib:jax.bzl",
     "cuda_library",
     "if_cuda_is_configured",
-    "pybind_extension",
+    "nanobind_extension",
 )
 
 licenses(["notice"])
@@ -125,7 +125,7 @@ cc_library(
     ],
 )
 
-pybind_extension(
+nanobind_extension(
     name = "_blas",
     srcs = ["//jaxlib/gpu:blas.cc"],
     copts = [
@@ -133,13 +133,6 @@ pybind_extension(
         "-fno-strict-aliasing",
     ],
     features = ["-use_header_modules"],
-    linkopts = select({
-        "@xla//xla/python:use_jax_cuda_pip_rpaths": [
-            "-Wl,-rpath,$$ORIGIN/../../nvidia/cuda_runtime/lib",
-            "-Wl,-rpath,$$ORIGIN/../../nvidia/cublas/lib",
-        ],
-        "//conditions:default": [],
-    }),
     module_name = "_blas",
     deps = [
         ":cublas_kernels",
@@ -173,7 +166,7 @@ cc_library(
     ],
 )
 
-pybind_extension(
+nanobind_extension(
     name = "_rnn",
     srcs = ["//jaxlib/gpu:rnn.cc"],
     copts = [
@@ -265,7 +258,7 @@ cc_library(
     ],
 )
 
-pybind_extension(
+nanobind_extension(
     name = "_solver",
     srcs = ["//jaxlib/gpu:solver.cc"],
     copts = [
@@ -273,14 +266,6 @@ pybind_extension(
         "-fno-strict-aliasing",
     ],
     features = ["-use_header_modules"],
-    linkopts = select({
-        "@xla//xla/python:use_jax_cuda_pip_rpaths": [
-            "-Wl,-rpath,$$ORIGIN/../../nvidia/cuda_runtime/lib",
-            "-Wl,-rpath,$$ORIGIN/../../nvidia/cusolver/lib",
-            "-Wl,-rpath,$$ORIGIN/../../nvidia/cublas/lib",
-        ],
-        "//conditions:default": [],
-    }),
     module_name = "_solver",
     deps = [
         ":cuda_gpu_kernel_helpers",
@@ -321,7 +306,7 @@ cc_library(
     ],
 )
 
-pybind_extension(
+nanobind_extension(
     name = "_sparse",
     srcs = ["//jaxlib/gpu:sparse.cc"],
     copts = [
@@ -329,13 +314,6 @@ pybind_extension(
         "-fno-strict-aliasing",
     ],
     features = ["-use_header_modules"],
-    linkopts = select({
-        "@xla//xla/python:use_jax_cuda_pip_rpaths": [
-            "-Wl,-rpath,$$ORIGIN/../../nvidia/cuda_runtime/lib",
-            "-Wl,-rpath,$$ORIGIN/../../nvidia/cusparse/lib",
-        ],
-        "//conditions:default": [],
-    }),
     module_name = "_sparse",
     deps = [
         ":cuda_gpu_kernel_helpers",
@@ -399,7 +377,7 @@ cuda_library(
     ],
 )
 
-pybind_extension(
+nanobind_extension(
     name = "_linalg",
     srcs = ["//jaxlib/gpu:linalg.cc"],
     copts = [
@@ -457,7 +435,7 @@ cuda_library(
     ],
 )
 
-pybind_extension(
+nanobind_extension(
     name = "_prng",
     srcs = ["//jaxlib/gpu:prng.cc"],
     copts = [
@@ -497,7 +475,7 @@ cc_library(
     ],
 )
 
-pybind_extension(
+nanobind_extension(
     name = "_hybrid",
     srcs = ["//jaxlib/gpu:hybrid.cc"],
     copts = [
@@ -505,12 +483,6 @@ pybind_extension(
         "-fno-strict-aliasing",
     ],
     features = ["-use_header_modules"],
-    linkopts = select({
-        "@xla//xla/python:use_jax_cuda_pip_rpaths": [
-            "-Wl,-rpath,$$ORIGIN/../../nvidia/cuda_runtime/lib",
-        ],
-        "//conditions:default": [],
-    }),
     module_name = "_hybrid",
     deps = [
         ":cuda_gpu_kernel_helpers",
@@ -518,6 +490,7 @@ pybind_extension(
         ":cuda_vendor",
         "//jaxlib:kernel_nanobind_helpers",
         "//jaxlib/cpu:lapack_kernels",
+        "@com_google_absl//absl/base",
         "@local_config_cuda//cuda:cuda_headers",
         "@nanobind",
         "@xla//xla/ffi/api:ffi",
@@ -588,7 +561,7 @@ cc_library(
     ],
 )
 
-pybind_extension(
+nanobind_extension(
     name = "_triton",
     srcs = ["//jaxlib/gpu:triton.cc"],
     copts = [
@@ -596,12 +569,6 @@ pybind_extension(
         "-fno-strict-aliasing",
     ],
     features = ["-use_header_modules"],
-    linkopts = select({
-        "@xla//xla/python:use_jax_cuda_pip_rpaths": [
-            "-Wl,-rpath,$$ORIGIN/../../nvidia/cuda_runtime/lib",
-        ],
-        "//conditions:default": [],
-    }),
     module_name = "_triton",
     deps = [
         ":cuda_gpu_kernel_helpers",
@@ -639,7 +606,7 @@ cc_library(
     ],
 )
 
-pybind_extension(
+nanobind_extension(
     name = "_versions",
     srcs = ["versions.cc"],
     copts = [
@@ -647,18 +614,6 @@ pybind_extension(
         "-fno-strict-aliasing",
     ],
     features = ["-use_header_modules"],
-    linkopts = select({
-        "@xla//xla/python:use_jax_cuda_pip_rpaths": [
-            "-Wl,-rpath,$$ORIGIN/../../nvidia/cuda_cupti/lib",
-            "-Wl,-rpath,$$ORIGIN/../../nvidia/cuda_runtime/lib",
-            "-Wl,-rpath,$$ORIGIN/../../nvidia/cublas/lib",
-            "-Wl,-rpath,$$ORIGIN/../../nvidia/cufft/lib",
-            "-Wl,-rpath,$$ORIGIN/../../nvidia/cudnn/lib",
-            "-Wl,-rpath,$$ORIGIN/../../nvidia/cusolver/lib",
-            "-Wl,-rpath,$$ORIGIN/../../nvidia/cusparse/lib",
-        ],
-        "//conditions:default": [],
-    }),
     module_name = "_versions",
     deps = [
         ":cuda_gpu_kernel_helpers",

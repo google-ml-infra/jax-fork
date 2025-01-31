@@ -25,15 +25,18 @@ os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.5"
 from absl.testing import absltest
 from absl.testing import parameterized
 import jax
+import jax.export
 from jax import lax
 from jax import random
 from jax._src import api_util
 from jax._src import checkify
 from jax._src import config
+from jax._src import core as jax_core
 from jax._src import dtypes
 from jax._src import test_util as jtu
 from jax._src.lax.control_flow.for_loop import for_loop
 from jax._src.pallas import core as pallas_core
+from jax._src.pallas import pallas_call
 from jax._src.pallas.pallas_call import _trace_kernel_to_jaxpr
 from jax.experimental import pallas as pl
 import jax.numpy as jnp
@@ -41,8 +44,10 @@ import numpy as np
 
 if sys.platform != "win32":
   from jax.experimental.pallas import tpu as pltpu
+  from jax.experimental.pallas import triton as plgpu
 else:
   pltpu = None
+  plgpu = None
 
 
 # TODO(sharadmv): Update signatures of pallas_call to correct inputs/outputs.
@@ -548,8 +553,10 @@ class PallasCallTest(PallasBaseTest):
     k1, k2 = random.split(random.key(0))
     x = random.normal(k1, (m, k), dtype=dtype)
     y = random.normal(k2, (k, n), dtype=dtype)
-    out, expected = matmul(x, y, bm=bm, bn=bn, bk=bk, gm=gm,
-                           interpret=self.INTERPRET), jnp.matmul(x, y)
+    out = matmul(x, y, bm=bm, bn=bn, bk=bk, gm=gm,
+                 interpret=self.INTERPRET)
+    expected = jnp.matmul(
+            x, y, preferred_element_type=jnp.float32).astype(dtype)
     np.testing.assert_allclose(out, expected, atol=0.05, rtol=0.05)
 
   @parameterized.named_parameters(*[
@@ -571,8 +578,10 @@ class PallasCallTest(PallasBaseTest):
     k1, k2 = random.split(random.key(0))
     x = random.normal(k1, (m, k), dtype=dtype)
     y = random.normal(k2, (k, n), dtype=dtype)
-    out, expected = matmul_block_spec(x, y, bm=bm, bn=bn, bk=bk,
-                                      interpret=self.INTERPRET), jnp.matmul(x, y)
+    out = matmul_block_spec(x, y, bm=bm, bn=bn, bk=bk,
+                            interpret=self.INTERPRET)
+    expected = jnp.matmul(
+            x, y, preferred_element_type=jnp.float32).astype(dtype)
     np.testing.assert_allclose(out, expected, atol=0.05, rtol=0.05)
 
   @parameterized.named_parameters(*(
@@ -724,6 +733,20 @@ class PallasCallTest(PallasBaseTest):
         preferred_element_type=jnp.float32,
     )
     self.assertAllClose(dot_kernel(x, y), expected, atol=5e-2, rtol=5e-3)
+
+  @parameterized.parameters(jnp.int4, jnp.uint4)
+  def test_subbyte_load(self, dtype):
+    if not jtu.test_device_matches(["gpu"]):
+      self.skipTest("`[u]int4` loads only supported on GPU.")
+
+    x = jnp.arange(-128, 128, dtype=jnp.int8)
+
+    @functools.partial(self.pallas_call, out_shape=x)
+    def copy_kernel(x_ref, o_ref):
+      o_ref[()] = x_ref[()].astype(jnp.int8)
+
+    expected = x.astype(dtype).astype(jnp.int8)
+    self.assertAllClose(copy_kernel(x.astype(dtype)), expected)
 
 
 class PallasCallInterpretTest(PallasCallTest):
@@ -947,8 +970,8 @@ class ApiErrorTest(PallasBaseTest):
                          in_specs=[pl.BlockSpec((4,), my_index_map)])
     with self.assertRaisesRegex(
         ValueError,
-        "Index map function my_index_map at .*pallas_test.py:.* for "
-        "x_ref must return 1 values to match .*"
+        "Index map function my_index_map at .*pallas_test.py.* "
+        "for x_ref must return 1 values to match .*"
         "Currently returning 2 values."):
       f(a)
 
@@ -962,8 +985,8 @@ class ApiErrorTest(PallasBaseTest):
                          in_specs=[pl.BlockSpec((4,), my_index_map)])
     with self.assertRaisesRegex(
         ValueError,
-        "Index map function my_index_map at .*pallas_test.py:.* for "
-        "x_ref must return integer scalars. Output\\[0\\] has "
+        "Index map function my_index_map at .*pallas_test.py.* "
+        "for x_ref must return integer scalars. Output\\[0\\] has "
         "type .*float"):
       f(a)
 
@@ -977,8 +1000,8 @@ class ApiErrorTest(PallasBaseTest):
                          in_specs=[pl.BlockSpec((4,), my_index_map)])
     with self.assertRaisesRegex(
         ValueError,
-        "Index map function my_index_map at .*pallas_test.py:.* for "
-        "x_ref must return integer scalars. Output\\[0\\] has "
+        "Index map function my_index_map at .*pallas_test.py.* "
+        "for x_ref must return integer scalars. Output\\[0\\] has "
         "type .*int32\\[4\\]"):
       f(a)
 
@@ -2357,8 +2380,126 @@ class PallasCallNamedGridTest(PallasBaseTest):
     )
 
 
+class SymbolicPallasTest(PallasBaseTest):
+
+  def test_simple_symbolic_matmul_export(self):
+    if jtu.test_device_matches(["gpu"]):
+      self.skipTest("Not supported on GPU.")
+
+    def sym_matmul(x, y, symbolic_grid):
+      symbolic_grid = symbolic_grid.shape[0]
+      symbolic_x_0 = x.shape[0] // symbolic_grid
+      symbolic_y_1 = y.shape[1] // symbolic_grid
+
+      def x_ref_block_spec_mapping(i, j):
+        return (i, 0)
+
+      def y_ref_block_spec_mapping(i, j):
+        return (0, j)
+
+      def sym_matmul_kernel(x_ref, y_ref, z_ref):
+        z_ref[...] = x_ref[...] @ y_ref[...]
+
+      return pl.pallas_call(
+          sym_matmul_kernel,
+          out_shape=jax.ShapeDtypeStruct((symbolic_x_0, symbolic_y_1), x.dtype),
+          grid_spec=pltpu.PrefetchScalarGridSpec(
+              num_scalar_prefetch=0,
+              in_specs=[
+                  pl.BlockSpec(
+                      (symbolic_x_0, x.shape[1]), x_ref_block_spec_mapping
+                  ),
+                  pl.BlockSpec(
+                      (y.shape[0], symbolic_y_1),
+                      y_ref_block_spec_mapping,
+                  ),
+              ],
+              out_specs=pl.BlockSpec(
+                  (symbolic_x_0, symbolic_y_1),
+                  lambda i, j: (i, j),
+              ),
+              grid=(symbolic_grid, symbolic_grid),
+          ),
+      )(x, y)
+
+    a, b, c, d, e = jax.export.symbolic_shape(
+        "m_dim, k_dim, n_dim, grid_size, unused_dim",
+        constraints=(
+            "mod(floordiv(m_dim, grid_size), 8) == 0",
+            "mod(k_dim, 128) == 0",
+            "mod(floordiv(n_dim, grid_size), 128) == 0",
+        ),
+    )
+    x = jax.ShapeDtypeStruct((a, b), jax.numpy.float32)
+    y = jax.ShapeDtypeStruct((b, c), jax.numpy.float32)
+
+    dummy_d = jax.ShapeDtypeStruct((d, e), jax.numpy.float32)
+
+    exported_module = pl.lower_as_mlir(
+        jax.jit(sym_matmul), x, y, dummy_d, dynamic_shapes=True
+    )
+    assert exported_module is not None
+    self.assertIn(
+        "tensor<?x?xf32>, %arg6: tensor<?x?xf32>, %arg7: tensor<?x?xf32>",
+        str(exported_module),
+    )
+    x = jax.ShapeDtypeStruct((128, 1024), jax.numpy.float32)
+    y = jax.ShapeDtypeStruct((1024, 512), jax.numpy.float32)
+    dummy_d = jax.ShapeDtypeStruct((1, 1), jax.numpy.float32)
+    exported_module = pl.lower_as_mlir(
+        jax.jit(sym_matmul), x, y, dummy_d, dynamic_shapes=False
+    )
+    assert exported_module is not None
+    self.assertIn(
+        "@sym_matmul(%arg0: tensor<128x1024xf32>, %arg1: tensor<1024x512xf32>",
+        str(exported_module),
+    )
+
+
 class PallasCallNamedGridInterpretTest(PallasCallNamedGridTest):
   INTERPRET = True
+
+
+def _find_pallas_call_in_jaxpr(
+    jaxpr: jax_core.Jaxpr) -> jax_core.JaxprEqn | None:
+  for eqn in jaxpr.eqns:
+    call_eqn = None
+    if eqn.primitive == pallas_call.pallas_call_p:
+      call_eqn = eqn
+    elif 'jaxpr' in eqn.params:
+      call_eqn = _find_pallas_call_in_jaxpr(eqn.params['jaxpr'])
+    if call_eqn is not None:
+      return call_eqn
+  return None
+
+
+class PallasCompilerParamsTest(PallasBaseTest):
+  def test_triton_params_consistent_across_double_jit(self):
+    # Test for https://github.com/jax-ml/jax/issues/25714
+    if not jtu.test_device_matches(["gpu"]):
+      self.skipTest("Triton backend only works on GPU.")
+    params = plgpu.TritonCompilerParams(num_warps=8)
+
+    @jax.jit
+    @functools.partial(
+        self.pallas_call, out_shape=jax.ShapeDtypeStruct((), jnp.float32),
+        compiler_params=params)
+    def copy_kernel(x_ref, o_ref):
+      o_ref[...] = x_ref[...]
+
+    @functools.partial(jax.jit, static_argnames=["z"])
+    def plus_z(x, z):
+      return copy_kernel(x+z)
+
+    x = 0.
+    extracted_params = _find_pallas_call_in_jaxpr(
+        plus_z.trace(x, 1).jaxpr).params["compiler_params"]
+    self.assertEqual(plus_z(0., 1.), 1.)
+    self.assertEqual(extracted_params["triton"]["num_warps"], 8)
+    extracted_params = _find_pallas_call_in_jaxpr(
+        plus_z.trace(x, 2).jaxpr).params["compiler_params"]
+    self.assertEqual(plus_z(0., 2.), 2.)
+    self.assertEqual(extracted_params["triton"]["num_warps"], 8)
 
 
 if __name__ == "__main__":

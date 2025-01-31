@@ -1,16 +1,17 @@
+# CI - Pytest CUDA
+#
+# This workflow runs the CUDA tests with Pytest. It can only be triggered by other workflows via
+# `workflow_call`. It is used by the `CI - Wheel Tests` workflows to run the Pytest CUDA tests.
+#
+# It consists of the following job:
+# run-tests:
+#    - Downloads the jaxlib and CUDA artifacts from a GCS bucket.
+#    - Executes the `run_pytest_cuda.sh` script, which performs the following actions:
+#      - Installs the downloaded wheel artifacts.
+#      - Runs the CUDA tests with Pytest.
 name: CI - Pytest CUDA
 
 on:
-  workflow_dispatch:
-    inputs:
-      halt-for-connection:
-        description: 'Should this workflow run wait for a remote connection?'
-        type: choice
-        required: true
-        default: 'no'
-        options:
-        - 'yes'
-        - 'no'
   workflow_call:
     inputs:
       runner:
@@ -33,25 +34,17 @@ on:
         type: string
         required: true
         default: "0"
-      # If enabled, install "jax" at the current commit in editable mode (used in
-      # continuous test jobs). If disabled, installs "jax" from a GCS bucket (used in 
-      # nightly/release test jobs)
-      install_jax_current_commit:
-        description: "Should the 'jax' package be installed at the current commit?"
-        type: string
-        required: true
-        default: "1"
       gcs_download_uri:
         description: "GCS location URI from where the artifacts should be downloaded"
         required: true
-        default: 'gs://general-ml-ci-transient/jax-github-actions/jax-fork/${{ github.workflow }}/${{ github.run_number }}/${{ github.run_attempt }}'
+        default: 'gs://general-ml-ci-transient/jax-github-actions/jax-fork/${{ github.workflow }}/${{ github.run_number }}'
         type: string
 
 jobs:
   run-tests:
 
     runs-on: ${{ inputs.runner }}
-    container:  ${{ (contains(inputs.cuda, '12.3') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build-cudnn:720686788') ||
+    container:  ${{ (contains(inputs.cuda, '12.3') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest') ||
                 (contains(inputs.cuda, '12.1') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/nosla-cuda12.1-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest') }}
     
     name: "Pytest GPU (${{ inputs.runner }}, CUDA ${{ inputs.cuda }}, Python ${{ inputs.python }}, x64=${{ inputs.enable-x64 }})"
@@ -59,44 +52,35 @@ jobs:
     env:
       JAXCI_HERMETIC_PYTHON_VERSION: "${{ inputs.python }}"
       JAXCI_PYTHON: "python${{ inputs.python }}"
-      JAXCI_ENABLE_X64: ${{ inputs.enable-x64 }}
-      JAXCI_INSTALL_JAX_CURRENT_COMMIT: ${{ inputs.install_jax_current_commit }}
+      JAXCI_ENABLE_X64: "${{ inputs.enable-x64 }}"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Set env vars for use in artifact download URL
+        run: |
+          os=$(uname -s | awk '{print tolower($0)}')
+          arch=$(uname -m)
+
+          # Get the major and minor version of Python.
+          # E.g if JAXCI_HERMETIC_PYTHON_VERSION=3.10, then python_major_minor=310
+          python_major_minor=$(echo "$JAXCI_HERMETIC_PYTHON_VERSION" | tr -d '.')
+
+          echo "OS=${os}" >> $GITHUB_ENV
+          echo "ARCH=${arch}" >> $GITHUB_ENV
+          echo "PYTHON_MAJOR_MINOR=${python_major_minor}" >> $GITHUB_ENV
+      - name: Download the wheel artifacts from GCS
+        run: >-
+          mkdir -p $(pwd)/dist &&
+          gsutil -m cp -r "${{ inputs.gcs_download_uri }}/jaxlib*${PYTHON_MAJOR_MINOR}*${OS}*${ARCH}*.whl" $(pwd)/dist/ &&
+          gsutil -m cp -r "${{ inputs.gcs_download_uri }}/jax*cuda*plugin*${PYTHON_MAJOR_MINOR}*${OS}*${ARCH}*.whl" $(pwd)/dist/ &&
+          gsutil -m cp -r "${{ inputs.gcs_download_uri }}/jax*cuda*pjrt*${OS}*${ARCH}*.whl" $(pwd)/dist/
+      - name: Install Python dependencies
+        run: $JAXCI_PYTHON -m pip install -r build/requirements.in
       # Halt for testing
       - name: Wait For Connection
         uses: google-ml-infra/actions/ci_connection@main
         with:
           halt-dispatch-input: ${{ inputs.halt-for-connection }}
-      - name: Set env vars for use in artifact download URL
-        run: |
-            os=$(uname -s | awk '{print tolower($0)}')
-            arch=$(uname -m)
-            
-            # Get the major and minor version of Python.
-            # E.g if JAXCI_HERMETIC_PYTHON_VERSION=3.10, then python_major_minor=310
-            python_major_minor=$(echo "$JAXCI_HERMETIC_PYTHON_VERSION" | tr -d '.')
-
-            echo "OS=${os}" >> $GITHUB_ENV
-            echo "ARCH=${arch}" >> $GITHUB_ENV
-            echo "PYTHON_MAJOR_MINOR=${python_major_minor}" >> $GITHUB_ENV
-      - name: Download the wheel artifacts from GCS
-        run: |
-          download_uri="${{ inputs.gcs_download_uri }}"
-          # Replace spaces with underscore
-          download_uri=${download_uri// /_}
-
-          mkdir -p $(pwd)/dist && 
-          gsutil -m cp -r "${download_uri}/jaxlib*${PYTHON_MAJOR_MINOR}*${OS}*${ARCH}*.whl" $(pwd)/dist/ &&
-          gsutil -m cp -r "${download_uri}/jax*cuda*plugin*${PYTHON_MAJOR_MINOR}*${OS}*${ARCH}*.whl" $(pwd)/dist/ &&
-          gsutil -m cp -r "${download_uri}/jax*cuda*pjrt*${OS}*${ARCH}*.whl" $(pwd)/dist/
-          
-          # Download the "jax" wheel from GCS if 
-          if [[ ${{ inputs.install_jax_current_commit }} != 1 ]]; then
-            gsutil -m cp -r "${download_uri}/jax*py3*none*any*.whl" $(pwd)/dist/
-          fi
-      - name: Install dependencies
-        run: $JAXCI_PYTHON -m pip install -r build/requirements.in
-      - name: Run Pytest GPU tests
-        run: ./ci/run_pytest_gpu.sh
+      - name: Run Pytest CUDA tests
+        timeout-minutes: 60
+        run: ./ci/run_pytest_cuda.sh

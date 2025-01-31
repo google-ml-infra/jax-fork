@@ -122,6 +122,14 @@ _CPU_ENABLE_ASYNC_DISPATCH = config.bool_flag(
     "inline without async dispatch.",
 )
 
+NUM_CPU_DEVICES = config.int_flag(
+    name="jax_num_cpu_devices",
+    default=-1,
+    help="Number of CPU devices to use. If not provided, the value of "
+         "the XLA flag --xla_force_host_platform_device_count is used."
+         " Must be set before JAX is initialized.",
+)
+
 
 # Warn the user if they call fork(), because it's not going to go well for them.
 def _at_fork():
@@ -249,8 +257,8 @@ def make_cpu_client(
   if collectives is None:
     collectives_impl = CPU_COLLECTIVES_IMPLEMENTATION.value
     if _CPU_ENABLE_GLOO_COLLECTIVES.value:
-        collectives_impl = 'gloo'
-        warnings.warn('Setting `jax_cpu_enable_gloo_collectives` is '
+      collectives_impl = 'gloo'
+      warnings.warn('Setting `jax_cpu_enable_gloo_collectives` is '
                       'deprecated. Please use `jax.config.update('
                       '"jax_cpu_collectives_implementation", "gloo")` instead.',
                       DeprecationWarning,
@@ -268,12 +276,14 @@ def make_cpu_client(
                         f"{collectives_impl}. Available implementations are "
                         f"{CPU_COLLECTIVES_IMPLEMENTATIONS}.")
 
+  num_devices = NUM_CPU_DEVICES.value if NUM_CPU_DEVICES.value >= 0 else None
   return xla_client.make_cpu_client(
     asynchronous=_CPU_ENABLE_ASYNC_DISPATCH.value,
     distributed_client=distributed.global_state.client,
     node_id=distributed.global_state.process_id,
     num_nodes=distributed.global_state.num_processes,
     collectives=collectives,
+    num_devices=num_devices,
   )
 
 
@@ -1005,7 +1015,9 @@ def _init_backend(platform: str) -> xla_client.Client:
   # factories instead of returning None.
   if backend is None:
     raise RuntimeError(f"Could not initialize backend '{platform}'")
-  if backend.device_count() == 0:
+  # TODO(b/356678989): Only check `backend.device_count()` when it counts
+  # CPU-only devices.
+  if backend.device_count() == 0 and len(backend._get_all_devices()) == 0:
     raise RuntimeError(f"Backend '{platform}' provides no devices.")
   util.distributed_debug_log(("Initialized backend", backend.platform),
                              ("process_index", backend.process_index()),
