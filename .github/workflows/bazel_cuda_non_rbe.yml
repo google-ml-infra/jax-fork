@@ -43,7 +43,7 @@ on:
 jobs:
   run-tests:
     runs-on: ${{ inputs.runner }}
-    container: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build-cudnn:720686788"
+    container: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest"
 
     env:
       JAXCI_HERMETIC_PYTHON_VERSION: ${{ inputs.python }}

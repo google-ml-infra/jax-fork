@@ -35,19 +35,23 @@ on:
         required: true
         default: "0"
       gcs_download_uri:
-        description: "GCS location URI from where the artifacts should be downloaded"
+        description: "GCS location prefix from where the artifacts should be downloaded"
         required: true
-        default: 'gs://general-ml-ci-transient/jax-github-actions/jax-fork/${{ github.workflow }}/${{ github.run_number }}'
+        default: 'gs://general-ml-ci-transient/jax-github-actions/jax-fork/${{ github.workflow }}/${{ github.run_number }}/${{ github.run_attempt }}'
         type: string
+      halt-for-connection:
+        description: 'Should this workflow run wait for a remote connection?'
+        type: boolean
+        required: false
+        default: false
 
 jobs:
   run-tests:
-
     runs-on: ${{ inputs.runner }}
-    container:  ${{ (contains(inputs.cuda, '12.3') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build-cudnn:720686788') ||
+    # TODO: Update to the generic ML ecosystem test containers when they are ready.
+    container:  ${{ (contains(inputs.cuda, '12.3') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest') ||
                 (contains(inputs.cuda, '12.1') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/nosla-cuda12.1-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest') }}
-    
-    name: "Pytest GPU (${{ inputs.runner }}, CUDA ${{ inputs.cuda }}, Python ${{ inputs.python }}, x64=${{ inputs.enable-x64 }})"
+    name: "Pytest CUDA (${{ inputs.runner }}, CUDA ${{ inputs.cuda }}, Python ${{ inputs.python }}, x64=${{ inputs.enable-x64 }})"
 
     env:
       JAXCI_HERMETIC_PYTHON_VERSION: "${{ inputs.python }}"

@@ -43,7 +43,6 @@ jobs:
       python: ${{ matrix.python }}
       enable-x64:  ${{ matrix.enable-x64 }}
       gcs_download_uri: ${{inputs.gcs_download_uri}}
-      install_jax_current_commit: "0"
 
   run-pytest-cuda:
     uses: ./.github/workflows/pytest_cuda.yml
@@ -62,4 +61,3 @@ jobs:
       cuda:  ${{ matrix.cuda }}
       enable-x64:  ${{ matrix.enable-x64 }}
       gcs_download_uri: ${{inputs.gcs_download_uri}}
-      install_jax_current_commit: "0"
