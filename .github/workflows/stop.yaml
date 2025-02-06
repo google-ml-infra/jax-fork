@@ -1,4 +1,4 @@
-name: Test stopping workflow
+name: Test stopping workflow 2
 
 on:
   pull_request:
