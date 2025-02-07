@@ -17,38 +17,37 @@ on:
 
 jobs:
   build-xla-gpu-and-test:
-    runs-on: linux-x86-g2-48-l4-4gpu # Use a GPU-enabled runner
+    runs-on: "linux-x86-n2-16" #linux-x86-g2-48-l4-4gpu # Use a GPU-enabled runner
     container:
       image: "gcr.io/tensorflow-testing/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest"
       options: --gpus all --privileged  # Might need privileged mode, use with caution
 
     steps:
-      # - name: Checkout XLA
-      #   uses: actions/checkout@v3
-      #   with:
-      #     repository: openxla/xla  # Replace with your fork if needed
-      - name: Checkout repository
+      - name: Checkout XLA
         uses: actions/checkout@v3
         with:
-          repository: juliagmt-google/xla  
-          path: xla
-
-      # - name: Wait For Connection
-      #   uses: google-ml-infra/actions/ci_connection@main
+          repository: openxla/xla  # Replace with your fork if needed
+      # - name: Checkout repository
+      #   uses: actions/checkout@v3
       #   with:
-      #     halt-dispatch-input: ${{ inputs.halt-for-connection }}
-      
+      #     repository: juliagmt-google/xla  
+      #     path: xla
+     
       - name: Print machine specs
         run: |
           lscpu
           free -h  # Memory information
           df -h    # Disk space information
           uname -a # Kernel information
-          
+       
       - name: Create results directory
         working-directory: xla
         run: mkdir results
-
+          
+      - name: Wait For Connection
+        uses: google-ml-infra/actions/ci_connection@main
+        with:
+          halt-dispatch-input: ${{ inputs.halt-for-connection }}
       # - name: Set up Python 3.10  # Choose your desired Python version
       #   uses: actions/setup-python@v4
       #   with:
@@ -70,10 +69,10 @@ jobs:
       #   run: |
       #     bash setup.sh
           
-      - name: Wait For Connection
-        uses: google-ml-infra/actions/ci_connection@main
-        with:
-          halt-dispatch-input: ${{ inputs.halt-for-connection }}
+      # - name: Wait For Connection
+      #   uses: google-ml-infra/actions/ci_connection@main
+      #   with:
+      #     halt-dispatch-input: ${{ inputs.halt-for-connection }}
 
       # - name: Run run.sh for E2E benchmarks flax_2b (within venv)
       #   working-directory: xla/backends/cpu/benchmarks/e2e/gemma2/flax_2b
