@@ -84,24 +84,24 @@ jobs:
         #     bash run.sh | tee -a ../../../../../../results/flax_2b.log
   
         # TODO(juliagmt): Re-enable once the build is fixed.
-        - name: Build run_hlo_module
-          working-directory: xla
-          run: bazel build -c opt --dynamic_mode=off //xla/tools:run_hlo_module
+        # - name: Build run_hlo_module
+        #   working-directory: xla
+        #   run: bazel build -c opt --dynamic_mode=off //xla/tools:run_hlo_module
   
-        - name: Run HLO Module Benchmarks
-          working-directory: xla
-          continue-on-error: true
-          run: |
-            for file in tests/fuzz/*.hlo; do
-              filename=$(basename "$file")
-              # Skip expected failed hlo files.
-              if [[ "$filename" == "rand_000060.hlo" || "$filename" == "rand_000067.hlo" || "$filename" == "rand_000072.hlo" ]]; then
-                echo "Skipping benchmark on $file"
-                continue
-              fi
-              echo "Running benchmark on $file"
-              ./bazel-bin/xla/tools/run_hlo_module --input_format=hlo --platform=CPU "$file"
-            done
+        # - name: Run HLO Module Benchmarks
+        #   working-directory: xla
+        #   continue-on-error: true
+        #   run: |
+        #     for file in tests/fuzz/*.hlo; do
+        #       filename=$(basename "$file")
+        #       # Skip expected failed hlo files.
+        #       if [[ "$filename" == "rand_000060.hlo" || "$filename" == "rand_000067.hlo" || "$filename" == "rand_000072.hlo" ]]; then
+        #         echo "Skipping benchmark on $file"
+        #         continue
+        #       fi
+        #       echo "Running benchmark on $file"
+        #       ./bazel-bin/xla/tools/run_hlo_module --input_format=hlo --platform=CPU "$file"
+        #     done
   
         - name: Build CPU Benchmarks
           working-directory: xla
