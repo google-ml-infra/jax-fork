@@ -65,11 +65,12 @@ jobs:
           uses: actions/checkout@v3
           with:
             repository: openxla/xla
+            ref: dev  # Specify the dev branch
   
-        - name: Create results directory
-          working-directory: xla
-          run:
-            mkdir results
+        # - name: Create results directory
+        #   working-directory: xla
+        #   run:
+        #     mkdir results
   
         # - name: Run setup.sh for E2E benchmarks flax_2b
         #   working-directory: xla/backends/cpu/benchmarks/e2e/gemma2/flax_2b
@@ -84,53 +85,53 @@ jobs:
         #     bash run.sh | tee -a ../../../../../../results/flax_2b.log
   
         # TODO(juliagmt): Re-enable once the build is fixed.
-        - name: Build run_hlo_module
-          working-directory: xla
-          run: bazel build -c opt --dynamic_mode=off //xla/tools:run_hlo_module
+        # - name: Build run_hlo_module
+        #   working-directory: xla
+        #   run: bazel build -c opt --dynamic_mode=off //xla/tools:run_hlo_module
   
-        - name: Run HLO Module Benchmarks
-          working-directory: xla
-          continue-on-error: true
-          run: |
-            for file in tests/fuzz/*.hlo; do
-              filename=$(basename "$file")
-              # Skip expected failed hlo files.
-              if [[ "$filename" == "rand_000060.hlo" || "$filename" == "rand_000067.hlo" || "$filename" == "rand_000072.hlo" ]]; then
-                echo "Skipping benchmark on $file"
-                continue
-              fi
-              echo "Running benchmark on $file"
-              ./bazel-bin/xla/tools/run_hlo_module --input_format=hlo --platform=CPU "$file"
-            done
+        # - name: Run HLO Module Benchmarks
+        #   working-directory: xla
+        #   continue-on-error: true
+        #   run: |
+        #     for file in tests/fuzz/*.hlo; do
+        #       filename=$(basename "$file")
+        #       # Skip expected failed hlo files.
+        #       if [[ "$filename" == "rand_000060.hlo" || "$filename" == "rand_000067.hlo" || "$filename" == "rand_000072.hlo" ]]; then
+        #         echo "Skipping benchmark on $file"
+        #         continue
+        #       fi
+        #       echo "Running benchmark on $file"
+        #       ./bazel-bin/xla/tools/run_hlo_module --input_format=hlo --platform=CPU "$file"
+        #     done
   
-        - name: Build CPU Benchmarks
-          working-directory: xla
-          run: bazel build -c opt --dynamic_mode=off //xla/backends/cpu/benchmarks:*
+        # - name: Build CPU Benchmarks
+        #   working-directory: xla
+        #   run: bazel build -c opt --dynamic_mode=off //xla/backends/cpu/benchmarks:*
   
-        - name: Run CPU benchmarks
-          working-directory: xla
-          continue-on-error: true
-          run: |
-            find ./bazel-bin/xla/backends/cpu/benchmarks/ -maxdepth 1 -type f -executable -name "*_test" -print0 | while IFS= read -r -d $'\0' benchmark; do
-              benchmark_name=$(basename "$benchmark" | sed 's/_test$//') 
-              echo "Running benchmark: $benchmark_name"
+        # - name: Run CPU benchmarks
+        #   working-directory: xla
+        #   continue-on-error: true
+        #   run: |
+        #     find ./bazel-bin/xla/backends/cpu/benchmarks/ -maxdepth 1 -type f -executable -name "*_test" -print0 | while IFS= read -r -d $'\0' benchmark; do
+        #       benchmark_name=$(basename "$benchmark" | sed 's/_test$//') 
+        #       echo "Running benchmark: $benchmark_name"
   
-              # Run the benchmark with default parameters.
-              $benchmark --benchmark_filter=".*"
-              $benchmark --benchmark_filter=".*" > "results/$benchmark_name.log" 2>&1
+        #       # Run the benchmark with default parameters.
+        #       $benchmark --benchmark_filter=".*"
+        #       $benchmark --benchmark_filter=".*" > "results/$benchmark_name.log" 2>&1
   
-              # Check the exit code of the benchmark
-              if [ $? -ne 0 ]; then
-                echo "Error: Benchmark '$benchmark_name' failed. Check the log file: results/$benchmark_name.log"
-              else
-                echo "Benchmark '$benchmark_name' completed successfully."
-              fi
-            done
-        - name: Upload Results ${{ matrix.build_target }}
-          uses: actions/upload-artifact@v4
-          with:
-            name: cpu-xla-benchmarks-${{ matrix.job_info.os }}
-            path: xla/results
+        #       # Check the exit code of the benchmark
+        #       if [ $? -ne 0 ]; then
+        #         echo "Error: Benchmark '$benchmark_name' failed. Check the log file: results/$benchmark_name.log"
+        #       else
+        #         echo "Benchmark '$benchmark_name' completed successfully."
+        #       fi
+        #     done
+        # - name: Upload Results ${{ matrix.build_target }}
+        #   uses: actions/upload-artifact@v4
+        #   with:
+        #     name: cpu-xla-benchmarks-${{ matrix.job_info.os }}
+        #     path: xla/results
 
   # build-xla-gpu-and-test:
   #   runs-on: "linux-x86-n2-16" #linux-x86-g2-48-l4-4gpu # Use a GPU-enabled runner
@@ -149,25 +150,25 @@ jobs:
   #     #     repository: juliagmt-google/xla  
   #     #     path: xla
      
-  #     - name: Print machine specs
-  #       run: |
-  #         lscpu
-  #         free -h  # Memory information
-  #         df -h    # Disk space information
-  #         uname -a # Kernel information
+      - name: Print machine specs
+        run: |
+          lscpu
+          free -h  # Memory information
+          df -h    # Disk space information
+          uname -a # Kernel information
        
-  #     - name: Create results directory
-  #       working-directory: xla
-  #       run: mkdir results
+      - name: Create results directory
+        working-directory: xla
+        run: mkdir results
           
-  #     - name: Wait For Connection
-  #       uses: google-ml-infra/actions/ci_connection@main
-  #       with:
-  #         halt-dispatch-input: ${{ inputs.halt-for-connection }}
-  #     # - name: Set up Python 3.10  # Choose your desired Python version
-  #     #   uses: actions/setup-python@v4
-  #     #   with:
-  #     #     python-version: '3.10'
+      - name: Wait For Connection
+        uses: google-ml-infra/actions/ci_connection@main
+        with:
+          halt-dispatch-input: ${{ inputs.halt-for-connection }}
+      # - name: Set up Python 3.10  # Choose your desired Python version
+      #   uses: actions/setup-python@v4
+      #   with:
+      #     python-version: '3.10'
 
   #     # - name: Create and activate virtual environment
   #     #   shell: bash  # Force the use of bash
