@@ -15,42 +15,6 @@ on:
         - 'yes'
         - 'no'
 
-
-# jobs:
-  # build-xla-gpu-and-test:
-  #   runs-on: linux-x86-g2-48-l4-4gpu # Use a GPU-enabled runner
-  #   container:
-  #     image: "gcr.io/tensorflow-testing/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest"
-  #     options: --gpus all --privileged  # Might need privileged mode, use with caution
-
-  #   steps:
-  #     # - name: Checkout XLA
-  #     #   uses: actions/checkout@v3
-  #     #   with:
-  #     #     repository: openxla/xla  # Replace with your fork if needed
-  #     - name: Checkout repository
-  #       uses: actions/checkout@v3
-  #       with:
-  #         repository: juliagmt-google/xla  
-  #         ref: dev
-  #     - name: Print machine specs
-  #       run: |
-  #         lscpu
-  #         free -h  # Memory information
-  #         df -h    # Disk space information
-  #         uname -a # Kernel information
-          
-  #     - name: Create results directory
-  #       working-directory: xla
-  #       run: mkdir results
-        
-
-  #     - name: Wait For Connection
-  #       uses: google-ml-infra/actions/ci_connection@main
-  #       with:
-  #         halt-dispatch-input: ${{ inputs.halt-for-connection }}
-      
-
 jobs:
   Tests:
       strategy:
@@ -84,24 +48,23 @@ jobs:
             df -h    # Disk space information
             uname -a # Kernel information
   
-        - name: Check Python Version in Container
-          run: python3 --version
+        # - name: Check Python Version in Container
+        #   run: python3 --version
   
-        - name: Install Python 3.10 if not present (IN CONTAINER)
-          run: |
-            if ! python3 --version > /dev/null 2>&1; then # check for python3
-              echo "Python 3 not found, installing..."
-              apt-get update
-              apt-get install -y python3.10 python3-pip
-            else
-              echo "Python 3 found."
-            fi
+        # - name: Install Python 3.10 if not present (IN CONTAINER)
+        #   run: |
+        #     if ! python3 --version > /dev/null 2>&1; then # check for python3
+        #       echo "Python 3 not found, installing..."
+        #       apt-get update
+        #       apt-get install -y python3.10 python3-pip
+        #     else
+        #       echo "Python 3 found."
+        #     fi
   
         - name: Checkout OpenXLA
           uses: actions/checkout@v3
           with:
             repository: openxla/xla
-            ref: dev  # Specify the dev branch
   
         - name: Create results directory
           working-directory: xla
@@ -120,7 +83,7 @@ jobs:
         #   run: |
         #     bash run.sh | tee -a ../../../../../../results/flax_2b.log
   
-        TODO(juliagmt): Re-enable once the build is fixed.
+        # TODO(juliagmt): Re-enable once the build is fixed.
         - name: Build run_hlo_module
           working-directory: xla
           run: bazel build -c opt --dynamic_mode=off //xla/tools:run_hlo_module
@@ -168,7 +131,6 @@ jobs:
           with:
             name: cpu-xla-benchmarks-${{ matrix.job_info.os }}
             path: xla/results
-
   # build-xla-gpu-and-test:
   #   runs-on: "linux-x86-n2-16" #linux-x86-g2-48-l4-4gpu # Use a GPU-enabled runner
   #   container:
