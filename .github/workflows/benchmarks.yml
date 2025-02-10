@@ -47,6 +47,10 @@ jobs:
             free -h  # Memory information
             df -h    # Disk space information
             uname -a # Kernel information
+        - name: Wait For Connection
+        uses: google-ml-infra/actions/ci_connection@main
+        with:
+          halt-dispatch-input: ${{ inputs.halt-for-connection }}
   
         # - name: Check Python Version in Container
         #   run: python3 --version
