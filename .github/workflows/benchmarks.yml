@@ -52,61 +52,61 @@ jobs:
       
 
 # jobs:
-  # Tests:
-  #     strategy:
-  #       # Don't fail fast - want to see results for all builds even if one fails.
-  #       fail-fast: false
-  #       matrix:
-  #         job_info: [
-  #           {
-  #             os: "linux-x86-n2-16",
-  #             container: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest",
-  #             pretty_name: "XLA Linux x86 CPU",
-  #           },
-  #           {
-  #             os: "linux-arm64-c4a-16",
-  #             container: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build-arm64:latest",
-  #             pretty_name: "XLA Linux ARM64 CPU",
-  #           }
-  #         ]
-  #     name: ${{ matrix.job_info.pretty_name }}
-  #     runs-on: ${{ matrix.job_info.os }}
-  #     container: ${{ matrix.job_info.container }}
-  #     defaults:
-  #       run:
-  #         shell: bash
-  #     timeout-minutes: 30
-  #     steps:
-  #       - name: Print machine specs
-  #         run: |
-  #           lscpu
-  #           free -h  # Memory information
-  #           df -h    # Disk space information
-  #           uname -a # Kernel information
+  Tests:
+      strategy:
+        # Don't fail fast - want to see results for all builds even if one fails.
+        fail-fast: false
+        matrix:
+          job_info: [
+            {
+              os: "linux-x86-n2-16",
+              container: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest",
+              pretty_name: "XLA Linux x86 CPU",
+            },
+            {
+              os: "linux-arm64-c4a-16",
+              container: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build-arm64:latest",
+              pretty_name: "XLA Linux ARM64 CPU",
+            }
+          ]
+      name: ${{ matrix.job_info.pretty_name }}
+      runs-on: ${{ matrix.job_info.os }}
+      container: ${{ matrix.job_info.container }}
+      defaults:
+        run:
+          shell: bash
+      timeout-minutes: 30
+      steps:
+        - name: Print machine specs
+          run: |
+            lscpu
+            free -h  # Memory information
+            df -h    # Disk space information
+            uname -a # Kernel information
   
-        # - name: Check Python Version in Container
-        #   run: python3 --version
+        - name: Check Python Version in Container
+          run: python3 --version
   
-        # - name: Install Python 3.10 if not present (IN CONTAINER)
-        #   run: |
-        #     if ! python3 --version > /dev/null 2>&1; then # check for python3
-        #       echo "Python 3 not found, installing..."
-        #       apt-get update
-        #       apt-get install -y python3.10 python3-pip
-        #     else
-        #       echo "Python 3 found."
-        #     fi
+        - name: Install Python 3.10 if not present (IN CONTAINER)
+          run: |
+            if ! python3 --version > /dev/null 2>&1; then # check for python3
+              echo "Python 3 not found, installing..."
+              apt-get update
+              apt-get install -y python3.10 python3-pip
+            else
+              echo "Python 3 found."
+            fi
   
-        # - name: Checkout OpenXLA
-        #   uses: actions/checkout@v3
-        #   with:
-        #     repository: openxla/xla
-        #     ref: dev  # Specify the dev branch
+        - name: Checkout OpenXLA
+          uses: actions/checkout@v3
+          with:
+            repository: openxla/xla
+            ref: dev  # Specify the dev branch
   
-        # - name: Create results directory
-        #   working-directory: xla
-        #   run:
-        #     mkdir results
+        - name: Create results directory
+          working-directory: xla
+          run:
+            mkdir results
   
         # - name: Run setup.sh for E2E benchmarks flax_2b
         #   working-directory: xla/backends/cpu/benchmarks/e2e/gemma2/flax_2b
@@ -120,54 +120,54 @@ jobs:
         #   run: |
         #     bash run.sh | tee -a ../../../../../../results/flax_2b.log
   
-        # TODO(juliagmt): Re-enable once the build is fixed.
-        # - name: Build run_hlo_module
-        #   working-directory: xla
-        #   run: bazel build -c opt --dynamic_mode=off //xla/tools:run_hlo_module
+        TODO(juliagmt): Re-enable once the build is fixed.
+        - name: Build run_hlo_module
+          working-directory: xla
+          run: bazel build -c opt --dynamic_mode=off //xla/tools:run_hlo_module
   
-        # - name: Run HLO Module Benchmarks
-        #   working-directory: xla
-        #   continue-on-error: true
-        #   run: |
-        #     for file in tests/fuzz/*.hlo; do
-        #       filename=$(basename "$file")
-        #       # Skip expected failed hlo files.
-        #       if [[ "$filename" == "rand_000060.hlo" || "$filename" == "rand_000067.hlo" || "$filename" == "rand_000072.hlo" ]]; then
-        #         echo "Skipping benchmark on $file"
-        #         continue
-        #       fi
-        #       echo "Running benchmark on $file"
-        #       ./bazel-bin/xla/tools/run_hlo_module --input_format=hlo --platform=CPU "$file"
-        #     done
+        - name: Run HLO Module Benchmarks
+          working-directory: xla
+          continue-on-error: true
+          run: |
+            for file in tests/fuzz/*.hlo; do
+              filename=$(basename "$file")
+              # Skip expected failed hlo files.
+              if [[ "$filename" == "rand_000060.hlo" || "$filename" == "rand_000067.hlo" || "$filename" == "rand_000072.hlo" ]]; then
+                echo "Skipping benchmark on $file"
+                continue
+              fi
+              echo "Running benchmark on $file"
+              ./bazel-bin/xla/tools/run_hlo_module --input_format=hlo --platform=CPU "$file"
+            done
   
-        # - name: Build CPU Benchmarks
-        #   working-directory: xla
-        #   run: bazel build -c opt --dynamic_mode=off //xla/backends/cpu/benchmarks:*
+        - name: Build CPU Benchmarks
+          working-directory: xla
+          run: bazel build -c opt --dynamic_mode=off //xla/backends/cpu/benchmarks:*
   
-        # - name: Run CPU benchmarks
-        #   working-directory: xla
-        #   continue-on-error: true
-        #   run: |
-        #     find ./bazel-bin/xla/backends/cpu/benchmarks/ -maxdepth 1 -type f -executable -name "*_test" -print0 | while IFS= read -r -d $'\0' benchmark; do
-        #       benchmark_name=$(basename "$benchmark" | sed 's/_test$//') 
-        #       echo "Running benchmark: $benchmark_name"
+        - name: Run CPU benchmarks
+          working-directory: xla
+          continue-on-error: true
+          run: |
+            find ./bazel-bin/xla/backends/cpu/benchmarks/ -maxdepth 1 -type f -executable -name "*_test" -print0 | while IFS= read -r -d $'\0' benchmark; do
+              benchmark_name=$(basename "$benchmark" | sed 's/_test$//') 
+              echo "Running benchmark: $benchmark_name"
   
-        #       # Run the benchmark with default parameters.
-        #       $benchmark --benchmark_filter=".*"
-        #       $benchmark --benchmark_filter=".*" > "results/$benchmark_name.log" 2>&1
+              # Run the benchmark with default parameters.
+              $benchmark --benchmark_filter=".*"
+              $benchmark --benchmark_filter=".*" > "results/$benchmark_name.log" 2>&1
   
-        #       # Check the exit code of the benchmark
-        #       if [ $? -ne 0 ]; then
-        #         echo "Error: Benchmark '$benchmark_name' failed. Check the log file: results/$benchmark_name.log"
-        #       else
-        #         echo "Benchmark '$benchmark_name' completed successfully."
-        #       fi
-        #     done
-        # - name: Upload Results ${{ matrix.build_target }}
-        #   uses: actions/upload-artifact@v4
-        #   with:
-        #     name: cpu-xla-benchmarks-${{ matrix.job_info.os }}
-        #     path: xla/results
+              # Check the exit code of the benchmark
+              if [ $? -ne 0 ]; then
+                echo "Error: Benchmark '$benchmark_name' failed. Check the log file: results/$benchmark_name.log"
+              else
+                echo "Benchmark '$benchmark_name' completed successfully."
+              fi
+            done
+        - name: Upload Results ${{ matrix.build_target }}
+          uses: actions/upload-artifact@v4
+          with:
+            name: cpu-xla-benchmarks-${{ matrix.job_info.os }}
+            path: xla/results
 
   # build-xla-gpu-and-test:
   #   runs-on: "linux-x86-n2-16" #linux-x86-g2-48-l4-4gpu # Use a GPU-enabled runner
@@ -311,18 +311,18 @@ jobs:
   #     # - name: Create gpu_hlo_backend.hlo
   #     #   working-directory: xla
   #     #   run: |
-  #         # cat << EOF > gpu_hlo_backend.hlo
-  #         # HloModule module
-  #         # // CHECK: is_scheduled=true
+          # cat << EOF > gpu_hlo_backend.hlo
+          # HloModule module
+          # // CHECK: is_scheduled=true
           
-  #         # ENTRY computation {
-  #         #     p = f32[5000,6000]{1,0} parameter(0)
-  #         #     e = f32[5000,6000]{1,0} sqrt(p)
-  #         #     c = f32[6000,5000] transpose(p), dimensions={1,0}
-  #         #     r = f32[300,20,5000] reshape(c)
-  #         #     ROOT out = (f32[5000,6000], f32[300,20,5000]) tuple(e,r)
-  #         # }
-  #         # EOF
+          # ENTRY computation {
+          #     p = f32[5000,6000]{1,0} parameter(0)
+          #     e = f32[5000,6000]{1,0} sqrt(p)
+          #     c = f32[6000,5000] transpose(p), dimensions={1,0}
+          #     r = f32[300,20,5000] reshape(c)
+          #     ROOT out = (f32[5000,6000], f32[300,20,5000]) tuple(e,r)
+          # }
+          # EOF
           
   #     # - name: Wait For Connection
   #     #   uses: google-ml-infra/actions/ci_connection@main
