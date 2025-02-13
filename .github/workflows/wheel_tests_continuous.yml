@@ -20,6 +20,9 @@ name: CI - Wheel Tests (Continuous)
 on:
   schedule:
     - cron: "0 */2 * * *" # Run once every 2 hours
+  pull_request:
+    branches:
+      - main 
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
@@ -84,18 +87,10 @@ jobs:
         fail-fast: false # don't cancel all jobs on failure
         matrix:
           # Python values need to match the matrix stategy in the artifact build jobs above
-          runner: ["linux-x86-g2-48-l4-4gpu", "linux-x86-a3-8g-h100-8gpu"]
+          runner: ["linux-x86-g2-48-l4-4gpu"]
           python: ["3.10",]
           cuda: ["12.3", "12.1"]
           enable-x64: [1, 0]
-          exclude:
-            # Run only a single configuration on H100 to save resources
-            - runner: "linux-x86-a3-8g-h100-8gpu"
-              python: "3.10"
-              cuda: "12.1"
-            - runner: "linux-x86-a3-8g-h100-8gpu"
-              python: "3.10"
-              enable-x64: 0
     with:
       runner: ${{ matrix.runner }}
       python: ${{ matrix.python }}
