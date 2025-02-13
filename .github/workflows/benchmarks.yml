@@ -15,42 +15,42 @@ on:
         - 'yes'
         - 'no'
 
-jobs:
-  Tests:
-      strategy:
-        # Don't fail fast - want to see results for all builds even if one fails.
-        fail-fast: false
-        matrix:
-          job_info: [
-            {
-              os: "linux-x86-n2-16",
-              container: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest",
-              pretty_name: "XLA Linux x86 CPU",
-            },
-            {
-              os: "linux-arm64-c4a-16",
-              container: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build-arm64:latest",
-              pretty_name: "XLA Linux ARM64 CPU",
-            }
-          ]
-      name: ${{ matrix.job_info.pretty_name }}
-      runs-on: ${{ matrix.job_info.os }}
-      container: ${{ matrix.job_info.container }}
-      defaults:
-        run:
-          shell: bash
-      timeout-minutes: 30
-      steps:
-        - name: Print machine specs
-          run: |
-            lscpu
-            free -h  # Memory information
-            df -h    # Disk space information
-            uname -a # Kernel information
-        - name: Wait For Connection
-          uses: google-ml-infra/actions/ci_connection@main
-          with:
-            halt-dispatch-input: ${{ inputs.halt-for-connection }}
+#jobs:
+  # Tests:
+  #     strategy:
+  #       # Don't fail fast - want to see results for all builds even if one fails.
+  #       fail-fast: false
+  #       matrix:
+  #         job_info: [
+  #           {
+  #             os: "linux-x86-n2-16",
+  #             container: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest",
+  #             pretty_name: "XLA Linux x86 CPU",
+  #           },
+  #           {
+  #             os: "linux-arm64-c4a-16",
+  #             container: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build-arm64:latest",
+  #             pretty_name: "XLA Linux ARM64 CPU",
+  #           }
+  #         ]
+  #     name: ${{ matrix.job_info.pretty_name }}
+  #     runs-on: ${{ matrix.job_info.os }}
+  #     container: ${{ matrix.job_info.container }}
+  #     defaults:
+  #       run:
+  #         shell: bash
+  #     timeout-minutes: 30
+  #     steps:
+  #       - name: Print machine specs
+  #         run: |
+  #           lscpu
+  #           free -h  # Memory information
+  #           df -h    # Disk space information
+  #           uname -a # Kernel information
+  #       - name: Wait For Connection
+  #         uses: google-ml-infra/actions/ci_connection@main
+  #         with:
+  #           halt-dispatch-input: ${{ inputs.halt-for-connection }}
   
         # - name: Check Python Version in Container
         #   run: python3 --version
@@ -65,15 +65,15 @@ jobs:
         #       echo "Python 3 found."
         #     fi
   
-        - name: Checkout OpenXLA
-          uses: actions/checkout@v3
-          with:
-            repository: openxla/xla
+        # - name: Checkout OpenXLA
+        #   uses: actions/checkout@v3
+        #   with:
+        #     repository: openxla/xla
   
-        - name: Create results directory
-          working-directory: xla
-          run:
-            mkdir results
+        # - name: Create results directory
+        #   working-directory: xla
+        #   run:
+        #     mkdir results
   
         # - name: Run setup.sh for E2E benchmarks flax_2b
         #   working-directory: xla/backends/cpu/benchmarks/e2e/gemma2/flax_2b
@@ -107,66 +107,67 @@ jobs:
         #       ./bazel-bin/xla/tools/run_hlo_module --input_format=hlo --platform=CPU "$file"
         #     done
   
-        - name: Build CPU Benchmarks
-          working-directory: xla
-          run: bazel build -c opt --dynamic_mode=off //xla/backends/cpu/benchmarks:*
+        # - name: Build CPU Benchmarks
+        #   working-directory: xla
+        #   run: bazel build -c opt --dynamic_mode=off //xla/backends/cpu/benchmarks:*
   
-        - name: Run CPU benchmarks
-          working-directory: xla
-          continue-on-error: true
-          run: |
-            find ./bazel-bin/xla/backends/cpu/benchmarks/ -maxdepth 1 -type f -executable -name "*_test" -print0 | while IFS= read -r -d $'\0' benchmark; do
-              benchmark_name=$(basename "$benchmark" | sed 's/_test$//') 
-              echo "Running benchmark: $benchmark_name"
+        # - name: Run CPU benchmarks
+        #   working-directory: xla
+        #   continue-on-error: true
+        #   run: |
+        #     find ./bazel-bin/xla/backends/cpu/benchmarks/ -maxdepth 1 -type f -executable -name "*_test" -print0 | while IFS= read -r -d $'\0' benchmark; do
+        #       benchmark_name=$(basename "$benchmark" | sed 's/_test$//') 
+        #       echo "Running benchmark: $benchmark_name"
   
-              # Run the benchmark with default parameters.
-              $benchmark --benchmark_filter=".*"
-              $benchmark --benchmark_filter=".*" > "results/$benchmark_name.log" 2>&1
+        #       # Run the benchmark with default parameters.
+        #       $benchmark --benchmark_filter=".*"
+        #       $benchmark --benchmark_filter=".*" > "results/$benchmark_name.log" 2>&1
   
-              # Check the exit code of the benchmark
-              if [ $? -ne 0 ]; then
-                echo "Error: Benchmark '$benchmark_name' failed. Check the log file: results/$benchmark_name.log"
-              else
-                echo "Benchmark '$benchmark_name' completed successfully."
-              fi
-            done
-        - name: Upload Results ${{ matrix.build_target }}
-          uses: actions/upload-artifact@v4
-          with:
-            name: cpu-xla-benchmarks-${{ matrix.job_info.os }}
-            path: xla/results
-  # build-xla-gpu-and-test:
-  #   runs-on: "linux-x86-n2-16" #linux-x86-g2-48-l4-4gpu # Use a GPU-enabled runner
-  #   container:
-  #     image: "gcr.io/tensorflow-testing/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest"
-  #     options: --gpus all --privileged  # Might need privileged mode, use with caution
+        #       # Check the exit code of the benchmark
+        #       if [ $? -ne 0 ]; then
+        #         echo "Error: Benchmark '$benchmark_name' failed. Check the log file: results/$benchmark_name.log"
+        #       else
+        #         echo "Benchmark '$benchmark_name' completed successfully."
+        #       fi
+        #     done
+        # - name: Upload Results ${{ matrix.build_target }}
+        #   uses: actions/upload-artifact@v4
+        #   with:
+        #     name: cpu-xla-benchmarks-${{ matrix.job_info.os }}
+        #     path: xla/results
+jobs:
+  build-xla-gpu-and-test:
+    runs-on: "linux-x86-n2-16" #linux-x86-g2-48-l4-4gpu # Use a GPU-enabled runner
+    container:
+      image: "gcr.io/tensorflow-testing/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest"
+      options: --gpus all --privileged  # Might need privileged mode, use with caution
 
-    # steps:
-    #   - name: Checkout XLA
-    #     uses: actions/checkout@v3
-    #     with:
-    #       repository: openxla/xla  # Replace with your fork if needed
-      # - name: Checkout repository
-      #   uses: actions/checkout@v3
-      #   with:
-      #     repository: juliagmt-google/xla  
-      #     ref: dev
+    steps:
+      - name: Checkout XLA
+        uses: actions/checkout@v3
+        with:
+          repository: openxla/xla  # Replace with your fork if needed
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        with:
+          repository: juliagmt-google/xla  
+          ref: dev
      
-      # - name: Print machine specs
-      #   run: |
-      #     lscpu
-      #     free -h  # Memory information
-      #     df -h    # Disk space information
-      #     uname -a # Kernel information
+      - name: Print machine specs
+        run: |
+          lscpu
+          free -h  # Memory information
+          df -h    # Disk space information
+          uname -a # Kernel information
        
-      # - name: Create results directory
-      #   working-directory: xla
-      #   run: mkdir results
+      - name: Create results directory
+        working-directory: xla
+        run: mkdir results
           
-      # - name: Wait For Connection
-      #   uses: google-ml-infra/actions/ci_connection@main
-      #   with:
-      #     halt-dispatch-input: ${{ inputs.halt-for-connection }}
+      - name: Wait For Connection
+        uses: google-ml-infra/actions/ci_connection@main
+        with:
+          halt-dispatch-input: ${{ inputs.halt-for-connection }}
       # - name: Set up Python 3.10  # Choose your desired Python version
       #   uses: actions/setup-python@v4
       #   with:
