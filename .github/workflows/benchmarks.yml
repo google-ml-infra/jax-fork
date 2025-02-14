@@ -26,7 +26,7 @@ jobs:
       - name: Checkout XLA
         uses: actions/checkout@v3
         with:
-          repository: openxla
+          repository: openxla/xla
 
       - name: Print machine specs
         run: |
@@ -46,7 +46,10 @@ jobs:
         
       - name: Configure XLA
         working-directory: xla
-        run: ./configure.py --backend CUDA --nccl
+        run: |
+          ls
+          cd xla
+          ./configure.py --backend CUDA --nccl
 
       - name: Set TF_CPP_MAX_VLOG_LEVEL
         working-directory: xla
