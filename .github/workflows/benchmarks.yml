@@ -26,8 +26,8 @@ jobs:
       - name: Checkout XLA
         uses: actions/checkout@v3
         with:
-          repository: openxla/xla
-
+          repository: juliagmt-google/xla  
+    
       - name: Print machine specs
         run: |
           lscpu
@@ -39,10 +39,10 @@ jobs:
         working-directory: xla
         run: mkdir results
           
-      - name: Wait For Connection
-        uses: google-ml-infra/actions/ci_connection@main
-        with:
-          halt-dispatch-input: ${{ inputs.halt-for-connection }}
+      # - name: Wait For Connection
+      #   uses: google-ml-infra/actions/ci_connection@main
+      #   with:
+      #     halt-dispatch-input: ${{ inputs.halt-for-connection }}
         
       - name: Configure XLA
         working-directory: xla
@@ -88,7 +88,7 @@ jobs:
       - name: Run an HLO file
         working-directory: xla
         run: |
-          ./bazel-bin/xla/tools/multihost_hlo_runner/hlo_runner_main --device_type=gpu --log_output=True --use_spmd_partitioning --xla_gpu_dump_xspace_to=resultts/xspace.pb gpu_hlo_backend.hlo  &> results/gpu_hlo_backend.log
+          ./bazel-bin/xla/tools/multihost_hlo_runner/hlo_runner_main --device_type=gpu --log_output=True --use_spmd_partitioning --xla_gpu_dump_xspace_to=results/xspace.pbtxt gpu_hlo_backend.hlo  &> results/gpu_hlo_backend.log
     
       - name: Wait For Connection
         uses: google-ml-infra/actions/ci_connection@main
