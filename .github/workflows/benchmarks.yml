@@ -3,7 +3,7 @@ name: Benchmarks
 on:
   workflow_dispatch:  # Allows manual triggering
   schedule:
-    - cron: '0 */6 * * *'  # Run every 6 hours (at minute 0 of hours 0, 6, 12, 18)
+    - cron: '0 */1 * * *'  # Run every 1 hours (at minute 0
   # workflow_dispatch:
   #   inputs:
   #     halt-for-connection:
