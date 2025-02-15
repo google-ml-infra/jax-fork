@@ -1,9 +1,9 @@
 name: Benchmarks
 
 on:
-  workflow_dispatch:  # Allows manual triggering
-  schedule:
-    - cron: '0 */1 * * *'  # Run every 1 hours (at minute 0
+  pull_request:
+    branches:
+      - main
   # workflow_dispatch:
   #   inputs:
   #     halt-for-connection:
