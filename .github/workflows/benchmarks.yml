@@ -7,146 +7,146 @@ on:
   workflow_dispatch:  # Allows manual triggering
   schedule:
     - cron: '0 */6 * * *'  # Run every 6 hours (at minute 0 of hours 0, 6, 12, 18)
-  # workflow_dispatch:
-  #   inputs:
-  #     halt-for-connection:
-  #       description: 'Should this workflow run wait for a remote connection?'
-  #       type: choice
-  #       required: true
-  #       default: 'no'
-  #       options:
-  #       - 'yes'
-  #       - 'no'
-
-# jobs:
-#   build-xla-gpu-and-test:
-#     runs-on: "linux-x86-g2-48-l4-4gpu" #linux-x86-n2-16 # Use a GPU-enabled runner 
-#     container:
-#       image: "gcr.io/tensorflow-testing/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest"
-#       options: --gpus all --privileged  # Might need privileged mode, use with caution
-
-#     steps:
-#       - name: Checkout XLA
-#         uses: actions/checkout@v3
-#         with:
-#           repository: juliagmt-google/xla  
-    
-#       - name: Print machine specs
-#         run: |
-#           lscpu
-#           free -h  # Memory information
-#           df -h    # Disk space information
-#           uname -a # Kernel information
-       
-#       - name: Create results directory
-#         working-directory: xla
-#         run: mkdir results
-          
-#       # - name: Wait For Connection
-#       #   uses: google-ml-infra/actions/ci_connection@main
-#       #   with:
-#       #     halt-dispatch-input: ${{ inputs.halt-for-connection }}
-        
-#       - name: Configure XLA
-#         working-directory: xla
-#         run: |
-#           cd ..
-#           ls
-#           ./configure.py --backend CUDA --nccl
-
-#       - name: Set TF_CPP_MAX_VLOG_LEVEL
-#         working-directory: xla
-#         run: echo "TF_CPP_MAX_VLOG_LEVEL=1" >> $GITHUB_ENV  # Use GITHUB_ENV to persist across steps
-
-#       - name: Build hlo_runner_main
-#         working-directory: xla
-#         run: bazel build -c opt --config=cuda --dynamic_mode=off //xla/tools/multihost_hlo_runner:hlo_runner_main
-        
-#       # - name: Wait For Connection
-#       #   uses: google-ml-infra/actions/ci_connection@main
-#       #   with:
-#       #     halt-dispatch-input: ${{ inputs.halt-for-connection }}
-          
-#       # - name: Wait For Connection
-#       #   uses: google-ml-infra/actions/ci_connection@main
-#       #   with:
-#       #     halt-dispatch-input: ${{ inputs.halt-for-connection }}
-          
-#       - name: Run an HLO file
-#         working-directory: xla
-#         run: |
-#           cd ..
-#           ./bazel-bin/xla/tools/multihost_hlo_runner/hlo_runner_main --device_type=gpu --log_output=True --use_spmd_partitioning --xla_gpu_dump_xspace_to=xla/results/xspace.pbtxt xla/tools/hlo_opt/tests/gpu_hlo_pass.hlo  &> xla/results/gpu_hlo_backend.log
-    
-#       # - name: Wait For Connection
-#       #   uses: google-ml-infra/actions/ci_connection@main
-#       #   with:
-#       #     halt-dispatch-input: ${{ inputs.halt-for-connection }}
-   
-#   #     # - name: Download parse_xla_logs.py
-#   #     #   working-directory: xla
-#   #     #   run: wget https://raw.githubusercontent.com/juliagmt-google/xla/main/.github/workflows/parse_xla_logs.py  
-
-#   #     # - name: Parse XLA logs
-#   #     #   working-directory: xla
-#   #     #   run: python parse_xla_logs.py results/gpu_hlo_backend.log
-
-#       - name: Upload Results
-#         uses: actions/upload-artifact@v4
-#         with:
-#           name: gpu-xla-benchmarks
-#           path: xla/results
- 
+  workflow_dispatch:
+    inputs:
+      halt-for-connection:
+        description: 'Should this workflow run wait for a remote connection?'
+        type: choice
+        required: true
+        default: 'no'
+        options:
+        - 'yes'
+        - 'no'
 
 jobs:
-  Tests:
-    strategy:
-      # Don't fail fast - want to see results for all builds even if one fails.
-      fail-fast: false
-      matrix:
-        job_info:
-          - os: "linux-x86-g2-48-l4-4gpu"
-            image: "gcr.io/tensorflow-testing/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest"
-            pretty_name: "Linux X86 runner with 4 NVIDIA L4 GPUs"
-          # Expect more GPU types in the future.
-    name: ${{ matrix.job_info.pretty_name }}
-    runs-on: ${{ matrix.job_info.os }}
-    container: ${{ matrix.job_info.container }}
-    defaults:
-      run:
-        shell: bash
-    timeout-minutes: 360
+  build-xla-gpu-and-test:
+    runs-on: "linux-x86-g2-48-l4-4gpu" #linux-x86-n2-16 # Use a GPU-enabled runner 
+    container:
+      image: "gcr.io/tensorflow-testing/nosla-cuda12.3-cudnn9.1-ubuntu20.04-manylinux2014-multipython:latest"
+      options: --gpus all --privileged  # Might need privileged mode, use with caution
+
     steps:
       - name: Checkout XLA
-        uses: actions/checkout@v4 # v4.1.1
+        uses: actions/checkout@v3
         with:
-           repository: openxla/xla  
+          repository: openxla/xla  
+    
+      - name: Print machine specs
+        run: |
+          lscpu
+          free -h  # Memory information
+          df -h    # Disk space information
+          uname -a # Kernel information
+       
+      - name: Create results directory
+        working-directory: xla
+        run: mkdir results
+          
       - name: Wait For Connection
         uses: google-ml-infra/actions/ci_connection@main
         with:
           halt-dispatch-input: ${{ inputs.halt-for-connection }}
-      - name: Print machine specs
-        run: |
-          nvidia-smi
-          free -h  # Memory information
-          df -h    # Disk space information
-          uname -a # Kernel information
-      - name: Create results directory
-        run: mkdir results
-      - name: Configure XLA for GPU backend
-        run: ./configure.py --backend CUDA --nccl
-      - name: Set TF_CPP_MAX_VLOG_LEVEL
-        env:
-          TF_CPP_MAX_VLOG_LEVEL: 1
-        run: |
-          echo "TF_CPP_MAX_VLOG_LEVEL is: $TF_CPP_MAX_VLOG_LEVEL"
-      - name: Build hlo_runner_main
-        run: bazel build -c opt --config=cuda --dynamic_mode=off //xla/tools/multihost_hlo_runner:hlo_runner_main
-      # TODO(juliagmt): Add more performance-criticalHLOs to benchmark.
-      - name: Run xla/tools/hlo_opt/tests/gpu_hlo_pass.hlo
-        run: ./bazel-bin/xla/tools/multihost_hlo_runner/hlo_runner_main --device_type=gpu --log_output=True --use_spmd_partitioning --xla_gpu_dump_xspace_to=xla/results/xspace.pbtxt xla/tools/hlo_opt/tests/gpu_hlo_pass.hlo
-      - name: Upload XSpace
-        uses: actions/upload-artifact@v4 # v4.1.1
-        with:
-          name: gpu-xla-benchmarks-xspace
-          path: xla/results/xspace.pbtxt
+        
+  #     - name: Configure XLA
+  #       working-directory: xla
+  #       run: |
+  #         cd ..
+  #         ls
+  #         ./configure.py --backend CUDA --nccl
+
+  #     - name: Set TF_CPP_MAX_VLOG_LEVEL
+  #       working-directory: xla
+  #       run: echo "TF_CPP_MAX_VLOG_LEVEL=1" >> $GITHUB_ENV  # Use GITHUB_ENV to persist across steps
+
+  #     - name: Build hlo_runner_main
+  #       working-directory: xla
+  #       run: bazel build -c opt --config=cuda --dynamic_mode=off //xla/tools/multihost_hlo_runner:hlo_runner_main
+        
+  #     # - name: Wait For Connection
+  #     #   uses: google-ml-infra/actions/ci_connection@main
+  #     #   with:
+  #     #     halt-dispatch-input: ${{ inputs.halt-for-connection }}
+          
+  #     # - name: Wait For Connection
+  #     #   uses: google-ml-infra/actions/ci_connection@main
+  #     #   with:
+  #     #     halt-dispatch-input: ${{ inputs.halt-for-connection }}
+          
+  #     - name: Run an HLO file
+  #       working-directory: xla
+  #       run: |
+  #         cd ..
+  #         ./bazel-bin/xla/tools/multihost_hlo_runner/hlo_runner_main --device_type=gpu --log_output=True --use_spmd_partitioning --xla_gpu_dump_xspace_to=xla/results/xspace.pbtxt xla/tools/hlo_opt/tests/gpu_hlo_pass.hlo  &> xla/results/gpu_hlo_backend.log
+    
+  #     # - name: Wait For Connection
+  #     #   uses: google-ml-infra/actions/ci_connection@main
+  #     #   with:
+  #     #     halt-dispatch-input: ${{ inputs.halt-for-connection }}
+   
+  # #     # - name: Download parse_xla_logs.py
+  # #     #   working-directory: xla
+  # #     #   run: wget https://raw.githubusercontent.com/juliagmt-google/xla/main/.github/workflows/parse_xla_logs.py  
+
+  # #     # - name: Parse XLA logs
+  # #     #   working-directory: xla
+  # #     #   run: python parse_xla_logs.py results/gpu_hlo_backend.log
+
+  #     - name: Upload Results
+  #       uses: actions/upload-artifact@v4
+  #       with:
+  #         name: gpu-xla-benchmarks
+  #         path: xla/results
+ 
+
+# jobs:
+#   Tests:
+#     strategy:
+#       # Don't fail fast - want to see results for all builds even if one fails.
+#       fail-fast: false
+#       matrix:
+#         job_info:
+#           - os: "linux-x86-g2-48-l4-4gpu"
+#             container: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest",
+#             pretty_name: "Linux X86 runner with 4 NVIDIA L4 GPUs"
+#           # Expect more GPU types in the future.
+#     name: ${{ matrix.job_info.pretty_name }}
+#     runs-on: ${{ matrix.job_info.os }}
+#     container: ${{ matrix.job_info.container }}
+#     defaults:
+#       run:
+#         shell: bash
+#     timeout-minutes: 360
+#     steps:
+#       - name: Checkout XLA
+#         uses: actions/checkout@v4 # v4.1.1
+#         with:
+#            repository: openxla/xla  
+#       - name: Wait For Connection
+#         uses: google-ml-infra/actions/ci_connection@main
+#         with:
+#           halt-dispatch-input: ${{ inputs.halt-for-connection }}
+#       - name: Print machine specs
+#         run: |
+#           nvidia-smi
+#           free -h  # Memory information
+#           df -h    # Disk space information
+#           uname -a # Kernel information
+#       - name: Create results directory
+#         run: mkdir results
+#       - name: Configure XLA for GPU backend
+#         run: ./configure.py --backend CUDA --nccl
+#       - name: Set TF_CPP_MAX_VLOG_LEVEL
+#         env:
+#           TF_CPP_MAX_VLOG_LEVEL: 1
+#         run: |
+#           echo "TF_CPP_MAX_VLOG_LEVEL is: $TF_CPP_MAX_VLOG_LEVEL"
+#       - name: Build hlo_runner_main
+#         run: bazel build -c opt --config=cuda --dynamic_mode=off //xla/tools/multihost_hlo_runner:hlo_runner_main
+#       # TODO(juliagmt): Add more performance-criticalHLOs to benchmark.
+#       - name: Run xla/tools/hlo_opt/tests/gpu_hlo_pass.hlo
+#         run: ./bazel-bin/xla/tools/multihost_hlo_runner/hlo_runner_main --device_type=gpu --log_output=True --use_spmd_partitioning --xla_gpu_dump_xspace_to=xla/results/xspace.pbtxt xla/tools/hlo_opt/tests/gpu_hlo_pass.hlo
+#       - name: Upload XSpace
+#         uses: actions/upload-artifact@v4 # v4.1.1
+#         with:
+#           name: gpu-xla-benchmarks-xspace
+#           path: xla/results/xspace.pbtxt
