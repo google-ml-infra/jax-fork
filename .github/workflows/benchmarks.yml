@@ -121,6 +121,10 @@ jobs:
         uses: actions/checkout@v4 # v4.1.1
         with:
            repository: openxla/xla  
+      - name: Wait For Connection
+        uses: google-ml-infra/actions/ci_connection@main
+        with:
+          halt-dispatch-input: ${{ inputs.halt-for-connection }}
       - name: Print machine specs
         run: |
           nvidia-smi
