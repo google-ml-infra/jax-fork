@@ -127,13 +127,13 @@ jobs:
           free -h  # Memory information
           df -h    # Disk space information
           uname -a # Kernel information
-      # - name: Create results directory
-      #   run: mkdir results
-      # - name: Configure XLA for GPU backend
-      #   run: ./configure.py --backend CUDA --nccl
-      # - name: Set TF_CPP_MAX_VLOG_LEVEL
-      #   env:
-      #     TF_CPP_MAX_VLOG_LEVEL: 1
+      - name: Create results directory
+        run: mkdir results
+      - name: Configure XLA for GPU backend
+        run: ./configure.py --backend CUDA --nccl
+      - name: Set TF_CPP_MAX_VLOG_LEVEL
+        env:
+          TF_CPP_MAX_VLOG_LEVEL: 1
       # - name: Build hlo_runner_main
       #   run: bazel build -c opt --config=cuda --dynamic_mode=off //xla/tools/multihost_hlo_runner:hlo_runner_main
       # # TODO(juliagmt): Add more performance-criticalHLOs to benchmark.
