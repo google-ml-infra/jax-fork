@@ -29,7 +29,7 @@ jobs:
       - name: Checkout XLA
         uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
         with:
-          path: "openxla/xla"
+            repository: openxla/xla
 
       - name: Print machine specs
         run: |
@@ -39,12 +39,12 @@ jobs:
           uname -a # Kernel information
 
       - name: Create results directory
-        run: mkdir results
+        run: |
+          mkdir results
+          ls 
 
       - name: Configure XLA for GPU backend
         run: |
-          ls
-          cd openxla/xla
           ls
           ./configure.py --backend CUDA --nccl
 
