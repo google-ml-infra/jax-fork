@@ -42,25 +42,25 @@ jobs:
         working-directory: xla
         run: mkdir results
           
-      - name: Wait For Connection
-        uses: google-ml-infra/actions/ci_connection@main
-        with:
-          halt-dispatch-input: ${{ inputs.halt-for-connection }}
+      # - name: Wait For Connection
+      #   uses: google-ml-infra/actions/ci_connection@main
+      #   with:
+      #     halt-dispatch-input: ${{ inputs.halt-for-connection }}
         
-  #     - name: Configure XLA
-  #       working-directory: xla
-  #       run: |
-  #         cd ..
-  #         ls
-  #         ./configure.py --backend CUDA --nccl
+      - name: Configure XLA
+        working-directory: xla
+        run: |
+          cd ..
+          ls
+          ./configure.py --backend CUDA --nccl
 
   #     - name: Set TF_CPP_MAX_VLOG_LEVEL
   #       working-directory: xla
   #       run: echo "TF_CPP_MAX_VLOG_LEVEL=1" >> $GITHUB_ENV  # Use GITHUB_ENV to persist across steps
 
-  #     - name: Build hlo_runner_main
-  #       working-directory: xla
-  #       run: bazel build -c opt --config=cuda --dynamic_mode=off //xla/tools/multihost_hlo_runner:hlo_runner_main
+      - name: Build hlo_runner_main
+        working-directory: xla
+        run: bazel build -c opt --config=cuda --dynamic_mode=off //xla/tools/multihost_hlo_runner:hlo_runner_main
         
   #     # - name: Wait For Connection
   #     #   uses: google-ml-infra/actions/ci_connection@main
@@ -72,11 +72,18 @@ jobs:
   #     #   with:
   #     #     halt-dispatch-input: ${{ inputs.halt-for-connection }}
           
-  #     - name: Run an HLO file
-  #       working-directory: xla
-  #       run: |
-  #         cd ..
-  #         ./bazel-bin/xla/tools/multihost_hlo_runner/hlo_runner_main --device_type=gpu --log_output=True --use_spmd_partitioning --xla_gpu_dump_xspace_to=xla/results/xspace.pbtxt xla/tools/hlo_opt/tests/gpu_hlo_pass.hlo  &> xla/results/gpu_hlo_backend.log
+      - name: Run an HLO file
+        working-directory: xla
+        run: |
+          cd ..
+          ./bazel-bin/xla/tools/multihost_hlo_runner/hlo_runner_main --device_type=gpu --log_output=True --use_spmd_partitioning --xla_gpu_dump_xspace_to=xla/results/xspace.pb xla/tools/hlo_opt/tests/gpu_hlo_pass.hlo 
+
+     - name: Get Device Stats
+        working-directory: xla
+        run: |
+          cd ..
+          PWD=$(pwd)
+          bazel run //xla/tools:get_device_stats_main -- --input=$PWD/xla/results/xspace.pb
     
   #     # - name: Wait For Connection
   #     #   uses: google-ml-infra/actions/ci_connection@main
@@ -91,11 +98,11 @@ jobs:
   # #     #   working-directory: xla
   # #     #   run: python parse_xla_logs.py results/gpu_hlo_backend.log
 
-  #     - name: Upload Results
-  #       uses: actions/upload-artifact@v4
-  #       with:
-  #         name: gpu-xla-benchmarks
-  #         path: xla/results
+      - name: Upload Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-xla-benchmarks
+          path: xla/results
  
 
 # jobs:
