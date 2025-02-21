@@ -34,13 +34,11 @@ jobs:
           mkdir results
           ls
           cd results
-          run: wget https://raw.githubusercontent.com/juliagmt-google/xla/main/xla/tools/get_device_stats.cc
       - name: Upload Artifacts
         uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
         with:
-          name: my-artifacts # Name of the artifact
-          path: |
-            results/get_device_stats.cc
+          name: gpu-xla-benchmarks
+          path: xla/results
     
       # - name: Print machine specs
       #   run: |
