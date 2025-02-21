@@ -40,6 +40,7 @@ jobs:
 
       - name: Create results directory
         run: |
+          cd xla
           mkdir results
           ls 
 
@@ -56,14 +57,14 @@ jobs:
 
       - name: Build hlo_runner_main
         run: bazel build -c opt --config=cuda --dynamic_mode=off //xla/tools/multihost_hlo_runner:hlo_runner_main
-      - name: Wait For Connection
-        uses: google-ml-infra/actions/ci_connection@main
-        with:
-          halt-dispatch-input: ${{ inputs.halt-for-connection }}
+      # - name: Wait For Connection
+      #   uses: google-ml-infra/actions/ci_connection@main
+      #   with:
+      #     halt-dispatch-input: ${{ inputs.halt-for-connection }}
       # TODO(juliagmt): Add more performance-criticalHLOs to benchmark.
       - name: Run xla/tools/hlo_opt/tests/gpu_hlo_pass.hlo
         run: |
-          ./bazel-bin/xla/tools/multihost_hlo_runner/hlo_runner_main --device_type=gpu --log_output=True --use_spmd_partitioning --xla_gpu_dump_xspace_to=results/xspace.pb xla/tools/hlo_opt/tests/gpu_hlo_pass.hlo
+          ./bazel-bin/xla/tools/multihost_hlo_runner/hlo_runner_main --device_type=gpu --log_output=True --use_spmd_partitioning --xla_gpu_dump_xspace_to=xla/results/xspace.pb xla/tools/hlo_opt/tests/gpu_hlo_pass.hlo
 
       - name: Compute the cost of gpu_hlo_pass.hlo
         run: |
@@ -75,6 +76,11 @@ jobs:
         with:
           repository: juliagmt-google/xla
           path: juliagmt-google-xla
+                
+      - name: Wait For Connection
+        uses: google-ml-infra/actions/ci_connection@main
+        with:
+          halt-dispatch-input: ${{ inputs.halt-for-connection }}
 
       - name: Run get_device_stats_main
         run: |
