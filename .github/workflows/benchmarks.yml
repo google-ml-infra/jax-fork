@@ -29,7 +29,7 @@ jobs:
       - name: Checkout XLA
         uses: actions/checkout@v3
         with:
-          repository: openxla/xla  
+          repository: juliagmt/xla  
     
       - name: Print machine specs
         run: |
