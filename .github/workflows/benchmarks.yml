@@ -42,6 +42,7 @@ jobs:
         run: mkdir results
 
       - name: Configure XLA for GPU backend
+        working-directory: openxla/xla
         run: |
           ./configure.py --backend CUDA --nccl
 
