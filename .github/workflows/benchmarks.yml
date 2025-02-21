@@ -27,82 +27,80 @@ jobs:
 
     steps:
       - name: Checkout XLA
-        uses: actions/checkout@v4 # v4.1.1
-        with:
-          repository: juliagmt-google/xla  
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
     
-      - name: Print machine specs
-        run: |
-          lscpu
-          free -h  # Memory information
-          df -h    # Disk space information
-          uname -a # Kernel information
+      # - name: Print machine specs
+      #   run: |
+      #     lscpu
+      #     free -h  # Memory information
+      #     df -h    # Disk space information
+      #     uname -a # Kernel information
        
-      - name: Create results directory
-        working-directory: xla
-        run: mkdir results
+      # - name: Create results directory
+      #   working-directory: xla
+      #   run: mkdir results
           
       # - name: Wait For Connection
       #   uses: google-ml-infra/actions/ci_connection@main
       #   with:
       #     halt-dispatch-input: ${{ inputs.halt-for-connection }}
         
-      - name: Configure XLA
-        working-directory: xla
-        run: |
-          cd ..
-          ls
-          ./configure.py --backend CUDA --nccl
+      # - name: Configure XLA
+      #   working-directory: xla
+      #   run: |
+      #     cd ..
+      #     ls
+      #     ./configure.py --backend CUDA --nccl
 
   #     - name: Set TF_CPP_MAX_VLOG_LEVEL
   #       working-directory: xla
   #       run: echo "TF_CPP_MAX_VLOG_LEVEL=1" >> $GITHUB_ENV  # Use GITHUB_ENV to persist across steps
 
-      - name: Build hlo_runner_main
-        working-directory: xla
-        run: bazel build -c opt --config=cuda --dynamic_mode=off //xla/tools/multihost_hlo_runner:hlo_runner_main
+      # - name: Build hlo_runner_main
+      #   working-directory: xla
+      #   run: bazel build -c opt --config=cuda --dynamic_mode=off //xla/tools/multihost_hlo_runner:hlo_runner_main
         
-  #     # - name: Wait For Connection
-  #     #   uses: google-ml-infra/actions/ci_connection@main
-  #     #   with:
-  #     #     halt-dispatch-input: ${{ inputs.halt-for-connection }}
+      # - name: Wait For Connection
+      #   uses: google-ml-infra/actions/ci_connection@main
+      #   with:
+      #     halt-dispatch-input: ${{ inputs.halt-for-connection }}
           
-  #     # - name: Wait For Connection
-  #     #   uses: google-ml-infra/actions/ci_connection@main
-  #     #   with:
-  #     #     halt-dispatch-input: ${{ inputs.halt-for-connection }}
+      # - name: Wait For Connection
+      #   uses: google-ml-infra/actions/ci_connection@main
+      #   with:
+      #     halt-dispatch-input: ${{ inputs.halt-for-connection }}
           
-      - name: Run an HLO file
-        working-directory: xla
-        run: |
-          cd ..
-          ./bazel-bin/xla/tools/multihost_hlo_runner/hlo_runner_main --device_type=gpu --log_output=True --use_spmd_partitioning --xla_gpu_dump_xspace_to=xla/results/xspace.pb xla/tools/hlo_opt/tests/gpu_hlo_pass.hlo 
+      # - name: Run an HLO file
+      #   working-directory: xla
+      #   run: |
+      #     cd ..
+      #     ./bazel-bin/xla/tools/multihost_hlo_runner/hlo_runner_main --device_type=gpu --log_output=True --use_spmd_partitioning --xla_gpu_dump_xspace_to=xla/results/xspace.pb xla/tools/hlo_opt/tests/gpu_hlo_pass.hlo 
 
-      - name: Get Device Stats
-        working-directory: xla
-        run: |
-          cd ..
-          PWD=$(pwd)
-          bazel run //xla/tools:get_device_stats_main -- --input=$PWD/xla/results/xspace.pb
+      # - name: Get Device Stats
+      #   working-directory: xla
+      #   run: |
+      #     cd ..
+      #     PWD=$(pwd)
+      #     bazel run //xla/tools:get_device_stats_main -- --input=$PWD/xla/results/xspace.pb
     
-  #     # - name: Wait For Connection
-  #     #   uses: google-ml-infra/actions/ci_connection@main
-  #     #   with:
-  #     #     halt-dispatch-input: ${{ inputs.halt-for-connection }}
+      # - name: Wait For Connection
+      #   uses: google-ml-infra/actions/ci_connection@main
+      #   with:
+      #     halt-dispatch-input: ${{ inputs.halt-for-connection }}
    
-  # #     # - name: Download parse_xla_logs.py
-  # #     #   working-directory: xla
-  # #     #   run: wget https://raw.githubusercontent.com/juliagmt-google/xla/main/.github/workflows/parse_xla_logs.py  
+      # - name: Download parse_xla_logs.py
+      #   working-directory: xla
+      #   run: wget https://raw.githubusercontent.com/juliagmt-google/xla/main/.github/workflows/parse_xla_logs.py  
 
-  # #     # - name: Parse XLA logs
-  # #     #   working-directory: xla
-  # #     #   run: python parse_xla_logs.py results/gpu_hlo_backend.log
+      # - name: Parse XLA logs
+      #   working-directory: xla
+      #   run: python parse_xla_logs.py results/gpu_hlo_backend.log
 
-      - name: Upload Results
-        uses: actions/upload-artifact@v4
-        with:
-          name: gpu-xla-benchmarks
-          path: xla/results
+      # - name: Upload Results
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: gpu-xla-benchmarks
+      #     path: xla/results
  
 
 # jobs:
