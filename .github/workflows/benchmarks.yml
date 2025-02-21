@@ -28,6 +28,19 @@ jobs:
     steps:
       - name: Checkout XLA
         uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+
+      - name: Create results directory
+        run: |
+          mkdir results
+          ls
+          cd results
+          run: wget https://raw.githubusercontent.com/juliagmt-google/xla/main/xla/tools/get_device_stats.cc
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@b4ffde65f46336ab88eb53be808477a3936bae11
+        with:
+          name: my-artifacts # Name of the artifact
+          path: |
+            results/get_device_stats.cc
     
       # - name: Print machine specs
       #   run: |
