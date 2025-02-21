@@ -44,7 +44,8 @@ jobs:
       - name: Configure XLA for GPU backend
         run: |
           ls
-          cd xla
+          cd openxla/xla
+          ls
           ./configure.py --backend CUDA --nccl
 
       - name: Set TF_CPP_MAX_VLOG_LEVEL
