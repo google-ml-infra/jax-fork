@@ -56,6 +56,10 @@ jobs:
 
       - name: Build hlo_runner_main
         run: bazel build -c opt --config=cuda --dynamic_mode=off //xla/tools/multihost_hlo_runner:hlo_runner_main
+      - name: Wait For Connection
+        uses: google-ml-infra/actions/ci_connection@main
+        with:
+          halt-dispatch-input: ${{ inputs.halt-for-connection }}
       # - name: Wait For Connection
       #   uses: google-ml-infra/actions/ci_connection@main
       #   with:
