@@ -46,7 +46,7 @@ jobs:
 
       - name: Create results directory
         run: |
-          mkdir -p $WORKSPACE_DIR/results
+          mkdir -p results
           ls
 
       - name: Configure XLA for GPU backend
