@@ -38,8 +38,14 @@ jobs:
           df -h    # Disk space information
           uname -a # Kernel information
 
+      - name: Set WORKSPACE_DIR
+        env:
+          WORKSPACE_DIR: ${{ github.workspace }}
+        run: |
+          echo "WORKSPACE_DIR is: $WORKSPACE_DIR"
+
       - name: Create results directory
-        run: mkdir -p results
+        run: mkdir -p $WORKSPACE_DIR"/results
 
       - name: Configure XLA for GPU backend
         run: |
@@ -50,12 +56,6 @@ jobs:
           TF_CPP_MAX_VLOG_LEVEL: 1
         run: |
           echo "TF_CPP_MAX_VLOG_LEVEL is: $TF_CPP_MAX_VLOG_LEVEL"
-
-      - name: Set WORKSPACE_DIR
-        env:
-          WORKSPACE_DIR: ${{ github.workspace }}
-        run: |
-          echo "WORKSPACE_DIR is: $WORKSPACE_DIR"
 
       - name: Build hlo_runner_main
         run: bazel build -c opt --config=cuda --dynamic_mode=off //xla/tools/multihost_hlo_runner:hlo_runner_main
