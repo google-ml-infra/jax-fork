@@ -1,0 +1,32 @@
+name: Test stopping workflow
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  jax-build-and-test:
+    runs-on: linux-x86-g2-16-l4-1gpu
+    container:
+      image: us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/quoct-test-ml-build:latest
+
+    env:
+      JAXCI_HERMETIC_PYTHON_VERSION: 3.11
+
+    steps:
+      - name: Checkout JAX Fork
+        uses: actions/checkout@v3
+        with:
+          repository: 'google-ml-infra/jax-fork'
+          path: jax-fork
+
+      - name: ls
+        working-directory: jax-fork
+        run: |
+          ls -l
+
+      - name: Sleep
+        working-directory: jax-fork
+        run: |
+          while true; do echo "sleeping"; sleep 40; done
