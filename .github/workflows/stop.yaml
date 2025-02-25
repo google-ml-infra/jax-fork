@@ -7,7 +7,7 @@ on:
 
 jobs:
   jax-build-and-test:
-    runs-on: linux-x86-g2-48-l4-4gpu-quoct
+    runs-on: linux-x86-g2-48-l4-4gpu
     container:
       image: us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/quoct-test-ml-build:latest
 
