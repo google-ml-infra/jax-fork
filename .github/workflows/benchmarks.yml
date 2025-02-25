@@ -85,12 +85,8 @@ jobs:
 
       - name: Compute the device stats of gpu_hlo_pass.hlo
         run: |
-          if [ -f "$XSPACE_PATH" ]; then
-            bazel run //xla/tools:get_device_stats_main -- --input="$XSPACE_PATH"
-          else
-            echo "ERROR: xspace.pb not found. Skipping get_device_stats_main."
-            exit 1
-          fi
+          echo "XSPACE_PATH is: $XSPACE_PATH"
+          bazel run //xla/tools:get_device_stats_main -- --input=$XSPACE_PATH
         working-directory: juliagmt-google-xla
 
       - name: Upload XSpace
