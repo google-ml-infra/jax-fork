@@ -45,7 +45,7 @@ jobs:
           echo "WORKSPACE_DIR is: $WORKSPACE_DIR"
 
       - name: Create results directory
-        run: mkdir -p $WORKSPACE_DIR"/results
+        run: mkdir -p $WORKSPACE_DIR/results
 
       - name: Configure XLA for GPU backend
         run: |
