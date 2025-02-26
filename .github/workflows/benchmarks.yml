@@ -38,11 +38,11 @@ jobs:
           df -h    # Disk space information
           uname -a # Kernel information
 
-      - name: Set WORKSPACE_DIR
-        env:
-          WORKSPACE_DIR: ${{ github.workspace }}
-        run: |
-          echo "WORKSPACE_DIR is: $WORKSPACE_DIR"
+      # - name: Set WORKSPACE_DIR
+      #   env:
+      #     WORKSPACE_DIR: ${{ github.workspace }}
+      #   run: |
+      #     echo "WORKSPACE_DIR is: $WORKSPACE_DIR"
 
       - name: Create results directory
         run: |
@@ -59,41 +59,46 @@ jobs:
         run: |
           echo "TF_CPP_MAX_VLOG_LEVEL is: $TF_CPP_MAX_VLOG_LEVEL"
 
-      - name: Build hlo_runner_main
-        run: bazel build -c opt --config=cuda --dynamic_mode=off //xla/tools/multihost_hlo_runner:hlo_runner_main
-
-      # TODO(juliagmt): Add more performance-critical HLOs to benchmark.
-      - name: Run hlo_opt and generate xspace.pb
-        run: |
-          ./bazel-bin/xla/tools/multihost_hlo_runner/hlo_runner_main --device_type=gpu --log_output=True --use_spmd_partitioning --xla_gpu_dump_xspace_to=$WORKSPACE_DIR/results/xspace.pb $WORKSPACE_DIR/xla/tools/hlo_opt/tests/gpu_hlo_pass.hlo
-
-      - name: Set XSPACE_PATH
-        env:
-          XSPACE_PATH: ${{ github.workspace }}/results/xspace.pb
-        run: |
-          echo "XSPACE_PATH is: $XSPACE_PATH"
-
-      - name: Compute the cost of gpu_hlo_pass.hlo
-        run: |
-          bazel run //xla/tools:compute_cost -- --input=$WORKSPACE_DIR/xla/tools/hlo_opt/tests/gpu_hlo_pass.hlo --format=hlo --gpu
-
-      - name: Checkout juliagmt-google/xla
-        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+      - name: Wait For Connection
+        uses: google-ml-infra/actions/ci_connection@main
         with:
-          repository: juliagmt-google/xla
-          path: juliagmt-google-xla
+          halt-dispatch-input: ${{ inputs.halt-for-connection }}
 
-      - name: Compute the device stats of gpu_hlo_pass.hlo
-        run: |
-          echo "XSPACE_PATH is: $XSPACE_PATH"
-          bazel run //xla/tools:get_device_stats_main -- --input=$XSPACE_PATH
-        working-directory: juliagmt-google-xla
+      # - name: Build hlo_runner_main
+      #   run: bazel build -c opt --config=cuda --dynamic_mode=off //xla/tools/multihost_hlo_runner:hlo_runner_main
 
-      - name: Upload XSpace
-        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
-        with:
-          name: gpu-xla-benchmarks-xspace
-          path: $WORKSPACE_DIR/results
+      # # TODO(juliagmt): Add more performance-critical HLOs to benchmark.
+      # - name: Run hlo_opt and generate xspace.pb
+      #   run: |
+      #     ./bazel-bin/xla/tools/multihost_hlo_runner/hlo_runner_main --device_type=gpu --log_output=True --use_spmd_partitioning --xla_gpu_dump_xspace_to=$WORKSPACE_DIR/results/xspace.pb $WORKSPACE_DIR/xla/tools/hlo_opt/tests/gpu_hlo_pass.hlo
+
+      # - name: Set XSPACE_PATH
+      #   env:
+      #     XSPACE_PATH: ${{ github.workspace }}/results/xspace.pb
+      #   run: |
+      #     echo "XSPACE_PATH is: $XSPACE_PATH"
+
+      # - name: Compute the cost of gpu_hlo_pass.hlo
+      #   run: |
+      #     bazel run //xla/tools:compute_cost -- --input=$WORKSPACE_DIR/xla/tools/hlo_opt/tests/gpu_hlo_pass.hlo --format=hlo --gpu
+
+      # - name: Checkout juliagmt-google/xla
+      #   uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+      #   with:
+      #     repository: juliagmt-google/xla
+      #     path: juliagmt-google-xla
+
+      # - name: Compute the device stats of gpu_hlo_pass.hlo
+      #   run: |
+      #     echo "XSPACE_PATH is: $XSPACE_PATH"
+      #     bazel run //xla/tools:get_device_stats_main -- --input=$XSPACE_PATH
+      #   working-directory: juliagmt-google-xla
+
+      # - name: Upload XSpace
+      #   uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
+      #   with:
+      #     name: gpu-xla-benchmarks-xspace
+      #     path: $WORKSPACE_DIR/results
     
       # - name: Print machine specs
       #   run: |
