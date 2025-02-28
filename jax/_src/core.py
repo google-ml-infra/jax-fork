@@ -48,7 +48,7 @@ from jax._src import linear_util as lu
 
 from jax._src import source_info_util
 from jax._src.util import (safe_zip, safe_map, curry, tuple_insert,
-                           tuple_delete,
+                           tuple_delete, cache,
                            HashableFunction, HashableWrapper, weakref_lru_cache,
                            partition_list, StrictABCMeta)
 import jax._src.pretty_printer as pp
@@ -149,8 +149,8 @@ class Jaxpr:
     debug_info = debug_info or lu._missing_debug_info("core.Jaxpr")
     self._debug_info = debug_info.resolve_result_paths()
     # TODO(necula): re-enable these safety checks
-    # assert (not debug_info or len(debug_info.arg_names) == len(invars)), (debug_info, invars)
-    # assert (not debug_info or len(debug_info.result_paths) == len(outvars)), (debug_info, outvars)
+    # assert (len(debug_info.arg_names) == len(invars)), (debug_info, invars)
+    # assert (len(debug_info.result_paths) == len(outvars)), (debug_info, outvars)
 
   def __str__(self):
     return str(self.pretty_print())
@@ -1136,51 +1136,77 @@ class TracingContext(threading.local):
 trace_ctx = TracingContext()
 
 
-@contextmanager
-def take_current_trace():
-  prev = trace_ctx.trace
-  try:
-    trace_ctx.set_trace(eval_trace)
-    yield prev
-  finally:
-    trace_ctx.set_trace(prev)
+class TakeCurrentTraceContextManager:
+  __slots__ = ['prev']
 
-@contextmanager
-def set_current_trace(trace, check_leaks=False):
-  prev = trace_ctx.trace
-  try:
-    trace_ctx.set_trace(trace)
-    yield
-  finally:
-    trace_ctx.set_trace(prev)
-    if check_leaks and config.check_tracer_leaks.value:
-      trace.invalidate()
-      trace_ref = ref(trace)
-      del trace
+  def __enter__(self):
+    self.prev = trace_ctx.trace
+    trace_ctx.set_trace(eval_trace)
+    return self.prev
+
+  def __exit__(self, exc_type, exc_value, traceback):
+    trace_ctx.set_trace(self.prev)
+
+take_current_trace = TakeCurrentTraceContextManager
+
+
+class SetCurrentTraceContextManager:
+  __slots__ = ['trace', 'check_leaks', 'prev']
+
+  def __init__(self, trace, check_leaks=False):
+    self.trace = trace
+    self.check_leaks = check_leaks
+
+  def __enter__(self):
+    self.prev = trace_ctx.trace
+    trace_ctx.set_trace(self.trace)
+
+  def __exit__(self, exc_type, exc_value, traceback):
+    trace_ctx.set_trace(self.prev)
+    if self.check_leaks and config.check_tracer_leaks.value:
+      self.trace.invalidate()
+      trace_ref = ref(self.trace)
+      del self.trace
       live_trace = trace_ref()
       if live_trace is not None:
         leaked_tracers = maybe_find_leaked_tracers(live_trace)
         if leaked_tracers:
           raise leaked_tracer_error("trace", live_trace, leaked_tracers)
 
-@contextmanager
-def extend_axis_env_nd(name_size_pairs : Iterable[tuple[AxisName, int]]):
-  prev = trace_ctx.axis_env
-  try:
-    trace_ctx.set_axis_env(prev.extend_pure(name_size_pairs))
-    yield
-  finally:
-    trace_ctx.set_axis_env(prev)
+set_current_trace = SetCurrentTraceContextManager
 
-@contextmanager
-def add_spmd_axis_names(axis_names: AxisName | None):
-  prev = trace_ctx.axis_env
-  try:
-    if axis_names is not None:
-      trace_ctx.set_axis_env(prev.add_spmd_axis_names(axis_names))
-    yield
-  finally:
-    trace_ctx.set_axis_env(prev)
+class ExtendAxisEnvNdContextManager:
+  __slots__ = ['prev', 'name_size_pairs']
+
+  def __init__(self, name_size_pairs: Iterable[tuple[AxisName, int]]):
+    self.name_size_pairs = name_size_pairs
+
+  def __enter__(self):
+    self.prev = trace_ctx.axis_env
+    trace_ctx.set_axis_env(self.prev.extend_pure(self.name_size_pairs))
+
+  def __exit__(self, exc_type, exc_value, traceback):
+    trace_ctx.set_axis_env(self.prev)
+
+extend_axis_env_nd = ExtendAxisEnvNdContextManager
+
+
+class AddSpmdAxisNamesContextManager:
+  __slots__ = ['prev', 'axis_names']
+
+  def __init__(self, axis_names: AxisName | None):
+    self.axis_names = axis_names
+
+  def __enter__(self):
+    self.prev = trace_ctx.axis_env
+    if self.axis_names is not None:
+      trace_ctx.set_axis_env(self.prev.add_spmd_axis_names(self.axis_names))
+
+  def __exit__(self, exc_type, exc_value, traceback):
+    trace_ctx.set_axis_env(self.prev)
+
+add_spmd_axis_names = AddSpmdAxisNamesContextManager
+
 
 def get_axis_env():
   return trace_ctx.axis_env
@@ -1232,6 +1258,7 @@ def ensure_no_leaks(trace:Trace):
       leaked_tracers = maybe_find_leaked_tracers(live_trace)
       if leaked_tracers:
         raise leaked_tracer_error("trace", live_trace, leaked_tracers)
+
 
 def maybe_find_leaked_tracers(trace: Trace) -> list[Tracer]:
   """Find the leaked tracers holding a reference to the Trace
@@ -1626,7 +1653,9 @@ def physical_aval(aval):
       isinstance(aval.dtype, dtypes.ExtendedDType)):
     elt_aval = physical_element_aval(aval.dtype)
     if isinstance(aval, ShapedArray):
-      return ShapedArray((*aval.shape, *elt_aval.shape), elt_aval.dtype)
+      from jax._src.sharding_impls import physical_sharding  # type: ignore
+      return ShapedArray((*aval.shape, *elt_aval.shape), elt_aval.dtype,
+                         sharding=physical_sharding(aval, aval.sharding))
     return DShapedArray((*aval.shape, *elt_aval.shape), elt_aval.dtype)
   return aval
 
@@ -1747,13 +1776,6 @@ def _invalid_shape_error(shape: Shape, context: str=""):
 
   return TypeError(msg)
 
-def _make_lengths_same(sharding, ndim):
-  if ndim > len(sharding.spec):
-    return sharding.with_spec(sharding.spec._normalized_spec_for_aval(ndim))
-  if ndim < len(sharding.spec):
-    return sharding.with_spec(sharding.spec[:ndim])
-  assert False, "unreachable"
-
 
 # TODO(dougalm): Cast scalar, numpy arrays, etc to jax arrays so that values
 # passed to primitives are always have avals, etc i.e. they are canonical.
@@ -1770,7 +1792,12 @@ def canonicalize_value(val):
   cur_mesh = mesh_lib.get_abstract_mesh()
   if cur_mesh == aval.sharding.mesh:
     return val
-  if cur_mesh._are_all_axes_manual and aval.sharding.mesh._are_all_axes_auto:
+  # Atleast 1 mesh axis should be Manual and all other axes should be
+  # Manual or Auto to allow casting.
+  # TODO(yashkatariy): Casting to Explicit is not yet allowed. Maybe we need
+  # cast_and_slice_p for it since shape might change?
+  if (cur_mesh._any_axis_manual and cur_mesh._are_all_axes_auto_or_manual and
+      aval.sharding.mesh._are_all_axes_auto):
     from jax._src.pjit import mesh_cast  # pytype: disable=import-error
     return mesh_cast(val, NamedSharding(cur_mesh, P(*[None] * aval.ndim)))
   return val
@@ -1780,6 +1807,12 @@ def get_cur_mesh_sharding(spec=None):
   spec = P() if spec is None else spec
   return NamedSharding(mesh_lib.get_abstract_mesh(), spec)
 
+def _make_lengths_same(sharding, ndim):
+  if ndim > len(sharding.spec):
+    return sharding.with_spec(sharding.spec._normalized_spec_for_aval(ndim))
+  if ndim < len(sharding.spec):
+    return sharding.with_spec(sharding.spec[:ndim])
+  assert False, "unreachable"
 
 # TODO(yashkatariya): Only works with User/Auto. Generalize it to work with
 # Collective too.
@@ -1808,13 +1841,21 @@ def _maybe_modify_sharding(sharding, ndim):
   out = sharding.with_spec(modify_spec_for_auto_manual(
       sharding.spec, sharding.mesh))
   if (len(out.spec) != ndim and
-      (out.mesh.empty or out.mesh._are_all_axes_auto or
-       out.mesh._are_all_axes_manual)):
+      (out.mesh.empty or out.mesh._are_all_axes_auto_or_manual)):
     out = _make_lengths_same(out, ndim)
   return out
 
 
+@cache(max_size=4096, trace_context_in_key=True)
 def get_sharding(sharding, ndim):
+  """Modifies and checks the sharding.
+
+  Some modifications/checks include:
+    * Making the length of specs the same as ndim
+    * If a mesh axis is mentioned in pspec is Auto/Manual, replace it with None
+    * Checking for len(spec)-ndim match
+    * Checking if the mesh is an AbstractMesh.
+  """
   if sharding is None:
     return NamedSharding(mesh_lib.empty_abstract_mesh, P(*[None] * ndim))
 
@@ -1876,13 +1917,15 @@ class ShapedArray(UnshapedArray):
     return ShapedArray(self.shape, primal_dtype_to_tangent_dtype(self.dtype),
                        self.weak_type, sharding=self.sharding)
 
-  def str_short(self, short_dtypes=False):
+  def str_short(self, short_dtypes=False, mesh_axis_types=False):
     dt_str = (dtypes.short_dtype_name(self.dtype) if short_dtypes else
               self.dtype.name)
     dt_str = dt_str.replace('void', 'float0')
     if self.sharding is not None:
       shapestr = _get_shape_sharding_str(self.shape, self.sharding.spec)
-      return f'{dt_str}[{shapestr}]'
+      mesh_axes = (f'({self.sharding.mesh.axis_types})'
+                   if mesh_axis_types else '')
+      return f'{dt_str}[{shapestr}]{mesh_axes}'
     else:
       shapestr = ','.join(map(str, self.shape))
       return f'{dt_str}[{shapestr}]'

@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import atexit
 import collections
-from collections.abc import Callable, Generator, Hashable, Iterable, Sequence
+from collections.abc import Callable, Hashable, Iterable, Sequence
 from functools import partial, lru_cache
 import inspect
 import math
@@ -1040,7 +1040,7 @@ def _mapped_axis_spec(args_flat, in_axes_flat):
   for arg, i in zip(args_flat, in_axes_flat):
     if i is not None:
       spec = _get_spec(arg, i)
-      if temp_spec and temp_spec != spec:
+      if temp_spec is not None and temp_spec != spec:
         raise ValueError(
             "Mapped away dimension of inputs passed to vmap should be sharded"
             f" the same. Got inconsistent axis specs: {temp_spec} vs {spec}")
@@ -2274,7 +2274,7 @@ def _check_sharding(aval, s):
       aval = core.get_token_aval()
     if not isinstance(s, PmapSharding):
       pjit.pjit_check_aval_sharding(
-          (s,), (aval,), None, "device_put args", allow_uneven_sharding=False)
+          (s,), (aval,), ("",), "device_put args", allow_uneven_sharding=False)
     s.shard_shape(aval.shape)  # should raise an Error if incompatible
 
 
@@ -2736,10 +2736,9 @@ def named_call(
   return source_info_util.extend_name_stack(name)(fun)
 
 
-@contextmanager
 def named_scope(
     name: str,
-  ) -> Generator[None, None, None]:
+  ) -> source_info_util.ExtendNameStackContextManager:
   """A context manager that adds a user specified name to the JAX name stack.
 
   When staging out computations for just-in-time compilation to XLA (or other
@@ -2786,8 +2785,7 @@ def named_scope(
   """
   if not isinstance(name, str):
     raise TypeError("named_scope name argument must be a string.")
-  with source_info_util.extend_name_stack(name):
-    yield
+  return source_info_util.extend_name_stack(name)
 
 def effects_barrier():
   """Waits until existing functions have completed any side-effects."""
@@ -2827,6 +2825,31 @@ def block_until_ready(x):
   else:
     # Optimized for multiple arrays.
     xc.batched_block_until_ready(arrays)
+
+  return x
+
+def copy_to_host_async(x):
+  """
+  Tries to call a ``copy_to_host_async`` method on pytree leaves.
+
+  For each leaf this method will try to call the ``copy_to_host_async`` method
+  on the leaf. If the leaf is not a JAX array, or if the leaf does not have a
+  ``copy_to_host_async`` method, then this method will do nothing to the leaf.
+
+  Args:
+    x: a pytree, usually with at least some JAX array instances at its leaves.
+
+  Returns:
+    A pytree with the same structure and values of the input, where the host
+    copy of the values of all JAX array leaves are started.
+  """
+  for leaf in tree_leaves(x):
+    try:
+      copy_fn = leaf.copy_to_host_async
+    except AttributeError:
+      pass
+    else:
+      copy_fn()
 
   return x
 

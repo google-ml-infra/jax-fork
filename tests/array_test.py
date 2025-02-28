@@ -29,7 +29,6 @@ from jax._src import op_shardings
 from jax._src import test_util as jtu
 from jax._src import xla_bridge as xb
 from jax._src.lib import xla_client as xc
-from jax._src.lib import xla_extension_version
 from jax._src.lib.mlir import dialects, ir
 from jax._src.util import safe_zip
 from jax._src.mesh import AxisTypes
@@ -825,8 +824,6 @@ class JaxArrayTest(jtu.JaxTestCase):
   @parameterized.product(dtype=jtu.dtypes.all + jtu.dtypes.custom_floats)
   @jtu.run_on_devices("gpu")
   def test_pinned_host_npy_value_doesnt_cache(self, dtype):
-    if xla_extension_version < 314:
-      self.skipTest("Requires XLA extension version >= 314")
     # see https://github.com/jax-ml/jax/issues/26216
     d_tensor = jnp.array(0, dtype=dtype)
     d_sharding = d_tensor.sharding
@@ -935,15 +932,13 @@ class ShardingTest(jtu.JaxTestCase):
     shape = (8, 2)
     mesh = jtu.create_mesh((1, 1, 2), ('replica', 'data', 'mdl'))
     mps = jax.sharding.NamedSharding(mesh, P(None, ('mdl',), None, None))
-    new_mps = jax.sharding.NamedSharding._from_parsed_pspec(
-        mps.mesh, mps._parsed_pspec)
 
     with self.assertRaisesRegex(
         ValueError,
         r"Sharding NamedSharding\(mesh=Mesh\('replica': 1, 'data': 1, 'mdl': 2\), "
-        r"spec=PartitionSpec\(None, \('mdl',\), None, None\).*\) is only "
+        r"spec=PartitionSpec\(None, 'mdl', None, None\).*\) is only "
         "valid for values of rank at least 4, but was applied to a value of rank 2"):
-      new_mps.check_compatible_aval(shape)
+      mps.check_compatible_aval(shape)
 
   def test_is_subclass(self):
     # array version of api_test.py::APITest::test_is_subclass
@@ -1113,6 +1108,12 @@ class ShardingTest(jtu.JaxTestCase):
     s = jax.sharding.PositionalSharding(jax.devices()).reshape(jax.device_count(), 1)
     repr(s)  # doesn't crash
     str(s)  # doesn't crash
+
+  def test_pspec_tuple(self):
+    pspec = P('x', 'y', 'z')
+    self.assertEqual(pspec, ('x', 'y', 'z'))
+    self.assertEqual(pspec.index('z'), 2)
+    self.assertEqual(hash(P(None, 'x', 'y', 'z')), hash(P((), 'x', 'y', 'z')))
 
   @parameterized.named_parameters(
       ('sharded_dim_0', (4, 2), 0),

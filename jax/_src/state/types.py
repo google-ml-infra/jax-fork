@@ -270,6 +270,10 @@ class TransformedRef:
     from jax._src.state.primitives import ref_set  # pytype: disable=import-error
     return ref_set(self, idx, value)
 
+  def swap(self, value, idx=()):
+    from jax._src.state.primitives import ref_swap  # pytype: disable=import-error
+    return ref_swap(self, idx, value)
+
   def get(self, idx=()):
     from jax._src.state.primitives import ref_get  # pytype: disable=import-error
     return ref_get(self, idx)
@@ -357,6 +361,12 @@ class AbstractRef(core.AbstractValue):
 
   @core.aval_method
   @staticmethod
+  def swap(tracer, value, idx=()):
+    from jax._src.state.primitives import ref_swap  # pytype: disable=import-error
+    return ref_swap(tracer, idx, value)
+
+  @core.aval_method
+  @staticmethod
   def set(tracer, value, idx=()):
     from jax._src.state.primitives import ref_set  # pytype: disable=import-error
     return ref_set(tracer, idx, value)
@@ -401,7 +411,7 @@ def shaped_array_ref(
     shape: tuple[int, ...], dtype, weak_type: bool = False) -> AbstractRef:
   return AbstractRef(core.ShapedArray(shape, dtype, weak_type=weak_type))
 
-def _shard_ref(mesh, names, ref_aval: AbstractRef):
+def _shard_ref(mesh, auto, names, ref_aval: AbstractRef):
   del mesh
   if names:
     # Can't actually shard a ref, can only close over it.

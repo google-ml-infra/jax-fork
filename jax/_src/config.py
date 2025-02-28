@@ -304,31 +304,8 @@ class State(config_ext.Config[_T]):
     if self._update_global_hook:
       self._update_global_hook(value)
 
-  @contextlib.contextmanager
   def __call__(self, new_val: Any = no_default):
-    if new_val is no_default:
-      if self._default_context_manager_value is not no_default:
-        new_val = self._default_context_manager_value  # default_context_manager_value provided to constructor
-      else:
-        # no default_value provided to constructor and no value provided as an
-        # argument, so we raise an error
-        raise TypeError(f"Context manager for {self.__name__} config option "
-                        "requires an argument representing the new value for "
-                        "the config option.")
-    if self._validator:
-      self._validator(new_val)
-    prev_val = self.swap_local(new_val)
-    if self._update_thread_local_hook:
-      self._update_thread_local_hook(new_val)
-    try:
-      yield
-    finally:
-      self.set_local(prev_val)
-      if self._update_thread_local_hook:
-        if prev_val is config_ext.unset:
-          self._update_thread_local_hook(None)
-        else:
-          self._update_thread_local_hook(cast(Optional[Any], prev_val))
+    return StateContextManager(self, new_val)
 
   def _add_hooks(self, update_global_hook, update_thread_local_hook):
     """Private method that adds hooks to an existing context-manager.
@@ -337,6 +314,40 @@ class State(config_ext.Config[_T]):
     self._update_thread_local_hook = update_thread_local_hook
     self._update_global_hook = update_global_hook
     update_global_hook(self.get_global())
+
+
+class StateContextManager(contextlib.ContextDecorator):
+  __slots__ = ['state', 'new_val', 'prev']
+
+  def __init__(self, state, new_val):
+    self.state = state
+    self.new_val = new_val
+
+    if new_val is no_default:
+      if state._default_context_manager_value is not no_default:
+        new_val = state._default_context_manager_value  # default_context_manager_value provided to constructor
+      else:
+        # no default_value provided to constructor and no value provided as an
+        # argument, so we raise an error
+        raise TypeError(f"Context manager for {state.__name__} config option "
+                        "requires an argument representing the new value for "
+                        "the config option.")
+    if state._validator:
+      state._validator(new_val)
+
+
+  def __enter__(self):
+    self.prev = self.state.swap_local(self.new_val)
+    if self.state._update_thread_local_hook:
+      self.state._update_thread_local_hook(self.new_val)
+
+  def __exit__(self, exc_type, exc_value, traceback):
+    self.state.set_local(self.prev)
+    if self.state._update_thread_local_hook:
+      if self.prev is config_ext.unset:
+        self.state._update_thread_local_hook(None)
+      else:
+        self.state._update_thread_local_hook(cast(Optional[Any], self.prev))
 
 
 UPGRADE_BOOL_HELP = (
@@ -1790,4 +1801,13 @@ num_cpu_devices = int_state(
         "Number of CPU devices to use. If not provided, the value of "
         "the XLA flag --xla_force_host_platform_device_count is used."
         " Must be set before JAX is initialized."),
+)
+
+enable_empty_arrays = bool_state(
+    name='jax_enable_empty_arrays',
+    default=False,
+    help=(
+        "Enable the creation of an Array from an empty list of single-device "
+        "arrays. This is to support MPMD/pipeline parallelism in McJAX (WIP)."
+    )
 )

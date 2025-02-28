@@ -321,6 +321,14 @@ def _get_arg_type(
   )
 
 
+def _canonicalize_dimension_semantic(
+    dimension_semantic: str | tpu_core.GridDimensionSemantics,
+) -> str:
+  if isinstance(dimension_semantic, tpu_core.GridDimensionSemantics):
+    return dimension_semantic.value
+  return dimension_semantic
+
+
 @dataclasses.dataclass(init=False)
 class MosaicGridMapping:
   grid: tuple[int, ...] | None
@@ -342,7 +350,7 @@ class MosaicGridMapping:
       self,
       jaxpr: jax_core.Jaxpr,
       grid_mapping: pallas_core.GridMapping,
-      dimension_semantics: tuple[str, ...] | None,
+      dimension_semantics: tuple[str | tpu_core.GridDimensionSemantics, ...] | None,
       mesh: mesh_lib.Mesh | None,
       dynamic_shape_replacement_fn: Callable[
           [tuple[jax.DimSize, ...]], tuple[int, ...]
@@ -359,6 +367,9 @@ class MosaicGridMapping:
     )
     if dimension_semantics is None:
       dimension_semantics = ("arbitrary",) * len(user_grid)
+    dimension_semantics = tuple(
+        _canonicalize_dimension_semantic(s) for s in dimension_semantics
+    )
     if len(user_grid) != len(dimension_semantics):
       raise ValueError(
           "Must have dimension semantics for each dimension of the grid."
@@ -500,7 +511,7 @@ class MeshInfo:
 def _check_block_mappings(
     block_mappings: tuple[pallas_core.BlockMapping, ...],
     lowering_context: mlir.LoweringRuleContext,
-    name_and_src_info: pallas_core.NameAndSrcInfo,
+    debug_info: jax_core.DebugInfo,
 ) -> None:
   del lowering_context  # originally needed for forward compat
   for bm in block_mappings:
@@ -514,7 +525,7 @@ def _check_block_mappings(
       continue
 
     def err_details():
-      return (f"Block spec for {bm.origin} in pallas_call {name_and_src_info} "
+      return (f"Block spec for {bm.origin} in pallas_call {debug_info.func_src_info} "
               "has block shape "
               f"{bm.block_shape}, array shape {bm.array_shape_dtype.shape}, "
               # TODO(necula): add index_map source location info
@@ -592,8 +603,9 @@ def lower_jaxpr_to_module(
     grid_mapping: pallas_core.GridMapping,
     jaxpr: jax_core.Jaxpr,
     *,
-    dimension_semantics: tuple[str | None, ...] | None,
-    name_and_src_info: pallas_core.NameAndSrcInfo,
+    dimension_semantics: (
+        tuple[str | tpu_core.GridDimensionSemantics, None, ...] | None
+    ),
     mesh: mesh_lib.Mesh | None = None,
     for_verification: bool = False,
     dynamic_shape_replacement_enabled: bool = False,
@@ -603,6 +615,7 @@ def lower_jaxpr_to_module(
     raise RuntimeError(
         "Pallas TPU requires a libTPU version that's at most a month old"
     )
+  debug_info = jaxpr.debug_info
   if dynamic_shape_replacement_enabled:
     _mosaic_lowering_dynamic_shape_env = LoweringDynamicShapeEnv()
 
@@ -620,8 +633,7 @@ def lower_jaxpr_to_module(
     dynamic_shape_replacement_fn = lambda x: x
 
   # Verify that we have legal block mappings to catch errors early.
-  _check_block_mappings(grid_mapping.block_mappings, lowering_context,
-                        name_and_src_info)
+  _check_block_mappings(grid_mapping.block_mappings, lowering_context, debug_info)
 
   mosaic_grid_mapping = MosaicGridMapping(
       jaxpr,
@@ -633,7 +645,7 @@ def lower_jaxpr_to_module(
   mosaic_grid_mapping.maybe_compress_grid()
   m = ir.Module.create()
   attrs = m.operation.attributes
-  module_name = name_and_src_info.name
+  module_name = mlir.sanitize_name(debug_info.func_name)
   attrs["sym_name"] = ir.StringAttr.get(module_name)
   sym_tab = ir.SymbolTable(m.operation)
 
@@ -1851,6 +1863,7 @@ def _dot_general_lowering_rule(
           ir.F32Type,
           ir.Float8E5M2Type,
           ir.Float8E4M3FNType,
+          ir.Float8E4M3B11FNUZType,
       ]
   ):
     val = ir.FloatAttr.get(val_type, 0.0)
@@ -3414,9 +3427,7 @@ def _dma_wait_lowering_rule(ctx: LoweringRuleContext, *args, tree,
       wait_ref = src if src_is_smem else dst
     else:
       wait_ref = dst
-    # Legacy instruction emits only an sfence if the target/dst ref is in smem.
-    # So, we pass the src ref to the wait instruction if it is in smem to
-    # ensure legacy cases are correct, while technically keeping API compat.
+    # Legacy instruction backwards compatibility.
     tpu.wait_dma(sem, wait_ref)
   else:
     tpu.wait_dma2(sem, src, dst)

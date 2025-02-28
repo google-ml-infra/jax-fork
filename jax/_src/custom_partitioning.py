@@ -558,7 +558,7 @@ def _custom_partitioning_lowering_rule(ctx: mlir.LoweringRuleContext, *values,
       assert devices is not None
       return sharding_impls._op_sharding_to_pos_sharding(hlo_sharding, devices)
     pspec = sharding_impls.parse_flatten_op_sharding(
-        hlo_sharding, mesh)[0].get_partition_spec()
+        hlo_sharding, mesh)[0]
     pspec = jax.sharding.PartitionSpec(*pspec, *((None,) * (ndim - len(pspec))))
     return jax.sharding.NamedSharding(mesh, pspec)
 
@@ -585,7 +585,7 @@ def _custom_partitioning_lowering_rule(ctx: mlir.LoweringRuleContext, *values,
   if sharding_rule is not None:
     value_types = [mlir.aval_to_ir_type(s) for s in call.in_avals]
     if callable(sharding_rule):
-      sharding_rule = sharding_rule(mesh, value_types, result_types)
+      sharding_rule = sharding_rule(*static_args, mesh, value_types, result_types)
       if isinstance(sharding_rule, str):
         sharding_rule = str_to_sdy_sharding_rule(sharding_rule)
       elif not isinstance(sharding_rule, SdyShardingRule):
