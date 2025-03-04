@@ -26,10 +26,15 @@ jobs:
       options: --gpus all --privileged  # Might need privileged mode, use with caution
 
     steps:
-      - name: Checkout XLA
-        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+      # - name: Checkout XLA
+      #   uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+      #   with:
+      #       repository: openxla/xla
+      - name: Checkout repository
+        uses: actions/checkout@v3
         with:
-            repository: openxla/xla
+          repository: juliagmt-google/xla  
+          path: xla
 
       - name: Print machine specs
         run: |
