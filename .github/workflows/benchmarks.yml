@@ -26,22 +26,22 @@ jobs:
       options: --gpus all --privileged  # Might need privileged mode, use with caution
 
     steps:
-      # - name: Checkout XLA
-      #   uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
-      #   with:
-      #       repository: openxla/xla
-      - name: Checkout repository
-        uses: actions/checkout@v3
+      - name: Checkout XLA
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
         with:
-          repository: juliagmt-google/xla  
-          path: xla
+            repository: openxla/xla
+      # - name: Checkout repository
+      #   uses: actions/checkout@v3
+      #   with:
+      #     repository: juliagmt-google/xla  
+      #     path: xla
 
-      - name: Print machine specs
-        run: |
-          nvidia-smi
-          free -h  # Memory information
-          df -h    # Disk space information
-          uname -a # Kernel information
+      # - name: Print machine specs
+      #   run: |
+      #     nvidia-smi
+      #     free -h  # Memory information
+      #     df -h    # Disk space information
+      #     uname -a # Kernel information
 
       # - name: Set WORKSPACE_DIR
       #   env:
@@ -49,21 +49,21 @@ jobs:
       #   run: |
       #     echo "WORKSPACE_DIR is: $WORKSPACE_DIR"
 
-      - name: Create results directory
-        run: |
-          mkdir -p results
-          ls
+      # - name: Create results directory
+      #   run: |
+      #     mkdir -p results
+      #     ls
 
-      - name: Configure XLA for GPU backend
-        run: |
-          cd xla
-          ./configure.py --backend CUDA --nccl
+      # - name: Configure XLA for GPU backend
+      #   run: |
+      #     cd xla
+      #     ./configure.py --backend CUDA --nccl
 
-      - name: Set TF_CPP_MAX_VLOG_LEVEL
-        env:
-          TF_CPP_MAX_VLOG_LEVEL: 1
-        run: |
-          echo "TF_CPP_MAX_VLOG_LEVEL is: $TF_CPP_MAX_VLOG_LEVEL"
+      # - name: Set TF_CPP_MAX_VLOG_LEVEL
+      #   env:
+      #     TF_CPP_MAX_VLOG_LEVEL: 1
+      #   run: |
+      #     echo "TF_CPP_MAX_VLOG_LEVEL is: $TF_CPP_MAX_VLOG_LEVEL"
 
       - name: Wait For Connection
         uses: google-ml-infra/actions/ci_connection@main
