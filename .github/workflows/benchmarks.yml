@@ -4,9 +4,6 @@ on:
   pull_request:
     branches:
       - main
-  # workflow_dispatch:  # Allows manual triggering
-  # schedule:
-  #   - cron: '0 */6 * * *'  # Run every 6 hours (at minute 0 of hours 0, 6, 12, 18)
   workflow_dispatch:
     inputs:
       halt-for-connection:
