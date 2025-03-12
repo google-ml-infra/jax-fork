@@ -20,3 +20,4 @@ zstandard
 etils[epath]
 # TODO(ybaturina): remove setuptools version
 setuptools<71.0.0
+
