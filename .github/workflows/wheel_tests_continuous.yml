@@ -116,7 +116,7 @@ jobs:
           # See exlusions for what is fully tested
           runner: ["linux-x86-g2-48-l4-4gpu", "linux-x86-a3-8g-h100-8gpu", "linux-x86-a4-224-b200-1gpu"]
           python: ["3.10",]
-          cuda: ["12.1", "12.8"]
+          cuda: ["CUDA pip",] #"12.1", "12.8"]
           enable-x64: [1, 0]
           exclude:
             # H100 runs only a single config, CUDA 12.8 Enable x64 1
