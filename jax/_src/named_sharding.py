@@ -20,12 +20,14 @@ import dataclasses
 import functools
 from typing import Any, Union
 
-from jax._src.util import use_cpp_class, cache, use_cpp_method, tuple_insert
+from jax._src import config
+from jax._src.util import use_cpp_class, cache, use_cpp_method
 from jax._src.lib import xla_client as xc
 from jax._src.lib.mlir.dialects import sdy
 from jax._src import mesh as mesh_lib
-from jax._src.partition_spec import PartitionSpec, UnconstrainedSingleton
+from jax._src.partition_spec import PartitionSpec
 from jax._src import sharding as JSharding
+from jax._src import xla_bridge as xb
 import numpy as np
 
 Shape = tuple[int, ...]
@@ -90,7 +92,7 @@ class NamedSharding(JSharding.Sharding):
   across ``y`` axis of the mesh.
 
   The Distributed arrays and automatic parallelization
-  (https://jax.readthedocs.io/en/latest/notebooks/Distributed_arrays_and_automatic_parallelization.html#namedsharding-gives-a-way-to-express-shardings-with-names)
+  (https://docs.jax.dev/en/latest/notebooks/Distributed_arrays_and_automatic_parallelization.html#namedsharding-gives-a-way-to-express-shardings-with-names)
   tutorial has more details and diagrams that explain how
   :class:`Mesh` and :class:`PartitionSpec` are used.
 
@@ -110,31 +112,26 @@ class NamedSharding(JSharding.Sharding):
   mesh: mesh_lib.Mesh | mesh_lib.AbstractMesh
   spec: PartitionSpec
   _memory_kind: str | None
-  _parsed_pspec: ParsedPartitionSpec
   _manual_axes: frozenset[MeshAxisName]
   _logical_device_ids: tuple[int, ...] | None
 
   @use_cpp_method()
   def __init__(
       self, mesh: mesh_lib.Mesh | mesh_lib.AbstractMesh, spec: PartitionSpec, *,
-      memory_kind: str | None = None, _parsed_pspec=None,
-      _manual_axes=frozenset(), _logical_device_ids=None):
+      memory_kind: str | None = None, _manual_axes=frozenset(),
+      _logical_device_ids=None):
     self.mesh = mesh
     self.spec = spec
     self._memory_kind = memory_kind
     self._manual_axes = _manual_axes
     self._logical_device_ids = _logical_device_ids
-    self._parsed_pspec = preprocess(self.mesh, self.spec, _parsed_pspec)
+    check_pspec(self.mesh, self.spec, self._manual_axes)
 
   def __repr__(self):
     mem = '' if self.memory_kind is None else f', memory_kind={self.memory_kind}'
     ldi = ('' if self._logical_device_ids is None else
            f', logical_device_ids={self._logical_device_ids}')
-    if isinstance(self.mesh, mesh_lib.AbstractMesh):
-      mesh_repr = f"{self.mesh}"
-    else:
-      nv_str = ", ".join(f"'{n}': {v}" for n, v in self.mesh.shape.items())
-      mesh_repr = f"Mesh({nv_str})"
+    mesh_repr = f"{str(self.mesh)}"
     return f'NamedSharding(mesh={mesh_repr}, spec={self.spec}{mem}{ldi})'
 
   def __reduce__(self):
@@ -150,7 +147,7 @@ class NamedSharding(JSharding.Sharding):
   def __hash__(self):
     if not hasattr(self, '_hash'):
       self._hash = hash(
-          (self.mesh, self.memory_kind, self._parsed_pspec, self._manual_axes,
+          (self.mesh, self.memory_kind, self.spec, self._manual_axes,
            self._logical_device_ids))
     return self._hash
 
@@ -159,7 +156,7 @@ class NamedSharding(JSharding.Sharding):
       return False
     if self is other:
       return True
-    if (self._parsed_pspec != other._parsed_pspec
+    if (self.spec != other.spec
         or self.memory_kind != other.memory_kind
         or self._manual_axes != other._manual_axes
         or self._logical_device_ids != other._logical_device_ids):
@@ -167,24 +164,13 @@ class NamedSharding(JSharding.Sharding):
     return self.mesh is other.mesh or self.mesh == other.mesh
 
   def check_compatible_aval(self, aval_shape: Shape) -> None:
-    assert self._parsed_pspec is not None
-    if len(aval_shape) < len(self._parsed_pspec):
+    if len(aval_shape) < len(self.spec):
       extra_msg = (' For scalars the PartitionSpec should be P()'
                    if len(aval_shape) == 0 else '')
       raise ValueError(
           f"Sharding {self} is only valid for values of rank at least "
-          f"{len(self._parsed_pspec)}, but was applied to a value of rank "
+          f"{len(self.spec)}, but was applied to a value of rank "
           f"{len(aval_shape)}.{extra_msg}")
-
-  @classmethod
-  def _from_parsed_pspec(
-      cls, mesh, parsed_pspec, *, memory_kind=None, _manual_axes=frozenset(),
-      _logical_device_ids=None,
-  ):
-    return cls(mesh, parsed_pspec.get_partition_spec(),
-                memory_kind=memory_kind, _parsed_pspec=parsed_pspec,
-                _manual_axes=_manual_axes,
-                _logical_device_ids=_logical_device_ids)
 
   @property
   def num_devices(self) -> int:
@@ -211,6 +197,11 @@ class NamedSharding(JSharding.Sharding):
                        '`jax.sharding.AbstractMesh`.')
     # Speed up `is_fully_addressable` since there is a high chance that the
     # mesh across multiple NamedSharding objects will be the same.
+    if config.enable_empty_arrays.value:
+      client = self._internal_device_list[0].client  # type: ignore
+      return (len(self.mesh._process_indices) == 1 and
+              next(iter(self.mesh._process_indices)) ==
+              xb.process_index(client))
     return not self.mesh.is_multi_process
 
   @property
@@ -232,7 +223,7 @@ class NamedSharding(JSharding.Sharding):
   def is_fully_replicated(self) -> bool:
     if self.mesh.size == 1:
       return True
-    array_mapping = get_array_mapping(self._parsed_pspec)
+    array_mapping = get_array_mapping(self.spec)
     mesh_shape = self.mesh.shape
     num_partitions = 1
     for name in array_mapping:  # type: ignore
@@ -253,27 +244,32 @@ class NamedSharding(JSharding.Sharding):
   def _to_sdy_sharding(self, num_dimensions: int) -> SdyArraySharding:
     dim_shardings = [SdyDimSharding(axes=[], is_closed=True)
                      for _ in range(num_dimensions)]
-    for i, dim_spec in enumerate(self._parsed_pspec):
+    for i, dim_spec in enumerate(self.spec):
       if dim_spec is PartitionSpec.UNCONSTRAINED:
         dim_shardings[i].is_closed = False
-      elif not dim_spec:
+      elif dim_spec is None:
         # Already empty and closed sharding.
         pass
       else:
+        dim_spec = dim_spec if isinstance(dim_spec, tuple) else (dim_spec,)
         dim_shardings[i].axes = dim_spec
     return SdyArraySharding(self.mesh.shape_tuple, dim_shardings,
                             self._logical_device_ids)
 
 
 def get_array_mapping(
-    axis_resources: ParsedPartitionSpec | AUTO | UnspecifiedValue
+    axis_resources: PartitionSpec | AUTO | UnspecifiedValue
 ) -> ArrayMappingOrAutoOrUnspecified:
   if isinstance(axis_resources, (AUTO, UnspecifiedValue)):
     return axis_resources
-  return collections.OrderedDict(
-      (axis, i) for i, axes in enumerate(axis_resources)
-      if axes is not PartitionSpec.UNCONSTRAINED for axis in axes)
-
+  d = collections.OrderedDict()
+  for i, axes in enumerate(axis_resources):
+    if axes is None or axes is PartitionSpec.UNCONSTRAINED:
+      continue
+    axes = axes if isinstance(axes, tuple) else (axes,)
+    for axis in axes:
+      d[axis] = i
+  return d
 
 @dataclasses.dataclass
 class SdyDimSharding:
@@ -329,90 +325,17 @@ class SdyArraySharding:
            if self.replicated_axes else '')
     return f"SdyArraySharding([{dim_sharding_repr}]{device_id_repr}{rar})"
 
-class ParsedPartitionSpec:
-  __slots__ = ('_user_spec', 'partitions')
-
-  _user_spec: PartitionSpec | None
-  partitions: tuple[tuple[MeshAxisName, ...] | UnconstrainedSingleton, ...]
-
-  def __init__(self, user_spec, partitions):
-    self._user_spec = user_spec
-    assert None not in partitions, partitions
-    self.partitions = tuple(partitions)
-
-  def get_partition_spec(self) -> PartitionSpec:
-    if isinstance(self._user_spec, PartitionSpec):
-      return self._user_spec
-    else:
-      return get_single_pspec(self)
-
-  def insert_axis_partitions(self, dim, val):
-    parts = self.partitions
-    too_short = dim - len(parts)
-    if too_short > 0:
-      parts += ((),) * too_short
-    new_partitions = tuple_insert(parts, dim, val)
-    return ParsedPartitionSpec(None, new_partitions)
-
-  @classmethod
-  def from_user_input(
-      cls,
-      entry: PartitionSpec | None,
-      arg_name: str,
-      allow_unconstrained_dims: bool = False,
-  ) -> ParsedPartitionSpec:
-    if entry is None:
-      return cls(entry, ())
-    if not isinstance(entry, PartitionSpec):
-      raise TypeError(f"{arg_name} are expected to be "
-                      f"PartitionSpec instances or None, but got {entry}")
-    axis_specs = []
-    for axis_spec in entry:
-      if axis_spec is None:
-        axis_spec = ()
-      elif isinstance(axis_spec, (list, tuple)):
-        axis_spec = tuple(axis_spec)
-      elif axis_spec is PartitionSpec.UNCONSTRAINED:
-        if not allow_unconstrained_dims:
-          raise ValueError(f"Unconstrained dims are not allowed: {entry}")
-        axis_spec = PartitionSpec.UNCONSTRAINED
-      else:
-        axis_spec = (axis_spec,)
-      axis_specs.append(axis_spec)
-    new_entry = PartitionSpec(
-        *[tuple(e) if isinstance(e, (list, tuple)) else e for e in entry])
-    return cls(new_entry, axis_specs)
-
-  def __hash__(self):
-    return hash(self.partitions)
-
-  def __eq__(self, other):
-    if not isinstance(other, ParsedPartitionSpec):
-      return False
-    return self.partitions == other.partitions
-
-  def __len__(self):
-    return len(self.partitions)
-
-  def __getitem__(self, i):
-    return self.partitions[i]
-
-  def __iter__(self):
-    return iter(self.partitions)
-
-  def __repr__(self):
-    return f"ParsedPartitionSpec(partitions={self.partitions})"
 
 @cache(max_size=4096, trace_context_in_key=False)
 def named_sharding_to_xla_hlo_sharding(
     self, num_dimensions: int) -> xc.HloSharding:
   mesh_shape = self.mesh.shape
-  array_mapping = get_array_mapping(self._parsed_pspec)
+  array_mapping = get_array_mapping(self.spec)
   mesh_axis_pos = {name: i for i, name in enumerate(self.mesh.axis_names)}
 
   special_axes = {}
   mesh_manual_axes = {n for n, t in self.mesh._name_to_type.items()
-                      if t == mesh_lib.AxisTypes.Manual}
+                      if t == mesh_lib.AxisType.Manual}
   manual_axes = self._manual_axes.union(mesh_manual_axes)
   if manual_axes:
     axis_names = self.mesh.axis_names
@@ -494,65 +417,67 @@ def array_mapping_to_axis_resources(array_mapping: ArrayMapping):
       partitions.append(None)
   return PartitionSpec(*partitions)
 
-get_single_pspec = lambda p: array_mapping_to_axis_resources(get_array_mapping(p))  # type: ignore
 
+@cache(max_size=128, trace_context_in_key=False)
+def check_pspec(mesh, spec, _manual_axes=frozenset()):
+  _check_unique_resources(spec, "NamedSharding spec", mesh)
+  _check_mesh_resource_axis(mesh, spec, _manual_axes)
 
-def preprocess(mesh, spec, parsed_pspec, _manual_axes=frozenset()):
-  if parsed_pspec is None:
-    spec = PartitionSpec() if spec is None else spec
-    parsed_pspec = ParsedPartitionSpec.from_user_input(
-        spec, "NamedSharding spec", allow_unconstrained_dims=True)
-    _check_unique_resources(parsed_pspec, "NamedSharding spec")
-  _check_mesh_resource_axis(mesh, parsed_pspec, _manual_axes)
-  _check_axis_type_consistency(mesh, parsed_pspec)
-  return parsed_pspec
+class DuplicateSpecError(Exception):
+  def __init__(self, message, mesh, pspec):
+    super().__init__(message)
+    self.message = message
+    self.mesh = mesh
+    self.pspec = pspec
 
-def _check_unique_resources(
-    arg_axis_resources: ParsedPartitionSpec, arg_name: str
-) -> None:
+  def __str__(self):
+    return f"{self.message}"
+
+def _check_unique_resources(pspec: PartitionSpec, arg_name: str, mesh=None
+                            ) -> None:
   resource_counts: dict[MeshAxisName, int] = {}
   duplicate = False
-  for d in arg_axis_resources:
-    if d is not PartitionSpec.UNCONSTRAINED:
-      for resource in d:
-        count = resource_counts.get(resource, 0)
-        if count > 0:
-          duplicate = True
-        resource_counts[resource] = count + 1
+  for d in pspec:
+    if d is PartitionSpec.UNCONSTRAINED or d is None:
+      continue
+    d = d if isinstance(d, tuple) else (d,)
+    for resource in d:
+      count = resource_counts.get(resource, 0)
+      if count > 0:
+        duplicate = True
+      resource_counts[resource] = count + 1
   if duplicate:
     multiple_uses = [r for r, c in resource_counts.items() if c > 1]
-    raise ValueError(
-        f'A single {arg_name} specification can map every mesh axis to at'
-        ' most one positional dimension, but'
-        f' {arg_axis_resources.get_partition_spec()} has duplicate entries'
-        f' for {mesh_lib.show_axes(multiple_uses)}')
-
-@cache(max_size=128, trace_context_in_key=False)
-def _check_mesh_resource_axis(mesh, parsed_pspec, _manual_axes):
-  for p in parsed_pspec:
-    if p is not PartitionSpec.UNCONSTRAINED:
-      for r in p:
-        if r not in mesh.shape:
-          raise ValueError(
-              f"Resource axis: {r} of {parsed_pspec.get_partition_spec()} "
-              f"is not found in mesh: {tuple(mesh.shape.keys())}.")
-        if r in _manual_axes:
-          raise ValueError(
-              f"Axis: {r} of {parsed_pspec.get_partition_spec()} "
-              f"is also found in manual_axes: {_manual_axes}.") from None
+    raise DuplicateSpecError(
+        message=(
+            f'A single {arg_name} specification can map every mesh axis to at'
+            f' most one positional dimension, but {pspec} has duplicate entries'
+            f' for {mesh_lib.show_axes(multiple_uses)}'),
+        mesh=mesh, pspec=pspec)
 
 
-@cache(max_size=128, trace_context_in_key=False)
-def _check_axis_type_consistency(mesh, parsed_pspec):
-  for p in parsed_pspec:
-    if p is not PartitionSpec.UNCONSTRAINED:
-      if not all(mesh._name_to_type[p[0]] == mesh._name_to_type[r] for r in p):
+def _check_mesh_resource_axis(mesh, pspec, _manual_axes):
+  for p in pspec:
+    if p is PartitionSpec.UNCONSTRAINED or p is None:
+      continue
+    p = p if isinstance(p, tuple) else (p,)
+    for r in p:
+      if r not in mesh.shape:
         raise ValueError(
-            'AxisTypes should be the same in a tuple subset of PartitionSpec:'
-            f' {parsed_pspec.get_partition_spec()}. Got subset {p} with axis'
-            f' types: ({", ".join(str(mesh._name_to_type[r]) for r in p)})')
-  if mesh_lib.AxisTypes.Auto not in mesh.axis_types and None in parsed_pspec:
+            f"Resource axis: {r} of {pspec} "
+            f"is not found in mesh: {tuple(mesh.shape.keys())}.")
+      if r in _manual_axes:
+        raise ValueError(
+            f"Axis: {r} of {pspec} "
+            f"is also found in manual_axes: {_manual_axes}.") from None
+    if not all(mesh._name_to_type[p[0]] == mesh._name_to_type[r] for r in p):
+      raise ValueError(
+          'AxisTypes should be the same in a tuple subset of PartitionSpec:'
+          f' {pspec}. Got subset {p} with axis'
+          f' types: ({", ".join(str(mesh._name_to_type[r]) for r in p)})')
+  if (mesh_lib.AxisType.Auto not in mesh._axis_types_dict and
+      PartitionSpec.UNCONSTRAINED in pspec):
     raise ValueError(
-        f'PartitionSpec {parsed_pspec.get_partition_spec()} cannot contain'
+        f'{pspec} cannot contain'
         ' `P.UNCONSTRAINED` when no mesh axis_types are `Auto`. Got mesh'
-        f' axis_types: {mesh.axis_types}')
+        f' axis_types: {mesh._axis_types_dict}')

@@ -179,9 +179,10 @@ def _custom_partitioning_partition(arg_shapes, arg_shardings, result_shape,
       for sharding, s in zip(result_shardings, result_shapes)
   ]
   closed_jaxpr = jax.make_jaxpr(lower_fn, axis_env=list(mesh.shape.items()))(
-      *tiled_args
+      *info.in_tree.unflatten(tiled_args)
   )
-  if closed_jaxpr.out_avals != tiled_results:
+  if ([(o.shape, o.dtype) for o in closed_jaxpr.out_avals] !=
+      [(t.shape, t.dtype) for t in tiled_results]):
     raise ValueError(
         "Mismatch in result shapes. %s vs %s"
         % (repr(closed_jaxpr.out_avals), repr(tiled_results))
@@ -499,6 +500,12 @@ class custom_partitioning:
     infer_sharding_from_operands = None
     sharding_rule = None
     if config.use_shardy_partitioner.value:
+      if (self.sharding_rule is None and
+          (self.propagate_user_sharding is not None or
+            self.infer_sharding_from_operands is not None)):
+        raise ValueError("Shardy is used, but sharding propagation callbacks "
+                         "instead of sharding_rule are provided. Need to "
+                         "provide sharding_rule to migrate to Shardy.")
       sharding_rule = self.sharding_rule
     else:
       propagate_user_sharding = self.propagate_user_sharding
@@ -558,7 +565,7 @@ def _custom_partitioning_lowering_rule(ctx: mlir.LoweringRuleContext, *values,
       assert devices is not None
       return sharding_impls._op_sharding_to_pos_sharding(hlo_sharding, devices)
     pspec = sharding_impls.parse_flatten_op_sharding(
-        hlo_sharding, mesh)[0].get_partition_spec()
+        hlo_sharding, mesh)[0]
     pspec = jax.sharding.PartitionSpec(*pspec, *((None,) * (ndim - len(pspec))))
     return jax.sharding.NamedSharding(mesh, pspec)
 
@@ -585,7 +592,7 @@ def _custom_partitioning_lowering_rule(ctx: mlir.LoweringRuleContext, *values,
   if sharding_rule is not None:
     value_types = [mlir.aval_to_ir_type(s) for s in call.in_avals]
     if callable(sharding_rule):
-      sharding_rule = sharding_rule(mesh, value_types, result_types)
+      sharding_rule = sharding_rule(*static_args, mesh, value_types, result_types)
       if isinstance(sharding_rule, str):
         sharding_rule = str_to_sdy_sharding_rule(sharding_rule)
       elif not isinstance(sharding_rule, SdyShardingRule):

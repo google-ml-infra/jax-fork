@@ -40,6 +40,7 @@ from jax._src.pallas import primitives
 from jax._src.state import discharge as state_discharge
 from jax._src import util
 from jax._src.util import (
+    foreach,
     safe_map,
     safe_zip,
     split_list,
@@ -199,8 +200,8 @@ def eval_jaxpr_recursive(
     env[v] = val
 
   env: dict[jax_core.Var, Any] = {}
-  map(write, jaxpr.constvars, consts)
-  map(write, jaxpr.invars, args)
+  foreach(write, jaxpr.constvars, consts)
+  foreach(write, jaxpr.invars, args)
   lu = jax_core.last_used(jaxpr)
   for eqn in jaxpr.eqns:
     in_vals = map(read, eqn.invars)
@@ -216,7 +217,7 @@ def eval_jaxpr_recursive(
         subfuns, bind_params = eqn.primitive.get_bind_params(eqn.params)
         ans = eqn.primitive.bind(*subfuns, *in_vals, **bind_params)
     if eqn.primitive.multiple_results:
-      map(write, eqn.outvars, ans)
+      foreach(write, eqn.outvars, ans)
     else:
       write(eqn.outvars[0], ans)
     jax_core.clean_up_dead_vars(eqn, env, lu)
@@ -336,15 +337,16 @@ def pallas_call_hlo_interpret(
     *args,
     backend: str | None,
     jaxpr: jax_core.Jaxpr,
-    name_and_src_info: pallas_core.NameAndStrInfo,
     debug: bool,
     input_output_aliases: tuple[tuple[int, int], ...],
     grid_mapping: GridMapping,
+    mesh: pallas_core.Mesh | None,
     compiler_params: Any,
     cost_estimate: CostEstimate,
     out_avals: tuple[jax_core.AbstractValue, ...],
 ):
-  del compiler_params, cost_estimate, out_avals
+  del mesh, compiler_params, cost_estimate, out_avals
+  debug_info = jaxpr.debug_info
   # If we're in interpret mode, we *scan* over the grid and eval the
   # discharged jaxpr.
   dynamic_grid_args, args = split_list(
@@ -360,7 +362,7 @@ def pallas_call_hlo_interpret(
   discharged_jaxpr, discharged_consts, scratch_avals = kernel_to_hlo_jaxpr(
       jaxpr, (), grid_mapping, backend=backend)
   if debug:
-    print(f"\nJaxpr of the the kernel in pallas_call {name_and_src_info}:")
+    print(f"\nJaxpr of the the kernel in pallas_call {debug_info.func_src_info}:")
     print(discharged_jaxpr)
   out = _initialize_output_vals(grid_mapping.block_mappings_output,
                                 args, input_output_aliases)

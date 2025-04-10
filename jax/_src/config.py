@@ -235,15 +235,21 @@ def trace_context():
           threefry_partitionable.value,
           threefry_gpu_kernel_lowering.value,
           use_direct_linearize.value,
+          varying_axes_in_types.value,
           softmax_custom_jvp.value,
           disable_jit.value,
           debug_key_reuse.value,
           jax_xla_profile_version.value,
+          _check_rep.value,
           # Technically this affects jaxpr->stablehlo lowering, not tracing.
           hlo_source_file_canonicalization_regex.value,
           pgle_profiling_runs.value,
           enable_pgle.value,
-          use_shardy_partitioner.value)
+          use_shardy_partitioner.value,
+          use_high_dynamic_range_gumbel.value,
+          error_checking_behavior_nan.value,
+          error_checking_behavior_divide.value,
+          error_checking_behavior_oob.value)
 
 config = Config()
 
@@ -304,31 +310,8 @@ class State(config_ext.Config[_T]):
     if self._update_global_hook:
       self._update_global_hook(value)
 
-  @contextlib.contextmanager
   def __call__(self, new_val: Any = no_default):
-    if new_val is no_default:
-      if self._default_context_manager_value is not no_default:
-        new_val = self._default_context_manager_value  # default_context_manager_value provided to constructor
-      else:
-        # no default_value provided to constructor and no value provided as an
-        # argument, so we raise an error
-        raise TypeError(f"Context manager for {self.__name__} config option "
-                        "requires an argument representing the new value for "
-                        "the config option.")
-    if self._validator:
-      self._validator(new_val)
-    prev_val = self.swap_local(new_val)
-    if self._update_thread_local_hook:
-      self._update_thread_local_hook(new_val)
-    try:
-      yield
-    finally:
-      self.set_local(prev_val)
-      if self._update_thread_local_hook:
-        if prev_val is config_ext.unset:
-          self._update_thread_local_hook(None)
-        else:
-          self._update_thread_local_hook(cast(Optional[Any], prev_val))
+    return StateContextManager(self, new_val)
 
   def _add_hooks(self, update_global_hook, update_thread_local_hook):
     """Private method that adds hooks to an existing context-manager.
@@ -339,11 +322,45 @@ class State(config_ext.Config[_T]):
     update_global_hook(self.get_global())
 
 
+class StateContextManager(contextlib.ContextDecorator):
+  __slots__ = ['state', 'new_val', 'prev']
+
+  def __init__(self, state, new_val):
+    self.state = state
+    self.new_val = new_val
+
+    if new_val is no_default:
+      if state._default_context_manager_value is not no_default:
+        new_val = state._default_context_manager_value  # default_context_manager_value provided to constructor
+      else:
+        # no default_value provided to constructor and no value provided as an
+        # argument, so we raise an error
+        raise TypeError(f"Context manager for {state.__name__} config option "
+                        "requires an argument representing the new value for "
+                        "the config option.")
+    if state._validator:
+      state._validator(new_val)
+
+
+  def __enter__(self):
+    self.prev = self.state.swap_local(self.new_val)
+    if self.state._update_thread_local_hook:
+      self.state._update_thread_local_hook(self.new_val)
+
+  def __exit__(self, exc_type, exc_value, traceback):
+    self.state.set_local(self.prev)
+    if self.state._update_thread_local_hook:
+      if self.prev is config_ext.unset:
+        self.state._update_thread_local_hook(None)
+      else:
+        self.state._update_thread_local_hook(cast(Optional[Any], self.prev))
+
+
 UPGRADE_BOOL_HELP = (
     " This will be enabled by default in future versions of JAX, at which "
     "point all uses of the flag will be considered deprecated (following "
     "the `API compatibility policy "
-    "<https://jax.readthedocs.io/en/latest/api_compatibility.html>`_).")
+    "<https://docs.jax.dev/en/latest/api_compatibility.html>`_).")
 
 UPGRADE_BOOL_EXTRA_DESC = " (transient)"
 
@@ -551,6 +568,7 @@ def int_state(
     update_global_hook: Callable[[int], None] | None = None,
     update_thread_local_hook: Callable[[int | None], None] | None = None,
     include_in_jit_key: bool = False,
+    validator: Callable[[Any], None] | None = None,
 ) -> State[int]:
   """Set up thread-local state and return a contextmanager for managing it.
 
@@ -583,6 +601,8 @@ def int_state(
     if new_val is not None and not isinstance(new_val, int):
       raise ValueError(f'new int config value must be None or of type int, '
                        f'got {new_val} of type {type(new_val)}')
+    if new_val is not None and validator is not None:
+      validator(new_val)
 
   s = State[int](name, default, help, update_global_hook,
                  update_thread_local_hook, validate,
@@ -892,7 +912,7 @@ jax_export_calling_convention_version = int_state(
         'The calling convention version number to use for exporting. This must be '
         'within the range of versions supported by the tf.XlaCallModule '
         'used in your deployment environment. '
-        'See https://jax.readthedocs.io/en/latest/export/shape_poly.html#calling-convention-versions.'
+        'See https://docs.jax.dev/en/latest/export/shape_poly.html#calling-convention-versions.'
     )
 )
 
@@ -901,7 +921,7 @@ export_ignore_forward_compatibility = bool_state(
     default=bool_env('JAX_EXPORT_IGNORE_FORWARD_COMPATIBILIY', False),
     help=(
         'Whether to ignore the forward compatibility lowering rules. '
-        'See https://jax.readthedocs.io/en/latest/export/export.html#compatibility-guarantees-for-custom-calls.'
+        'See https://docs.jax.dev/en/latest/export/export.html#compatibility-guarantees-for-custom-calls.'
     )
 )
 
@@ -979,7 +999,7 @@ explain_cache_misses = bool_state(
     name='jax_explain_cache_misses',
     default=False,
     help=('Each time there is a miss on one of the main caches (e.g. the '
-          'tracing cache), log an explanation.. Logging is performed with '
+          'tracing cache), log an explanation. Logging is performed with '
           '`logging`. When this option is set, the log level is WARNING; '
           'otherwise the level is DEBUG.'))
 
@@ -1072,11 +1092,20 @@ use_direct_linearize = bool_state(
     help=('Use direct linearization instead JVP followed by partial eval'),
     include_in_jit_key=True)
 
-data_dependent_tracing_fallback = bool_state(
-    name='jax_data_dependent_tracing_fallback',
+varying_axes_in_types = bool_state(
+    name='jax_varying_axes_in_types',
+    default=True,
+    help=('Adds varying manual axes to ShapedArray to track which mesh axes the'
+          ' array is varying over. This will help to remove the efficient'
+          ' transpose rewrite machinery in shard_map'),
+    include_in_jit_key=True)
+
+# TODO make it so people don't use this, this is internal...
+_check_rep = bool_state(
+    name='check_rep',
     default=False,
-    help=('When True, falls back to trace dispatch based on data dependence '
-          'instead of throwing an escaped tracer error.'))
+    help='internal implementation detail of shard_map, DO NOT USE',
+    include_in_jit_key=True)
 
 softmax_custom_jvp = bool_state(
     name='jax_softmax_custom_jvp',
@@ -1293,6 +1322,41 @@ disallow_mesh_context_manager = bool_state(
     ),
 )
 
+# TODO(ayx): Move these 3 flags out of config once we have a user-level
+# extension mechanism for adding contexts to which the jit cache is sensitive.
+error_checking_behavior_nan = enum_state(
+    name='jax_error_checking_behavior_nan',
+    enum_values=['ignore', 'raise'],
+    default='ignore',
+    help=(
+        'Specify the behavior when a NaN is encountered. Options are "ignore"'
+        ' or "raise".'
+    ),
+    include_in_jit_key=True,
+)
+
+error_checking_behavior_divide = enum_state(
+    name='jax_error_checking_behavior_divide',
+    enum_values=['ignore', 'raise'],
+    default='ignore',
+    help=(
+        'Specify the behavior when a divide by zero is encountered. Options are'
+        ' "ignore" or "raise".'
+    ),
+    include_in_jit_key=True,
+)
+
+error_checking_behavior_oob = enum_state(
+    name='jax_error_checking_behavior_oob',
+    enum_values=['ignore', 'raise'],
+    default='ignore',
+    help=(
+        'Specify the behavior when an out of bounds access is encountered.'
+        ' Options are "ignore" or "raise".'
+    ),
+    include_in_jit_key=True,
+)
+
 def _update_x64_global(val):
   jax_jit.global_state().enable_x64 = val
 
@@ -1380,8 +1444,8 @@ default_matmul_precision = optional_enum_state(
         'ANY_F8_ANY_F8_F32', 'ANY_F8_ANY_F8_F32_FAST_ACCUM', 'ANY_F8_ANY_F8_ANY',
         'ANY_F8_ANY_F8_ANY_FAST_ACCUM', 'F16_F16_F16', 'F16_F16_F32',
         'BF16_BF16_BF16', 'BF16_BF16_F32', 'BF16_BF16_F32_X3',
-        'BF16_BF16_F32_X6', 'TF32_TF32_F32', 'TF32_TF32_F32_X3', 'F32_F32_F32',
-        'F64_F64_F64',
+        'BF16_BF16_F32_X6', 'BF16_BF16_F32_X9', 'TF32_TF32_F32',
+        'TF32_TF32_F32_X3', 'F32_F32_F32', 'F64_F64_F64',
     ],
     default=None,
     help=('Control the default matmul and conv precision for 32bit inputs.\n\n'
@@ -1450,13 +1514,6 @@ eager_constant_folding = bool_state(
     help=('Attempt constant folding during staging.'),
     include_in_jit_key=True)
 
-# This flag is temporary during rollout of the remat barrier.
-# TODO(parkers): Remove if there are no complaints.
-remat_opt_barrier = bool_state(
-    name='jax_remat_opt_barrier',
-    default=True,
-    help=('Enables using optimization-barrier op for lowering remat.'))
-
 enable_remat_opt_pass = bool_state(
     name='jax_compiler_enable_remat_pass',
     default=True,
@@ -1464,13 +1521,6 @@ enable_remat_opt_pass = bool_state(
           'Useful to allow XLA to automatically trade off memory and '
           'compute when encountering OOM errors. However, you are '
           'likely to get better results manually with jax.checkpoint'))
-
-# TODO(sharadmv,mattjj): set default to True, then remove
-eager_pmap = bool_state(
-    name='jax_eager_pmap',
-    default=True,
-    upgrade=True,
-    help='Enable eager-mode pmap when jax_disable_jit is activated.')
 
 no_tracing = bool_state(
     name='jax_no_tracing',
@@ -1626,7 +1676,7 @@ def transfer_guard(new_val: str) -> Iterator[None]:
   """A contextmanager to control the transfer guard level for all transfers.
 
   For more information, see
-  https://jax.readthedocs.io/en/latest/transfer_guard.html
+  https://docs.jax.dev/en/latest/transfer_guard.html
 
   Args:
     new_val: The new thread-local transfer guard level for all transfers.
@@ -1783,11 +1833,18 @@ cpu_collectives_implementation = optional_enum_state(
         '("gloo", "mpi")'),
 )
 
-num_cpu_devices = int_state(
-    name="jax_num_cpu_devices",
-    default=-1,
+enable_empty_arrays = bool_state(
+    name='jax_enable_empty_arrays',
+    default=False,
     help=(
-        "Number of CPU devices to use. If not provided, the value of "
-        "the XLA flag --xla_force_host_platform_device_count is used."
-        " Must be set before JAX is initialized."),
+        "Enable the creation of an Array from an empty list of single-device "
+        "arrays. This is to support MPMD/pipeline parallelism in McJAX (WIP)."
+    )
+)
+
+use_high_dynamic_range_gumbel = bool_state(
+    name='jax_high_dynamic_range_gumbel',
+    default=False,
+    help='If True, gumble noise draws two samples to cover low probability '
+         'events with more precision.',
 )

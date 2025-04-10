@@ -14,7 +14,7 @@ load("@rules_python//python:defs.bzl", "py_library")
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-load("//jaxlib:jax.bzl", "pallas_extension_deps")
+load("//jaxlib:jax.bzl", "mosaic_extension_deps")
 
 licenses(["notice"])
 
@@ -60,9 +60,9 @@ cc_library(
     ]),
     # compatible with libtpu
     deps = [
+        ":pass_boilerplate",
+        ":serde",
         ":tpu_inc_gen",
-        "//jaxlib:pass_boilerplate",
-        "//jaxlib/mosaic:serde",
         "@com_google_absl//absl/algorithm:container",
         "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/hash",
@@ -95,75 +95,37 @@ cc_library(
         "@xla//xla:shape_util",
         "@xla//xla:util",
         "@xla//xla/tsl/platform:errors",
-    ] + pallas_extension_deps,
+        "@xla//xla/tsl/platform:statusor",
+    ] + mosaic_extension_deps,
 )
 
 gentbl_cc_library(
     name = "tpu_inc_gen",
     # compatible with libtpu
-    tbl_outs = [
-        (
-            ["-gen-op-decls"],
-            "dialect/tpu/tpu_ops.h.inc",
-        ),
-        (
-            ["-gen-op-defs"],
-            "dialect/tpu/tpu_ops.cc.inc",
-        ),
-        (
-            ["-gen-dialect-decls"],
-            "dialect/tpu/tpu_dialect.h.inc",
-        ),
-        (
-            ["-gen-dialect-defs"],
-            "dialect/tpu/tpu_dialect.cc.inc",
-        ),
-        (
-            ["-gen-enum-decls"],
-            "dialect/tpu/tpu_enums.h.inc",
-        ),
-        (
-            ["-gen-enum-defs"],
-            "dialect/tpu/tpu_enums.cc.inc",
-        ),
-        (
-            ["-gen-attrdef-decls"],
-            "dialect/tpu/tpu_attr_defs.h.inc",
-        ),
-        (
-            ["-gen-attrdef-defs"],
-            "dialect/tpu/tpu_attr_defs.cc.inc",
-        ),
-        (
-            ["-gen-typedef-decls"],
-            "dialect/tpu/tpu_type_defs.h.inc",
-        ),
-        (
-            ["-gen-typedef-defs"],
-            "dialect/tpu/tpu_type_defs.cc.inc",
-        ),
-        (
-            [
-                "-gen-pass-decls",
-                "-name=TPU",
-            ],
-            "dialect/tpu/tpu_passes.h.inc",
-        ),
-        (
-            [
-                "-gen-pass-capi-header",
-                "--prefix=TPU",
-            ],
-            "dialect/tpu/integrations/c/tpu_passes.capi.h.inc",
-        ),
-        (
-            [
-                "-gen-pass-capi-impl",
-                "--prefix=TPU",
-            ],
-            "dialect/tpu/integrations/c/tpu_passes.capi.cc.inc",
-        ),
-    ],
+    tbl_outs = {
+        "dialect/tpu/tpu_ops.h.inc": ["-gen-op-decls"],
+        "dialect/tpu/tpu_ops.cc.inc": ["-gen-op-defs"],
+        "dialect/tpu/tpu_dialect.h.inc": ["-gen-dialect-decls"],
+        "dialect/tpu/tpu_dialect.cc.inc": ["-gen-dialect-defs"],
+        "dialect/tpu/tpu_enums.h.inc": ["-gen-enum-decls"],
+        "dialect/tpu/tpu_enums.cc.inc": ["-gen-enum-defs"],
+        "dialect/tpu/tpu_attr_defs.h.inc": ["-gen-attrdef-decls"],
+        "dialect/tpu/tpu_attr_defs.cc.inc": ["-gen-attrdef-defs"],
+        "dialect/tpu/tpu_type_defs.h.inc": ["-gen-typedef-decls"],
+        "dialect/tpu/tpu_type_defs.cc.inc": ["-gen-typedef-defs"],
+        "dialect/tpu/tpu_passes.h.inc": [
+            "-gen-pass-decls",
+            "-name=TPU",
+        ],
+        "dialect/tpu/integrations/c/tpu_passes.capi.h.inc": [
+            "-gen-pass-capi-header",
+            "--prefix=TPU",
+        ],
+        "dialect/tpu/integrations/c/tpu_passes.capi.cc.inc": [
+            "-gen-pass-capi-impl",
+            "--prefix=TPU",
+        ],
+    },
     tblgen = "@llvm-project//mlir:mlir-tblgen",
     td_file = "dialect/tpu/tpu.td",
     deps = [":tpu_td_files"],
@@ -233,8 +195,14 @@ cc_library(
     deps = [
         ":tpu_dialect",
         ":tpu_inc_gen",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/log:check",
+        "@llvm-project//llvm:Support",
         "@llvm-project//mlir:CAPIIRObjects",
+        "@llvm-project//mlir:FuncDialect",
         "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:Support",
+        "@xla//xla:array",
     ],
     alwayslink = True,
 )
@@ -269,6 +237,18 @@ filegroup(
     srcs = [
         "dialect/tpu/transforms/extensions/apply_vector_layout_extensions.cc",
         "dialect/tpu/transforms/extensions/infer_vector_layout_extensions.cc",
+    ],
+    # compatible with libtpu
+)
+
+cc_library(
+    name = "pass_boilerplate",
+    hdrs = ["pass_boilerplate.h"],
+    # compatible with libtpu
+    deps = [
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:Pass",
+        "@llvm-project//mlir:Support",
     ],
 )
 

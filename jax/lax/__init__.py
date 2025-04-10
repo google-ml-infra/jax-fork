@@ -17,6 +17,7 @@
 
 from jax._src.lax.lax import (
   DotDimensionNumbers as DotDimensionNumbers,
+  RaggedDotDimensionNumbers as RaggedDotDimensionNumbers,
   Precision as Precision,
   PrecisionLike as PrecisionLike,
   DotAlgorithm as DotAlgorithm,
@@ -158,6 +159,7 @@ from jax._src.lax.lax import (
   pow as pow,
   pow_p as pow_p,
   ragged_dot as ragged_dot,
+  ragged_dot_general as ragged_dot_general,
   real as real,
   real_p as real_p,
   reciprocal as reciprocal,
@@ -196,6 +198,7 @@ from jax._src.lax.lax import (
   select as select,
   select_n as select_n,
   select_n_p as select_n_p,
+  shape_as_value as shape_as_value,
   shift_left as shift_left,
   shift_left_p as shift_left_p,
   shift_right_arithmetic as shift_right_arithmetic,
@@ -258,7 +261,6 @@ from jax._src.lax.special import (
   polygamma as polygamma,
   polygamma_p as polygamma_p,
   random_gamma_grad as random_gamma_grad,
-  random_gamma_grad_p as random_gamma_grad_p,
   regularized_incomplete_beta_p as regularized_incomplete_beta_p,
   zeta as zeta,
   zeta_p as zeta_p,
@@ -374,6 +376,9 @@ from jax._src.lax.parallel import (
   pswapaxes as pswapaxes,
   ragged_all_to_all as ragged_all_to_all,
   ragged_all_to_all_p as ragged_all_to_all_p,
+)
+from jax._src.core import (
+    pvary as pvary,
 )
 from jax._src.lax.other import (
   conv_general_dilated_local as conv_general_dilated_local,

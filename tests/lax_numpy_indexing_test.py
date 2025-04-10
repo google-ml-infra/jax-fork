@@ -926,11 +926,19 @@ class IndexingTest(jtu.JaxTestCase):
     self.assertEqual(jaxpr.jaxpr.eqns[-2].primitive, lax.slice_p)
     self.assertEqual(jaxpr.jaxpr.eqns[-1].primitive, lax.squeeze_p)
 
-    # Indexing with `Ellipsis` is not lowered to `gather`.
+    # Indexing with `Ellipsis` is not lowered to `gather` ...
     jaxpr = jax.make_jaxpr(lambda x: x[..., 0])(jnp.ones((3, 4, 5)))
     self.assertLen((jaxpr.jaxpr.eqns), 2)
     self.assertEqual(jaxpr.jaxpr.eqns[-2].primitive, lax.slice_p)
     self.assertEqual(jaxpr.jaxpr.eqns[-1].primitive, lax.squeeze_p)
+
+    # ... even when the ellipsis expands to no dimensions.
+    jaxpr = jax.make_jaxpr(lambda x: x[..., 0:1])(jnp.ones((3,)))
+    self.assertLen((jaxpr.jaxpr.eqns), 1)
+    self.assertEqual(jaxpr.jaxpr.eqns[-1].primitive, lax.slice_p)
+    jaxpr = jax.make_jaxpr(lambda x: x[0:1, ...])(jnp.ones((3,)))
+    self.assertLen((jaxpr.jaxpr.eqns), 1)
+    self.assertEqual(jaxpr.jaxpr.eqns[-1].primitive, lax.slice_p)
 
     # Simple reverses lower to lax.rev_p
     jaxpr = jax.make_jaxpr(lambda x: x[:, ::-1])(jnp.ones((3, 4)))
@@ -1120,6 +1128,10 @@ class IndexingTest(jtu.JaxTestCase):
       jnp.zeros(2).at[0.].add(1.)
     with self.assertRaisesRegex(TypeError, BAD_INDEX_TYPE_ERROR):
       jnp.zeros(2).at[0.].set(1.)
+    with self.assertRaisesRegex(TypeError, BAD_INDEX_TYPE_ERROR):
+      jnp.zeros((2, 2))[jnp.arange(2), 1.0]
+    with self.assertRaisesRegex(TypeError, BAD_INDEX_TYPE_ERROR):
+      jnp.zeros((2, 2))[jnp.arange(2), 1 + 1j]
 
   def testStrIndexingError(self):
     msg = "JAX does not support string indexing"

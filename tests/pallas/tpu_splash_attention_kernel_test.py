@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for splash_attention."""
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -211,7 +210,9 @@ def sequence_length_strategy(draw: Draw) -> tuple[int, int]:
 @hps.composite
 def attention_strategy(draw: Draw) -> tuple[int, int, int, np.dtype]:
   q_seq_len, kv_seq_len = draw(sequence_length_strategy())
-  head_dim = draw(hps.sampled_from([128, 256]))
+  head_dim_qk, head_dim_v = draw(
+      hps.sampled_from([(128, 128), (256, 256), (192, 128)])
+  )
   if q_seq_len >= 4096 and kv_seq_len >= 4096:
     # Do not draw bfloat16 on longer sequence lengths, as this increases
     # the risk of numerical precision errors causing false positives in
@@ -219,16 +220,26 @@ def attention_strategy(draw: Draw) -> tuple[int, int, int, np.dtype]:
     dtype = np.dtype("float32")
   else:
     dtype = draw(hps.sampled_from([np.dtype("float32"), np.dtype(jnp.bfloat16)]))
-  return q_seq_len, kv_seq_len, head_dim, dtype
+  return q_seq_len, kv_seq_len, head_dim_qk, head_dim_v, dtype
 
 
 @hps.composite
 def mha_strategy(draw: Draw) -> tuple[int, int, int, int, int, np.dtype]:
-  q_seq_len, kv_seq_len, head_dim, dtype = draw(attention_strategy())
+  q_seq_len, kv_seq_len, head_dim_qk, head_dim_v, dtype = draw(
+      attention_strategy()
+  )
   num_q_heads, num_kv_heads = draw(
       hps.sampled_from([(1, 1), (2, 2), (4, 1), (8, 4), (6, 2)])
   )
-  return q_seq_len, kv_seq_len, num_q_heads, num_kv_heads, head_dim, dtype
+  return (
+      q_seq_len,
+      kv_seq_len,
+      num_q_heads,
+      num_kv_heads,
+      head_dim_qk,
+      head_dim_v,
+      dtype,
+  )
 
 
 @hps.composite
@@ -292,14 +303,6 @@ def attn_logits_soft_cap_strategy() -> hps.SearchStrategy[float | None]:
   return hps.one_of(hps.just(None), hps.floats(min_value=1.0, max_value=50.0))
 
 
-def to_dynamic_mask(mask: mask_lib.MultiHeadMask) -> jax.Array:
-  q_seq_len, kv_seq_len = mask.masks[0].shape
-  full_mask_slice = (slice(0, q_seq_len), slice(0, kv_seq_len))
-  dynamic_mask = jnp.stack([m[full_mask_slice] for m in mask.masks], axis=0)
-
-  return dynamic_mask
-
-
 @jtu.with_config(jax_traceback_filtering="off")
 class PallasBaseTest(jtu.JaxTestCase):
   INTERPRET = False
@@ -338,21 +341,31 @@ class SplashAttentionTest(PallasBaseTest):
     key = random.key(seed)
     k1, k2, k3 = random.split(key, 3)
 
-    q_seq_len, kv_seq_len, num_q_heads, num_kv_heads, head_dim, dtype = (
-        data.draw(mha_strategy())
-    )
+    (
+        q_seq_len,
+        kv_seq_len,
+        num_q_heads,
+        num_kv_heads,
+        head_dim_qk,
+        head_dim_v,
+        dtype,
+    ) = data.draw(mha_strategy())
 
     # Avoid segment ids for rectangular matrices, as its hard to enforce
     # valid masks (non-0 rows).
     hp.assume(q_seq_len == kv_seq_len or not is_segmented)
 
-    q = random.uniform(k1, (num_q_heads, q_seq_len, head_dim), dtype=dtype)
+    q = random.uniform(k1, (num_q_heads, q_seq_len, head_dim_qk), dtype=dtype)
     if is_mqa:
-      k = random.uniform(k2, (kv_seq_len, head_dim), dtype=dtype)
-      v = random.uniform(k3, (kv_seq_len, head_dim), dtype=dtype)
+      k = random.uniform(k2, (kv_seq_len, head_dim_qk), dtype=dtype)
+      v = random.uniform(k3, (kv_seq_len, head_dim_v), dtype=dtype)
     else:
-      k = random.uniform(k2, (num_kv_heads, kv_seq_len, head_dim), dtype=dtype)
-      v = random.uniform(k3, (num_kv_heads, kv_seq_len, head_dim), dtype=dtype)
+      k = random.uniform(
+          k2, (num_kv_heads, kv_seq_len, head_dim_qk), dtype=dtype
+      )
+      v = random.uniform(
+          k3, (num_kv_heads, kv_seq_len, head_dim_v), dtype=dtype
+      )
 
     segment_ids = None
     if is_segmented:
@@ -363,7 +376,7 @@ class SplashAttentionTest(PallasBaseTest):
     masks = data.draw(mha_mask_strategy(q_seq_len, kv_seq_len, num_q_heads))
     mask = mask_lib.MultiHeadMask(tuple(m.get_mask() for m in masks))
     if is_dynamic_mask:
-      mask = to_dynamic_mask(mask)
+      mask = jnp.array(mask[:, :, :])
     block_sizes = data.draw(block_sizes_strategy(q_seq_len, kv_seq_len))
 
     if is_mqa:
@@ -405,21 +418,31 @@ class SplashAttentionTest(PallasBaseTest):
     key = random.key(seed)
     k1, k2, k3 = random.split(key, 3)
 
-    q_seq_len, kv_seq_len, num_q_heads, num_kv_heads, head_dim, dtype = (
-        data.draw(mha_strategy())
-    )
+    (
+        q_seq_len,
+        kv_seq_len,
+        num_q_heads,
+        num_kv_heads,
+        head_dim_qk,
+        head_dim_v,
+        dtype,
+    ) = data.draw(mha_strategy())
 
     # Avoid segment ids for rectangular matrices, as its hard to enforce
     # valid masks (non-0 rows).
     hp.assume(q_seq_len == kv_seq_len or not is_segmented)
 
-    q = random.uniform(k1, (num_q_heads, q_seq_len, head_dim), dtype=dtype)
+    q = random.uniform(k1, (num_q_heads, q_seq_len, head_dim_qk), dtype=dtype)
     if is_mqa:
-      k = random.uniform(k2, (kv_seq_len, head_dim), dtype=dtype)
-      v = random.uniform(k3, (kv_seq_len, head_dim), dtype=dtype)
+      k = random.uniform(k2, (kv_seq_len, head_dim_qk), dtype=dtype)
+      v = random.uniform(k3, (kv_seq_len, head_dim_v), dtype=dtype)
     else:
-      k = random.uniform(k2, (num_kv_heads, kv_seq_len, head_dim), dtype=dtype)
-      v = random.uniform(k3, (num_kv_heads, kv_seq_len, head_dim), dtype=dtype)
+      k = random.uniform(
+          k2, (num_kv_heads, kv_seq_len, head_dim_qk), dtype=dtype
+      )
+      v = random.uniform(
+          k3, (num_kv_heads, kv_seq_len, head_dim_v), dtype=dtype
+      )
 
     segment_ids = None
     if is_segmented:
@@ -429,7 +452,7 @@ class SplashAttentionTest(PallasBaseTest):
     masks = data.draw(mha_mask_strategy(q_seq_len, kv_seq_len, num_q_heads))
     mask = mask_lib.MultiHeadMask(tuple(m.get_mask() for m in masks))
     if is_dynamic_mask:
-      mask = to_dynamic_mask(mask)
+      mask = jnp.array(mask[:, :, :])
     block_sizes = data.draw(block_sizes_strategy(q_seq_len, kv_seq_len))
     if is_mqa:
       attn_ref = splash.make_masked_mqa_reference(mask)
@@ -473,15 +496,17 @@ class SplashAttentionTest(PallasBaseTest):
     key = random.key(1 + seed)
     k1, k2, k3, k4 = random.split(key, 4)
 
-    q_seq_len, kv_seq_len, head_dim, dtype = data.draw(attention_strategy())
+    q_seq_len, kv_seq_len, head_dim_qk, head_dim_v, dtype = data.draw(
+        attention_strategy()
+    )
 
     # Avoid segment ids for rectangular matrices, as it's hard to enforce
     # valid masks (non-0 rows).
     hp.assume(q_seq_len == kv_seq_len or not is_segmented)
 
-    q = random.uniform(k1, (q_seq_len, head_dim), dtype=dtype)
-    k = random.uniform(k2, (kv_seq_len, head_dim), dtype=dtype)
-    v = random.uniform(k3, (kv_seq_len, head_dim), dtype=dtype)
+    q = random.uniform(k1, (q_seq_len, head_dim_qk), dtype=dtype)
+    k = random.uniform(k2, (kv_seq_len, head_dim_qk), dtype=dtype)
+    v = random.uniform(k3, (kv_seq_len, head_dim_v), dtype=dtype)
     segment_ids = None
     if is_segmented:
       assert q_seq_len == kv_seq_len
@@ -561,21 +586,31 @@ class SplashAttentionTest(PallasBaseTest):
     key = random.key(seed)
     k1, k2, k3, k4 = random.split(key, 4)
 
-    q_seq_len, kv_seq_len, num_q_heads, num_kv_heads, head_dim, dtype = (
-        data.draw(mha_strategy())
-    )
+    (
+        q_seq_len,
+        kv_seq_len,
+        num_q_heads,
+        num_kv_heads,
+        head_dim_qk,
+        head_dim_v,
+        dtype,
+    ) = data.draw(mha_strategy())
 
     # Avoid segment ids for rectangular matrices, as it's hard to enforce
     # valid masks (non-0 rows).
     hp.assume(q_seq_len == kv_seq_len or not is_segmented)
 
-    q = random.uniform(k1, (num_q_heads, q_seq_len, head_dim), dtype=dtype)
+    q = random.uniform(k1, (num_q_heads, q_seq_len, head_dim_qk), dtype=dtype)
     if is_mqa:
-      k = random.uniform(k2, (kv_seq_len, head_dim), dtype=dtype)
-      v = random.uniform(k3, (kv_seq_len, head_dim), dtype=dtype)
+      k = random.uniform(k2, (kv_seq_len, head_dim_qk), dtype=dtype)
+      v = random.uniform(k3, (kv_seq_len, head_dim_v), dtype=dtype)
     else:
-      k = random.uniform(k2, (num_kv_heads, kv_seq_len, head_dim), dtype=dtype)
-      v = random.uniform(k3, (num_kv_heads, kv_seq_len, head_dim), dtype=dtype)
+      k = random.uniform(
+          k2, (num_kv_heads, kv_seq_len, head_dim_qk), dtype=dtype
+      )
+      v = random.uniform(
+          k3, (num_kv_heads, kv_seq_len, head_dim_v), dtype=dtype
+      )
 
     segment_ids = None
     if is_segmented:
@@ -585,7 +620,7 @@ class SplashAttentionTest(PallasBaseTest):
     masks = data.draw(mha_mask_strategy(q_seq_len, kv_seq_len, num_q_heads))
     mask = mask_lib.MultiHeadMask(tuple(m.get_mask() for m in masks))
     if use_dynamic_mask:
-      mask = to_dynamic_mask(mask)
+      mask = jnp.array(mask[:, :, :])
     block_sizes = data.draw(
         block_sizes_strategy(q_seq_len, kv_seq_len, include_bwd_blocks=True,
                              use_fused_bwd_kernel=use_fused_bwd_kernel)

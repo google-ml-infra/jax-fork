@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for --debug_nans."""
-
 from absl.testing import absltest
 
 import jax
@@ -155,8 +153,7 @@ class DebugNaNsTest(jtu.JaxTestCase):
     _, f_vjp = jax.vjp(shmap_f, jnp.zeros([1]))
 
     with self.assertRaisesRegex(
-        FloatingPointError,
-        r"invalid value \(nan\) encountered in mul\nWhen differentiating"):
+        FloatingPointError, r"Invalid value \(nan\) encountered"):
       ans, = f_vjp(jnp.ones([1]))
       ans.block_until_ready()
 

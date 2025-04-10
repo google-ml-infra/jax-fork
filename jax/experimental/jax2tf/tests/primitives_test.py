@@ -172,7 +172,13 @@ class JaxPrimitiveTest(tf_test_util.JaxToTfTestCase):
         continue
       if p.name == "composite":
         continue
+      if p.name == "pvary":
+        continue
+      if p.name == "psum_invariant":
+        continue
       if p.name == "sharding_constraint":
+        continue
+      if p.name == "dll_constraint":
         continue
       if p.name == "mesh_cast":
         continue
@@ -205,6 +211,8 @@ class JaxPrimitiveTest(tf_test_util.JaxToTfTestCase):
           "dot_product_attention_fp8_fwd_wrapper",
           "dot_product_attention_fp8_bwd_wrapper",
       ):
+        continue
+      if p.name == "scaled_matmul_wrapper":
         continue
       if p.name in tf_not_yet_impl:
         self.assertNotIn(

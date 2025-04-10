@@ -57,6 +57,7 @@ Configuration
    enable_custom_prng
    enable_custom_vjp_by_custom_transpose
    log_compiles
+   no_tracing
    numpy_rank_promotion
    transfer_guard
 
@@ -80,6 +81,7 @@ Just-in-time compilation (:code:`jit`)
     named_call
     named_scope
     block_until_ready
+    copy_to_host_async
     make_mesh
 
 .. _jax-grad:

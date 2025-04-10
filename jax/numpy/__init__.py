@@ -211,13 +211,18 @@ from jax._src.numpy.scalar_types import (
     double as double,
     float16 as float16,
     float32 as float32,
+    float4_e2m1fn as float4_e2m1fn,
     float64 as float64,
+    float8_e3m4 as float8_e3m4,
+    float8_e4m3 as float8_e4m3,
     float8_e4m3b11fnuz as float8_e4m3b11fnuz,
     float8_e4m3fn as float8_e4m3fn,
     float8_e4m3fnuz as float8_e4m3fnuz,
     float8_e5m2 as float8_e5m2,
     float8_e5m2fnuz as float8_e5m2fnuz,
+    float8_e8m0fnu as float8_e8m0fnu,
     float_ as float_,
+    int2 as int2,
     int4 as int4,
     int8 as int8,
     int16 as int16,
@@ -226,6 +231,7 @@ from jax._src.numpy.scalar_types import (
     int_ as int_,
     single as single,
     uint as uint,
+    uint2 as uint2,
     uint4 as uint4,
     uint8 as uint8,
     uint16 as uint16,
@@ -254,6 +260,12 @@ from jax._src.numpy.tensor_contractions import (
   vdot as vdot,
 )
 
+from jax._src.numpy.util import (
+  ndim as ndim,
+  shape as shape,
+  size as size,
+)
+
 from jax._src.numpy.window_functions import (
     bartlett as bartlett,
     blackman as blackman,
@@ -279,37 +291,15 @@ from numpy import (
     integer as integer,
     iterable as iterable,
     nan as nan,
-    ndim as ndim,
     newaxis as newaxis,
     number as number,
     object_ as object_,
     pi as pi,
     save as save,
     savez as savez,
-    shape as shape,
-    size as size,
     signedinteger as signedinteger,
     unsignedinteger as unsignedinteger,
 )
-
-# TODO(slebedev): Remove the try-except once we upgrade to ml_dtypes 0.4.1.
-try:
-  from jax._src.numpy.scalar_types import (
-    int2 as int2,
-    uint2 as uint2,
-  )
-except ImportError:
-  pass
-
-# TODO: Remove the try-except once we upgrade to ml_dtypes 0.5.0
-try:
-  from jax._src.numpy.scalar_types import (
-    float8_e3m4 as float8_e3m4,
-    float8_e4m3 as float8_e4m3,
-    float8_e8m0fnu as float8_e8m0fnu,
-  )
-except ImportError:
-  pass
 
 from jax._src.numpy.array_api_metadata import (
   __array_api_version__ as __array_api_version__,
@@ -502,19 +492,3 @@ from jax._src.numpy.vectorize import vectorize as vectorize
 from jax._src.numpy.array_methods import register_jax_array_methods
 register_jax_array_methods()
 del register_jax_array_methods
-
-
-_deprecations = {
-  # Finalized 2024-12-13; remove after 2024-3-13
-  "round_": (
-    "jnp.round_ was deprecated in JAX 0.4.38; use jnp.round instead.",
-    None
-  ),
-}
-
-import typing
-if not typing.TYPE_CHECKING:
-  from jax._src.deprecations import deprecation_getattr as _deprecation_getattr
-  __getattr__ = _deprecation_getattr(__name__, _deprecations)
-  del _deprecation_getattr
-del typing

@@ -20,8 +20,6 @@ import operator
 import string
 from typing import Any, NamedTuple, Sequence
 
-import numpy as np
-
 import jax
 from jax import lax
 from jax._src import array
@@ -30,15 +28,19 @@ from jax._src import core
 from jax._src import dispatch
 from jax._src import dtypes
 from jax._src import errors
+from jax._src import mesh as mesh_lib
 from jax._src.api import jit
 from jax._src.lax import lax as lax_internal
 from jax._src.numpy import einsum
+from jax._src.numpy import error as jnp_error
 from jax._src.numpy import lax_numpy
 from jax._src.numpy import ufuncs
 from jax._src.numpy import util
+from jax._src.pjit import auto_axes
 from jax._src.tree_util import tree_flatten
 from jax._src.typing import Array, ArrayLike, StaticScalar
-from jax._src.util import canonicalize_axis, set_module, tuple_replace, safe_zip
+from jax._src.util import canonicalize_axis, safe_zip, set_module, tuple_update
+import numpy as np
 
 export = set_module('jax.numpy')
 
@@ -395,7 +397,9 @@ def take_along_axis(
 
 
 def _make_along_axis_idx(shape, indices, axis):
-  return tuple_replace(lax_numpy.indices(shape, sparse=True), axis, indices)
+  if axis < 0:
+    axis += len(shape)
+  return tuple_update(lax_numpy.indices(shape, sparse=True), axis, indices)
 
 
 @export
@@ -524,8 +528,6 @@ def _attempt_rewriting_take_via_slice(arr: Array, idx: Any, mode: str | None) ->
 
   if not all(isinstance(i, int) for i in arr.shape):
     return None
-  if len(idx) > arr.ndim:
-    return None
   if any(i is None for i in idx):
     return None  # TODO(jakevdp): handle newaxis case
   # For symbolic dimensions fallback to gather
@@ -533,10 +535,13 @@ def _attempt_rewriting_take_via_slice(arr: Array, idx: Any, mode: str | None) ->
          for i in idx if isinstance(i, slice)
          for elt in (i.start, i.stop, i.step)):
     return None
-
   if any(i is Ellipsis for i in idx):
-    # Remove ellipses and add trailing `slice(None)`.
+    # Remove ellipses and pad with trailing `slice(None)` if necessary.
+    # Do this before checking against rank of `arr` so that `...` can
+    # count as no dimensions at all (e.g. `my_1d_array[:, ...]` succeeds)
     idx = _canonicalize_tuple_index(arr.ndim, idx=idx)
+  if len(idx) > arr.ndim:
+    return None
 
   simple_revs = {i for i, ind in enumerate(idx) if _is_simple_reverse_slice(ind)}
   int_indices = {i for i, (ind, size) in enumerate(zip(idx, arr.shape))
@@ -568,7 +573,8 @@ def _attempt_rewriting_take_via_slice(arr: Array, idx: Any, mode: str | None) ->
 
   idx += (arr.ndim - len(idx)) * (slice(None),)
   start_indices: Sequence[ArrayLike] = []
-  slice_sizes: Sequence[int] = []
+  slice_sizes: list[int] = []
+  allow_negative_indices: list[bool] = []
 
   for ind, size in safe_zip(idx, arr.shape):
     if isinstance(ind, slice):
@@ -576,11 +582,15 @@ def _attempt_rewriting_take_via_slice(arr: Array, idx: Any, mode: str | None) ->
       assert step == 1  # checked above
       start_indices.append(start)
       slice_sizes.append(max(0, stop - start))
+      allow_negative_indices.append(start < 0 or stop < 0)
     else:
       assert np.issubdtype(dtypes.dtype(ind), np.integer)  # checked above
       assert np.shape(ind) == ()  # checked above
       start_indices.append(ind)
       slice_sizes.append(1)
+      allow_negative_indices.append(
+          not isinstance(ind, (int, np.integer)) or bool(ind < 0))
+
   # Try to use static slicing when possible.
   if all(isinstance(i, (int, np.integer)) and i >= 0 for i in start_indices):
     int_start_indices = [int(i) for i in start_indices]  # type: ignore
@@ -592,15 +602,19 @@ def _attempt_rewriting_take_via_slice(arr: Array, idx: Any, mode: str | None) ->
     # start indices to have matching types.
     if len(start_indices) > 1:
       start_indices = util.promote_dtypes(*start_indices)
+    jnp_error._check_precondition_oob_dynamic_slice(
+        arr.shape, start_indices, slice_sizes, allow_negative_indices
+    )
     arr = lax.dynamic_slice(
-        arr, start_indices=start_indices, slice_sizes=slice_sizes)
+        arr, start_indices=start_indices, slice_sizes=slice_sizes,
+        allow_negative_indices=allow_negative_indices)
   if int_indices:
     arr = lax.squeeze(arr, tuple(int_indices))
   return arr
 
 
 def rewriting_take(arr, idx, indices_are_sorted=False, unique_indices=False,
-                   mode=None, fill_value=None):
+                   mode=None, fill_value=None, out_sharding=None):
   # Computes arr[idx].
   # All supported cases of indexing can be implemented as an XLA gather,
   # followed by an optional reverse and broadcast_in_dim.
@@ -624,15 +638,16 @@ def rewriting_take(arr, idx, indices_are_sorted=False, unique_indices=False,
 
   treedef, static_idx, dynamic_idx = split_index_for_jit(idx, arr.shape)
   return _gather(arr, treedef, static_idx, dynamic_idx, indices_are_sorted,
-                 unique_indices, mode, fill_value)
+                 unique_indices, mode, fill_value, out_sharding)
 
 # TODO(phawkins): re-enable jit after fixing excessive recompilation for
 # slice indexes (e.g., slice(0, 5, None), slice(10, 15, None), etc.).
 # @partial(jit, static_argnums=(1, 2))
 def _gather(arr, treedef, static_idx, dynamic_idx, indices_are_sorted,
-            unique_indices, mode, fill_value):
+            unique_indices, mode, fill_value, out_sharding):
   idx = merge_static_and_dynamic_indices(treedef, static_idx, dynamic_idx)
   indexer = index_to_gather(np.shape(arr), idx)  # shared with _scatter_update
+  jnp_error._check_precondition_oob_gather(arr.shape, indexer.gather_indices)
   y = arr
 
   if fill_value is not None:
@@ -653,11 +668,18 @@ def _gather(arr, treedef, static_idx, dynamic_idx, indices_are_sorted,
 
   # We avoid generating a gather when indexer.gather_indices.size is empty.
   if not core.is_empty_shape(indexer.gather_indices.shape):
-    y = lax.gather(
-      y, indexer.gather_indices, indexer.dnums, indexer.gather_slice_shape,
-      unique_indices=unique_indices or indexer.unique_indices,
-      indices_are_sorted=indices_are_sorted or indexer.indices_are_sorted,
-      mode=mode, fill_value=fill_value)
+    internal_gather = partial(
+        lax.gather,
+        dimension_numbers=indexer.dnums,
+        slice_sizes=indexer.gather_slice_shape,
+        unique_indices=unique_indices or indexer.unique_indices,
+        indices_are_sorted=indices_are_sorted or indexer.indices_are_sorted,
+        mode=mode, fill_value=fill_value)
+    if out_sharding is not None:
+      internal_gather = auto_axes(
+          internal_gather, axes=mesh_lib.get_abstract_mesh().axis_names,
+          out_shardings=out_sharding)
+    y = internal_gather(y, indexer.gather_indices)
 
   # Reverses axes with negative strides.
   if indexer.reversed_y_dims:
@@ -737,13 +759,33 @@ def merge_static_and_dynamic_indices(treedef, static_idx, dynamic_idx):
 def _int(aval):
   return not aval.shape and dtypes.issubdtype(aval.dtype, np.integer)
 
+def _aval_or_none(x):
+  try:
+    return core.get_aval(x)
+  except:
+    return None
+
 def index_to_gather(x_shape: Sequence[int], idx: Sequence[Any],
                     normalize_indices: bool = True) -> _Indexer:
+  # Convert sequences to arrays
+  idx = tuple(lax_numpy.asarray(i, dtype=None if i else int)
+              if isinstance(i, Sequence) else i for i in idx)
+  abstract_idx = [_aval_or_none(i) for i in idx]
+  float_indices = [(i, val, aval) for i, (val, aval) in enumerate(zip(idx, abstract_idx))
+                   if aval is not None and dtypes.issubdtype(aval, np.inexact)]
+
+  # Check for float or complex indices:
+  if float_indices:
+    i, val, aval = float_indices[0]
+    msg = ("Indexer must have integer or boolean type, got indexer "
+           "with type {} at position {}, indexer value {}")
+    raise TypeError(msg.format(aval.dtype.name, i, val))
+
   # Check whether advanced indices are contiguous. We must do this before
   # removing ellipses (https://github.com/jax-ml/jax/issues/25109)
   # If advanced idexing axes do not appear contiguously, NumPy semantics
   # move the advanced axes to the front.
-  is_advanced, = np.nonzero([isinstance(e, (int, Sequence, Array, np.ndarray))
+  is_advanced, = np.nonzero([isinstance(e, (int, np.integer, Array, np.ndarray))
                              or lax_numpy.isscalar(e) for e in idx])
   advanced_axes_are_contiguous = np.all(np.diff(is_advanced) == 1)
 
@@ -848,11 +890,8 @@ def index_to_gather(x_shape: Sequence[int], idx: Sequence[Any],
       gather_slice_shape.append(1)
       continue
 
-    try:
-      abstract_i = core.get_aval(i)
-    except TypeError:
-      abstract_i = None
     # Handle basic int indexes.
+    abstract_i = _aval_or_none(i)
     if isinstance(abstract_i, core.ShapedArray) and _int(abstract_i):
       if core.definitely_equal(x_shape[x_axis], 0):
         # XLA gives error when indexing into an axis of size 0

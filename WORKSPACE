@@ -14,8 +14,10 @@ python_init_repositories(
         "3.12": "//build:requirements_lock_3_12.txt",
         "3.13": "//build:requirements_lock_3_13.txt",
         "3.13-ft": "//build:requirements_lock_3_13_ft.txt",
+        "3.14-ft": "//build:requirements_lock_3_14_ft.txt",
     },
     local_wheel_inclusion_list = [
+        "jax-*",
         "jaxlib*",
         "jax_cuda*",
         "jax-cuda*",
@@ -70,7 +72,7 @@ jax_python_wheel_repository(
 )
 
 load(
-    "@tsl//third_party/py:python_wheel.bzl",
+    "@xla//third_party/py:python_wheel.bzl",
     "python_wheel_version_suffix_repository",
 )
 python_wheel_version_suffix_repository(
@@ -78,7 +80,7 @@ python_wheel_version_suffix_repository(
 )
 
 load(
-    "@tsl//third_party/gpus/cuda/hermetic:cuda_json_init_repository.bzl",
+    "@xla//third_party/gpus/cuda/hermetic:cuda_json_init_repository.bzl",
     "cuda_json_init_repository",
 )
 
@@ -90,7 +92,7 @@ load(
     "CUDNN_REDISTRIBUTIONS",
 )
 load(
-    "@tsl//third_party/gpus/cuda/hermetic:cuda_redist_init_repositories.bzl",
+    "@xla//third_party/gpus/cuda/hermetic:cuda_redist_init_repositories.bzl",
     "cuda_redist_init_repositories",
     "cudnn_redist_init_repository",
 )
@@ -104,21 +106,21 @@ cudnn_redist_init_repository(
 )
 
 load(
-    "@tsl//third_party/gpus/cuda/hermetic:cuda_configure.bzl",
+    "@xla//third_party/gpus/cuda/hermetic:cuda_configure.bzl",
     "cuda_configure",
 )
 
 cuda_configure(name = "local_config_cuda")
 
 load(
-    "@tsl//third_party/nccl/hermetic:nccl_redist_init_repository.bzl",
+    "@xla//third_party/nccl/hermetic:nccl_redist_init_repository.bzl",
     "nccl_redist_init_repository",
 )
 
 nccl_redist_init_repository()
 
 load(
-    "@tsl//third_party/nccl/hermetic:nccl_configure.bzl",
+    "@xla//third_party/nccl/hermetic:nccl_configure.bzl",
     "nccl_configure",
 )
 

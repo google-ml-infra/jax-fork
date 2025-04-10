@@ -14,19 +14,28 @@
 
 """Layout inference pass for the MLIR Mosaic GPU dialect."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+import dataclasses
 import enum
 from functools import partial
+import math
 from typing import cast
 
+from jax._src import lib as jaxlib
 from jax._src.lib import mosaic_gpu_dialect as mgpu
 from jax._src.lib.mlir import ir
 from jax._src.lib.mlir.dialects import arith
-from jax._src.lib.mlir.dialects import func
+from jax._src.lib.mlir.dialects import math as mlir_math
+from jax._src.lib.mlir.dialects import memref
+from jax._src.lib.mlir.dialects import scf
 from jax._src.lib.mlir.dialects import vector
+import numpy as np
 
 from . import fragmented_array as fa
+from . import inference_utils
 from . import layouts as layouts_lib
+from . import utils
+
 
 # mypy: ignore-errors
 
@@ -36,7 +45,9 @@ _layout_inference_rules: dict[str, LayoutInferenceRule] = {}
 
 
 def _add_layout_inference_rule(op: type[ir.OpView], rule: LayoutInferenceRule):
-  _layout_inference_rules[op.OPERATION_NAME] = rule  # pytype: disable=attribute-error
+  if op is not None:
+    _layout_inference_rules[op.OPERATION_NAME] = rule  # pytype: disable=attribute-error
+  return rule
 
 
 def _set_layout_attributes(
@@ -44,8 +55,8 @@ def _set_layout_attributes(
     in_layouts: list[ir.Attribute],
     out_layouts: list[ir.Attribute],
 ):
-  op.attributes["in_layouts"] = ir.ArrayAttr.get(in_layouts)
-  op.attributes["out_layouts"] = ir.ArrayAttr.get(out_layouts)
+    op.attributes["in_layouts"] = ir.ArrayAttr.get(in_layouts)
+    op.attributes["out_layouts"] = ir.ArrayAttr.get(out_layouts)
 
 
 def _choose_representative_layout(
@@ -55,7 +66,7 @@ def _choose_representative_layout(
 
   Given the input set of possible layouts, this function extracts a single
   representative layout. Currently, this function only works with strided,
-  splat, and WGMMA fragmented layouts.
+  splat, and tiled layouts.
 
   Returns:
     A single layout that can be used to annotate the operation, or None if the
@@ -78,18 +89,18 @@ def _choose_representative_layout(
       )
   )
 
-  wgmma_layouts: list[fa.WGMMAFragLayout] = list(
+  tiled_layouts: list[fa.TiledLayout] = list(
       map(
           layouts_lib.from_layout_attr,
-          filter(layouts_lib.is_wgmma_fragmented_layout, layouts),
+          filter(layouts_lib.is_tiled_layout, layouts),
       )
   )
 
-  if len(splat_layouts) + len(strided_layouts) + len(wgmma_layouts) != len(
+  if len(splat_layouts) + len(strided_layouts) + len(tiled_layouts) != len(
       layouts
   ):
     raise ValueError(
-        f"Expected only strided, splat, and wgmma layouts, got {layouts}"
+        f"Expected only strided, splat, and tiled layouts, got {layouts}"
     )
 
   if len(splat_layouts) > 1:
@@ -104,13 +115,19 @@ def _choose_representative_layout(
         "is not supported."
     )
 
-  if (wgmma_layouts and strided_layouts):
+  if len(tiled_layouts) > 1:
     raise NotImplementedError(
-        "Mixing strided and WGMMA layouts is not supported."
+        "Finding a representative layout for several distinct tiled layouts "
+        "is not supported."
     )
 
-  if wgmma_layouts:
-    return layouts_lib.to_layout_attr(wgmma_layouts[0])
+  if tiled_layouts and strided_layouts:
+    raise NotImplementedError(
+        "Mixing strided and tiled layouts is not supported."
+    )
+
+  if tiled_layouts:
+    return layouts_lib.to_layout_attr(tiled_layouts[0])
 
   if strided_layouts:
     [strided_layout] = strided_layouts
@@ -118,63 +135,6 @@ def _choose_representative_layout(
 
   [splat_layout] = splat_layouts
   return layouts_lib.to_layout_attr(splat_layout)
-
-
-def _in_layout_for_operand(
-    op: ir.OpView,
-    operand: ir.Value,
-) -> ir.Attribute | None:
-  """Returns the layout of the operand in the given operation if it is set.
-
-  Raises:
-    ValueError: If `operand` is not an operand of `op`, or if `operand` is not a
-      Vector.
-  """
-  if not ir.VectorType.isinstance(operand.type):
-    raise ValueError(f"{operand} is not a vector.")
-
-  operand_number = [
-      o for o in op.operands if ir.VectorType.isinstance(o.type)
-  ].index(operand)
-
-  if not layouts_lib.has_in_layouts_set(op):
-    return None
-
-  return layouts_lib.in_layouts(op)[operand_number]
-
-
-def _value_layout(value: ir.Value) -> ir.Attribute | None:
-  """Returns the layout for a given value as defined by its owner.
-
-  Raises:
-    ValueError: If `result` is not a Vector.
-  """
-  if not ir.VectorType.isinstance(value.type):
-    raise ValueError(f"{value} is not a vector.")
-
-  owner = value.owner
-  if isinstance(owner, ir.Operation):
-    if not layouts_lib.has_out_layouts_set(owner):
-      return None
-    value_result_number = [
-        r for r in owner.results if ir.VectorType.isinstance(r.type)
-    ].index(value)
-    return layouts_lib.out_layouts(owner)[value_result_number]
-
-  # Function block case, useful when attempting to derive layouts for ops
-  # depending on function parameters.
-  if isinstance(owner, ir.Block) and isinstance(owner.owner, func.FuncOp):
-    func_op = owner.owner
-    block = cast(ir.Block, owner)
-    if not layouts_lib.has_in_layouts_set(func_op):
-      return None
-    value_arg_number = [
-        r for r in block.arguments if ir.VectorType.isinstance(r.type)
-    ].index(value)
-    return layouts_lib.in_layouts(func_op)[value_arg_number]
-
-  raise NotImplementedError(
-      f"{owner} is not a function block nor an operation.")
 
 
 def _infer_pointwise_op_layouts(op: ir.OpView) -> OptionalLayouts:
@@ -185,14 +145,14 @@ def _infer_pointwise_op_layouts(op: ir.OpView) -> OptionalLayouts:
   num_vector_operands = len([o for o in op.operands if is_array(o)])
   num_vector_results = len([r for r in op.results if is_array(r)])
 
-  if layouts_lib.has_in_layouts_set(op):
-    op_in_layouts = layouts_lib.in_layouts(op)
+  if inference_utils.has_in_layouts_set(op):
+    op_in_layouts = inference_utils.in_layouts(op)
     if op_in_layouts:
       layout = op_in_layouts[0]
       return (num_vector_operands * [layout], num_vector_results * [layout])
 
-  if layouts_lib.has_out_layouts_set(op):
-    op_out_layouts = layouts_lib.out_layouts(op)
+  if inference_utils.has_out_layouts_set(op):
+    op_out_layouts = inference_utils.out_layouts(op)
     if op_out_layouts:
       layout = op_out_layouts[0]
       return (num_vector_operands * [layout], num_vector_results * [layout])
@@ -205,11 +165,14 @@ def _infer_pointwise_op_layouts(op: ir.OpView) -> OptionalLayouts:
   # We first look at producers; this enables e.g. propagating splat layouts as
   # far down as possible, until since we may be able to propagate splat layouts
   # further down before requiring a relayout in that way.
+  all_inputs_have_layout = True
   for operand in op.operands:
     if not ir.VectorType.isinstance(operand.type):
       continue
-    if (layout := _value_layout(operand)) is not None:
+    if (layout := inference_utils.value_layout(operand)) is not None:
       layouts.add(layout)
+    else:
+      all_inputs_have_layout = False
 
   # We only look at consumers if we haven't found a possible layout yet. This is
   # to avoid propagating more complicated layouts up, to e.g. preserve splat
@@ -221,7 +184,7 @@ def _infer_pointwise_op_layouts(op: ir.OpView) -> OptionalLayouts:
       for op_operand_use in cast(ir.OpResult, op_result).uses:
         consumer = op_operand_use.owner
         op_user = consumer.operands[op_operand_use.operand_number]
-        layout = _in_layout_for_operand(consumer, op_user)
+        layout = inference_utils.in_layout_for_operand(consumer, op_user)
         if layout is not None:
           layouts.add(layout)
 
@@ -232,20 +195,104 @@ def _infer_pointwise_op_layouts(op: ir.OpView) -> OptionalLayouts:
   # This is left for a future change, and currently we only do "down
   # propagation".
   layout = _choose_representative_layout(layouts)
+  # It is unsafe to conclude that this op produces a splat if not all inputs
+  # have been inferred: some of them might turn out not to be splats!
+  if layouts_lib.is_splat_fragmented_layout(layout) and not all_inputs_have_layout:
+    return None
   if layout is None:
     return None
 
   return (num_vector_operands * [layout], num_vector_results * [layout])
 
 
-for op in (
-    arith.AddFOp,
+for op in [
     arith.AddIOp,
+    arith.AddFOp,
+    arith.AndIOp,
+    arith.BitcastOp,
+    arith.CmpFOp,
+    arith.CmpIOp,
+    arith.ExtFOp,
+    arith.ExtSIOp,
+    arith.ExtUIOp,
+    arith.FPToSIOp,
+    arith.FPToUIOp,
+    arith.MaximumFOp,
+    arith.MaxUIOp,
+    arith.MaxSIOp,
+    arith.MinimumFOp,
+    arith.MinUIOp,
+    arith.MinSIOp,
+    arith.MulIOp,
     arith.MulFOp,
+    arith.OrIOp,
+    arith.FloorDivSIOp,
+    arith.DivUIOp,
+    arith.DivFOp,
+    arith.RemUIOp,
+    arith.RemSIOp,
+    arith.RemFOp,
+    arith.SIToFPOp,
+    arith.UIToFPOp,
+    arith.SubIOp,
+    arith.SubFOp,
+    arith.TruncFOp,
+    arith.TruncIOp,
+    arith.XOrIOp,
+    mlir_math.ExpOp,
+    mlir_math.Exp2Op,
+    mlir_math.LogOp,
+    mlir_math.RsqrtOp,
+    mlir_math.TanhOp,
     vector.LoadOp,
     vector.StoreOp,
-):
+]:
   _add_layout_inference_rule(op, _infer_pointwise_op_layouts)
+
+
+# TODO(bchetioui): remove once minimum jaxlib >= 0.5.3.
+OptimizationBarrierOp = getattr(mgpu, "OptimizationBarrierOp", None)
+
+
+@partial(_add_layout_inference_rule, OptimizationBarrierOp)
+def _infer_optimization_barrier_op_layout(
+    op: OptimizationBarrierOp,
+) -> OptionalLayouts:
+  def is_array(v: ir.Value) -> bool:
+    return ir.VectorType.isinstance(v.type)
+
+  if inference_utils.has_in_layouts_set(op):
+    op_in_layouts = list(inference_utils.in_layouts(op))
+    return op_in_layouts, op_in_layouts
+
+  if inference_utils.has_out_layouts_set(op):
+    op_out_layouts = list(inference_utils.out_layouts(op))
+    return op_out_layouts, op_out_layouts
+
+  layouts = [None] * len(op.operands)
+  for i, operand in enumerate(filter(is_array, op.operands)):
+    layouts[i] = inference_utils.value_layout(operand)
+
+  for i, result in enumerate(filter(is_array, op.results)):
+    possible_layouts = set()
+    for op_operand_use in cast(ir.OpResult, result).uses:
+      consumer = op_operand_use.owner
+      op_user = consumer.operands[op_operand_use.operand_number]
+      layout = inference_utils.in_layout_for_operand(consumer, op_user)
+      if layout is not None:
+        possible_layouts.add(layout)
+      if possible_layouts and layouts[i] is None:
+        # TODO(bchetioui): we could actually just pick any user layout here,
+        # and optimize later. This is fine for now.
+        layouts[i] = _choose_representative_layout(possible_layouts)
+
+  # TODO(bchetioui): handle annotating layout for only certain operands.
+  # Otherwise, layouts may not get propagated through optimization barriers, if
+  # a single branch does not carry any forcing layout, which is pretty bad.
+  if any(layout is None for layout in layouts):
+    return None
+
+  return layouts, layouts
 
 
 @partial(_add_layout_inference_rule, arith.ConstantOp)
@@ -275,7 +322,7 @@ def _infer_constant_op_layout(constant_op: arith.ConstantOp) -> OptionalLayouts:
     for use in cast(ir.OpResult, constant_op.result).uses:
       consumer = use.owner
       operand = consumer.operands[use.operand_number]
-      layout = _in_layout_for_operand(consumer, operand)
+      layout = inference_utils.in_layout_for_operand(consumer, operand)
       if layout is not None:
         break
 
@@ -290,6 +337,66 @@ def _infer_constant_op_layout(constant_op: arith.ConstantOp) -> OptionalLayouts:
   return [], [layout]
 
 
+@partial(_add_layout_inference_rule, scf.YieldOp)
+def _infer_yield_op_layout(op: scf.YieldOp) -> OptionalLayouts:
+  layouts = []
+  for result in op.results_:
+    if not ir.VectorType.isinstance(result.type):
+      continue
+    if (layout := inference_utils.value_layout(result)) is not None:
+      if layouts_lib.is_splat_fragmented_layout(layout):
+        return None
+      layouts.append(layout)
+    else:
+      # Not all layouts could be inferred for vector ops. Return for now.
+      return None
+
+  return (layouts, [])
+
+
+def _infer_from_yield_ops(op: ir.Operation) -> list[ir.Attribute] | None:
+  candidates = []
+  for region in op.regions:
+    [block] = region.blocks
+    yield_op = block.operations[len(block.operations) - 1]
+    assert isinstance(yield_op, scf.YieldOp)
+    if not inference_utils.has_in_layouts_set(yield_op):
+      continue
+    yield_layouts = inference_utils.in_layouts(yield_op)
+    if any(
+        layouts_lib.is_splat_fragmented_layout(layout)
+        for layout in yield_layouts
+    ):
+      continue
+    candidates.append(yield_layouts)
+  if not candidates:
+    return None
+  return [_choose_representative_layout(set(c)) for c in zip(*candidates)]
+
+
+@partial(_add_layout_inference_rule, scf.ForOp)
+def _infer_for_op_layout(op: scf.ForOp) -> OptionalLayouts:
+  # TODO(bchetioui): we don't attempt to propagate from outside for the moment.
+  # For the existing kernels, propagating from the YieldOp should be enough.
+  if layouts := _infer_from_yield_ops(op):
+    return layouts, layouts
+  return None
+
+
+@partial(_add_layout_inference_rule, scf.IfOp)
+def _infer_if_op_layout(op: scf.IfOp) -> OptionalLayouts:
+  if layouts := _infer_from_yield_ops(op):
+    return [], layouts
+  return None
+
+
+@partial(_add_layout_inference_rule, scf.IndexSwitchOp)
+def _infer_index_switch_op_layout(op: scf.IndexSwitchOp) -> OptionalLayouts:
+  if layouts := _infer_from_yield_ops(op):
+    return [], layouts
+  return None
+
+
 @partial(_add_layout_inference_rule, vector.SplatOp)
 def _infer_splat_op_layout(splat_op: vector.SplatOp) -> OptionalLayouts:
   layout = layouts_lib.to_splat_fragmented_layout_attr(
@@ -297,18 +404,88 @@ def _infer_splat_op_layout(splat_op: vector.SplatOp) -> OptionalLayouts:
           shape=cast(ir.ShapedType, splat_op.result.type).shape
       )
   )
-
   return [], [layout]
+
+
+def _update_layout_shape(
+    layout: ir.Attribute, shape: Sequence[int], origin: str
+) -> ir.Attribute:
+  if layouts_lib.is_splat_fragmented_layout(
+      layout
+  ) or layouts_lib.is_strided_fragmented_layout(layout):
+    return layouts_lib.to_layout_attr(
+        dataclasses.replace(layouts_lib.from_layout_attr(layout), shape=shape)
+    )
+  raise NotImplementedError(f"Unsupported {origin} layout: {layout}.")
+
+
+@partial(_add_layout_inference_rule, vector.ShapeCastOp)
+def _infer_shape_cast_op_layout(op: vector.ShapeCastOp) -> OptionalLayouts:
+  in_layout = inference_utils.value_layout(op.source)
+  if in_layout is None:
+    out_layout = inference_utils.value_layout(op.result)
+    if out_layout is None:
+      return None
+    in_layout = _update_layout_shape(
+        out_layout, ir.VectorType(op.source.type).shape, "source"
+    )
+    return [in_layout], [out_layout]
+
+  out_layout = _update_layout_shape(
+      in_layout, ir.VectorType(op.result.type).shape, "result"
+  )
+  return [in_layout], [out_layout]
+
+
+@partial(_add_layout_inference_rule, vector.ReductionOp)
+def _infer_reduction_op_layout(op: vector.ReductionOp) -> OptionalLayouts:
+  if layout := inference_utils.value_layout(op.vector):
+    return [layout], []
+  return None
+
+
+# TODO(dasenov): Remove this after the minimal jaxlib version is 0.5.4.
+if jaxlib.version >= (0, 5, 4):
+  @partial(_add_layout_inference_rule, mgpu.LayoutCastOp)
+  def _infer_layout_cast_op_layout(
+      layout_cast_op: mgpu.LayoutCastOp,
+  ) -> OptionalLayouts:
+    return [layout_cast_op.new_layout], [layout_cast_op.new_layout]
 
 
 @partial(_add_layout_inference_rule, mgpu.WGMMAOp)
 def _infer_wgmma_op_layout(wgmma_op: mgpu.WGMMAOp) -> OptionalLayouts:
-  layout = layouts_lib.to_layout_attr(fa.WGMMAFragLayout())
+  layout = layouts_lib.to_layout_attr(fa.WGMMA_LAYOUT)
 
   if ir.VectorType.isinstance(wgmma_op.a.type):
     return [layout, layout], [layout]
 
   return [layout], [layout]
+
+
+def _earliest_use(regions: list[ir.Region], uses: Sequence[ir.OpOperand]) -> ir.OpView:
+  owners = [use.owner for use in uses]
+  for region in regions:
+    for block in region:
+      for op in block:
+        if op in owners:
+          return op
+  raise ValueError("None of uses are in the given block")
+
+
+def _insert_memref_layout_cast(layout: ir.Attribute, view_op: memref.ViewOp):
+  mem_ref_type = ir.MemRefType(view_op.result.type)
+  memref_new_type = ir.MemRefType.get(
+    mem_ref_type.shape,
+    mem_ref_type.element_type,
+    layout,
+    mem_ref_type.memory_space,
+  )
+  uses = list(view_op.result.uses)
+  with ir.InsertionPoint(_earliest_use(view_op.parent.regions, uses)):
+    cast_op = memref.cast(memref_new_type, view_op.result)
+  for use in uses:
+    use.owner.operands[use.operand_number] = cast_op
 
 
 class TraversalOrder(enum.Enum):
@@ -337,7 +514,7 @@ def traverse_op(
 
 def infer_layout(module: ir.Module):
   def inference_step(op: ir.Operation):
-    if not layouts_lib.should_have_layout(op):
+    if not inference_utils.should_have_layout(op):
       return
     elif inference_rule := _layout_inference_rules.get(op.OPERATION_NAME, None):  # pytype: disable=attribute-error
       pass
@@ -362,26 +539,66 @@ def infer_layout(module: ir.Module):
   #
   # Backwards pass
   for op in module.body:
-    traverse_op(op, inference_step, TraversalOrder.BACKWARDS)
+    inference_utils.traverse_op(
+        op, inference_step, inference_utils.TraversalOrder.BACKWARDS
+    )
 
   # Forward pass
   for op in module.body:
-    traverse_op(op, inference_step, TraversalOrder.FORWARD)
+    inference_utils.traverse_op(
+        op, inference_step, inference_utils.TraversalOrder.FORWARD
+    )
 
   # At this point, layouts have been propagated as far as they could be
   # propagated. However, it is possible for some operations to remain
   # unannotated---for example, if there were no annotations on any operation in
   # the module at the start of this function. We annotate all the remaining ops
-  # that should be annotated with a strided fragmented layout.
+  # that should be annotated with a strided fragmented layout, whose vector size
+  # is derived from the narrowest type and vector size used in the program. We
+  # make sure to derive a single vector size in order to avoid relayouts at
+  # lowering time.
+  default_vector_size = math.inf
+  def update_default_vector_size_from_vector(v: ir.Value):
+    nonlocal default_vector_size
+    max_vec_size_for_v = (
+          np.prod(cast(ir.ShapedType, v.type).shape) // fa.WARPGROUP_SIZE
+      )
+    desired_vec_size = 8 // utils.bytewidth(v.type.element_type)
+    default_vector_size = min(
+        default_vector_size, max_vec_size_for_v, desired_vec_size
+    )
+
+  def update_default_vector_size_from_op(op: ir.OpView):
+    for i, v in enumerate(
+        filter(lambda v: ir.VectorType.isinstance(v.type), op.operands)
+    ):
+      if inference_utils.attr_element("in_layouts", op, i) is None:
+        update_default_vector_size_from_vector(v)
+
+    for i, v in enumerate(
+        filter(lambda v: ir.VectorType.isinstance(v.type), op.results)
+    ):
+      if inference_utils.attr_element("out_layouts", op, i) is None:
+        update_default_vector_size_from_vector(v)
+
+  for op in module.body:
+    traverse_op(op, update_default_vector_size_from_op)
+
+  if default_vector_size == math.inf:  # Nothing to annotate.
+    return
+
   def to_default_layout(ty: ir.Type) -> ir.Attribute | None:
     if not ir.VectorType.isinstance(ty):
       return None
-    layout = fa.WGStridedFragLayout.from_shaped_type(ty)
+    layout = fa.WGStridedFragLayout(
+        shape=cast(ir.ShapedType, ty).shape, vec_size=default_vector_size
+    )
     return layouts_lib.to_strided_fragmented_layout_attr(layout)
 
   def set_default_layout(op: ir.OpView):
-    if (layouts_lib.should_have_layout(op) and
-        not layouts_lib.has_any_layout_set(op)):
+    if inference_utils.should_have_layout(
+        op
+    ) and not inference_utils.has_any_layout_set(op):
       in_layouts = []
       for operand in op.operands:
         if (layout := to_default_layout(operand.type)) is not None:

@@ -15,6 +15,7 @@
 """Module for pallas-core functionality."""
 from __future__ import annotations
 
+import collections
 from collections.abc import Callable, Iterable, Iterator, Sequence
 import contextlib
 import copy
@@ -34,6 +35,7 @@ from jax._src import linear_util as lu
 from jax._src import state
 from jax._src import tree_util
 from jax._src import util
+from jax._src.export._export import export
 from jax._src.interpreters import mlir
 from jax._src.interpreters import partial_eval as pe
 from jax._src.state import discharge as state_discharge
@@ -65,6 +67,55 @@ OriginStr = str  # The origin of a block spec, e.g. input[2]["field"]
 SEMAPHORE_INTERPRET_DTYPE = jnp.int16
 SEMAPHORE_MAX_VALUE = jnp.iinfo(SEMAPHORE_INTERPRET_DTYPE).max
 
+class AbstractSemaphoreTyRules:
+  @staticmethod
+  def pallas_interpret_element_aval(_) -> jax_core.ShapedArray:
+    return jax_core.ShapedArray((), SEMAPHORE_INTERPRET_DTYPE)
+
+  @staticmethod
+  def physical_element_aval(_) -> jax_core.ShapedArray:
+    return jax_core.ShapedArray((), jnp.int32)
+
+# TODO(sharadmv): implement dtype rules for AbstractSemaphoreTy
+class AbstractSemaphoreTy(dtypes.ExtendedDType):
+  name: str
+  _rules = AbstractSemaphoreTyRules
+
+  def __repr__(self) -> str:
+    return self.name
+
+  def __eq__(self, other):
+    return self.__class__ == other.__class__
+
+  def __hash__(self) -> int:
+    return hash(self.__class__)
+
+class semaphore_dtype(dtypes.extended):
+  """Common dtype for all kinds of semaphore dtypes.
+
+  This is an abstract class that should never be instantiated, but rather
+  exists for the sake of `jnp.issubdtype`.
+  """
+
+class semaphore(semaphore_dtype):
+  """Regular semaphore dtype.
+
+  Like its superclass, this class should never be instantiated.
+  """
+
+class Semaphore(AbstractSemaphoreTy):
+  name = "semaphore"
+  type = semaphore
+
+class barrier_semaphore(semaphore_dtype):
+  """Barrier semaphore dtype.
+
+  Like its superclass, this class should never be instantiated.
+  """
+
+class BarrierSemaphore(AbstractSemaphoreTy):
+  name = "barrier_semaphore"
+  type = barrier_semaphore
 
 @runtime_checkable
 class CompilerParams(Protocol):
@@ -77,48 +128,6 @@ class CompilerParams(Protocol):
 @dataclasses.dataclass(frozen=True)
 class Buffered:
   buffer_count: int
-
-# TODO(necula): clean up the splitting of the fun_sourceinfo
-@dataclasses.dataclass(frozen=True)
-class NameAndSrcInfo:
-  #: The name of the pallas_call or the name of the kernel function.
-  name: str
-  #: the source info, and the name of kernel function if not in `name`.`
-  src_info: str
-
-  def __str__(self):
-    return f"{self.name}{' ' if self.src_info else ''}{self.src_info}"
-  __repr__ = __str__
-
-  replace = dataclasses.replace
-
-
-  @staticmethod
-  def from_pallas_call(pallas_call_name: str | None,
-                       src_info : str | None) -> NameAndSrcInfo:
-    """Formats the name and the source info.
-
-    Args:
-      pallas_call_name: The `name` argument to pallas_call.
-      src_info: The result of `api_util.fun_source_info(kernel)`, in the form
-        "{function_name} at {file_name}:{line_number}".
-    """
-    if pallas_call_name is not None:
-      pallas_call_name = mlir._module_name_regex.sub("_", pallas_call_name)
-    if src_info is None:
-      return NameAndSrcInfo(
-          "unknown" if pallas_call_name is None else pallas_call_name,
-          "")
-    if pallas_call_name is not None:
-      return NameAndSrcInfo(pallas_call_name,
-                            f"for kernel function {src_info}")
-    src_info_parts = src_info.split(" at ")
-    if len(src_info_parts) > 1:
-      return NameAndSrcInfo(src_info_parts[0],
-                            "at " + " ".join(src_info_parts[1:]))
-    else:
-      return NameAndSrcInfo(src_info_parts[0], "")
-
 
 split_list = util.split_list
 
@@ -350,6 +359,8 @@ blocked = Blocked()
 
 IndexingMode = Union[Blocked, Unblocked]
 
+def default_index_map(ndim: int) -> Callable:
+  return lambda *args: (0,) * ndim
 
 @dataclasses.dataclass
 class BlockSpec:
@@ -376,13 +387,14 @@ class BlockSpec:
       mapped_dims: tuple[int, ...],
   ) -> BlockMapping:
     if self.index_map is None:
-      index_map_func = lambda *args: (0,) * len(array_aval.shape)
+      index_map_func = default_index_map(len(array_aval.shape))
+      api_util.save_wrapped_fun_sourceinfo(index_map_func, default_index_map)
     else:
       index_map_func = self.index_map
     if self.block_shape is None:
       block_shape = array_aval.shape
     else:
-      block_shape = self.block_shape
+      block_shape = self.block_shape  # type: ignore
       if len(array_aval.shape) != len(block_shape):
         raise ValueError(
             f"Block shape for {origin} (= {block_shape}) "
@@ -417,18 +429,16 @@ class BlockSpec:
                                 index_map_func, fake_index_map_args,
                                 fake_index_map_kwargs)
     flat_index_map_fun, index_map_out_tree_thunk = api_util.flatten_fun(
-      lu.wrap_init(index_map_func, debug_info=debug), index_map_tree)
-    index_map_src_info = NameAndSrcInfo.from_pallas_call(
-        None, debug and debug.func_src_info
-    )
+        lu.wrap_init(index_map_func, debug_info=debug), index_map_tree)
     with tracing_grid_env(grid, mapped_dims):
       jaxpr, out_avals, consts, () = pe.trace_to_jaxpr_dynamic(
           flat_index_map_fun, index_map_avals
       )
+
     mapped_block_shape = tuple(mapped if s is None else s for s in block_shape)
     if len(out_avals) != len(block_shape):
       raise ValueError(
-          f"Index map function {index_map_src_info} for "
+          f"Index map function {debug.func_src_info} for "
           f"{origin} must return "
           f"{len(block_shape)} values to match {block_shape=}. "
           f"Currently returning {len(out_avals)} values."
@@ -436,14 +446,14 @@ class BlockSpec:
     for i, ov in enumerate(out_avals):
       if ov.shape or ov.dtype not in [jnp.int32, jnp.int64]:
         raise ValueError(
-            f"Index map function {index_map_src_info} for "
+            f"Index map function {debug.func_src_info} for "
             f"{origin} must return integer scalars. Output[{i}] has type "
             f"{ov}."
         )
 
     if consts:
       raise ValueError(
-          f"Index map function {index_map_src_info} for "
+          f"Index map function {debug.func_src_info} for "
           f"{origin} must not capture constants: {consts}"
       )
 
@@ -453,7 +463,6 @@ class BlockSpec:
         block_shape=mapped_block_shape,
         transformed_block_aval=block_aval,  # There are no transforms by default
         index_map_jaxpr=jax_core.ClosedJaxpr(jaxpr, consts),
-        index_map_src_info=index_map_src_info,
         indexing_mode=self.indexing_mode,
         array_shape_dtype=jax.ShapeDtypeStruct(
             array_aval_shape, array_aval.dtype
@@ -496,7 +505,6 @@ class BlockMapping:
   block_shape: tuple[Mapped | int, ...]
   transformed_block_aval: AbstractMemoryRef
   index_map_jaxpr: jax_core.ClosedJaxpr
-  index_map_src_info: NameAndSrcInfo
   indexing_mode: IndexingMode
   array_shape_dtype: jax.ShapeDtypeStruct  # The whole array
   origin: OriginStr
@@ -1035,6 +1043,12 @@ class CostEstimate:
   transcendentals: int
   bytes_accessed: int
 
+  def __post_init__(self):
+    for k, v in dataclasses.asdict(self).items():
+      if not isinstance(v, int):
+        raise ValueError("All fields in CostEstimate must be ints. "
+                         f"{k} is not an int: {type(v)}({v})")
+
   def to_json(self) -> bytes:
     return (
         f'{{"flops": {self.flops}, "transcendentals": {self.transcendentals},'
@@ -1053,6 +1067,7 @@ def core_map(
     interpret: bool = False,
     debug: bool = False,
     cost_estimate: CostEstimate | None = None,
+    name: str | None = None,
 ):
   """Runs a function on a mesh, mapping it over the devices in the mesh.
 
@@ -1067,19 +1082,23 @@ def core_map(
     cost_estimate: The cost estimate of the function.
   """
   def wrapped(f):
+    name_ = name or f.__name__
     flat_args, in_tree = tree_util.tree_flatten(((), {}))
     flat_fun, out_tree_thunk = api_util.flatten_fun(
         lu.wrap_init(f,
                      debug_info=api_util.debug_info("pallas_core_map", f,
                                                     (), {})),
         in_tree)
-    with jax_core.extend_axis_env_nd(mesh.shape.items()):
+    with (
+        tracing_grid_env(tuple(mesh.shape.values()), mapped_dims=()),
+        jax_core.extend_axis_env_nd(mesh.shape.items()),
+    ):
       jaxpr, _, consts, () = pe.trace_to_jaxpr_dynamic(flat_fun, flat_args)
     out = core_map_p.bind(*consts, jaxpr=jaxpr, mesh=mesh,
                           compiler_params=compiler_params,
                           interpret=interpret,
                           debug=debug,
-                          cost_estimate=cost_estimate)
+                          cost_estimate=cost_estimate, name=name_)
     if out:
       raise ValueError("core_map-ped functions must not return any outputs.")
     return tree_util.tree_unflatten(out_tree_thunk(), out)
@@ -1103,6 +1122,17 @@ def _core_map_abstract_eval(*args, jaxpr, mesh, **_):
   return [], effs
 
 
+class Mesh(Protocol):
+
+  @property
+  def backend(self) -> str:
+    ...
+
+  @property
+  def shape(self) -> collections.OrderedDict[object, int]:
+    ...
+
+
 _core_map_mesh_rules: dict[type[Any], Callable[..., Any]] = {}
 
 
@@ -1110,13 +1140,14 @@ def default_mesh_discharge_rule(
     in_avals,
     out_avals,
     *args,
-    grid,
+    mesh,
     compiler_params,
-    backend,
     jaxpr,
     debug,
     interpret,
     cost_estimate,
+    name,
+    memory_space=MemorySpace.ANY,
 ):
   """Discharges a ``core_map`` over a mesh to a ``pallas_call``."""
   del out_avals  # Unused.
@@ -1133,19 +1164,23 @@ def default_mesh_discharge_rule(
       for eff in jaxpr.effects
       if isinstance(eff, state_types.WriteEffect)
   )
-  any_spec = BlockSpec(memory_space=MemorySpace.ANY)
+  spec = BlockSpec(memory_space=memory_space)
   from jax._src.pallas import pallas_call  # Avoid circular dependency.
-  outs = pallas_call.pallas_call(
+
+  outs = pallas_call._pallas_call(
       body,
+      name=name,
       out_shape=[in_avals[idx] for idx in modified_idxs],
-      in_specs=[any_spec] * len(in_avals),
-      out_specs=[any_spec] * len(modified_idxs),
       input_output_aliases={
           in_idx: out_idx for out_idx, in_idx in enumerate(modified_idxs)
       },
-      grid=grid,
+      grid_spec=GridSpec(
+          grid=tuple(mesh.shape.items()),
+          in_specs=[spec] * len(in_avals),
+          out_specs=[spec] * len(modified_idxs),
+      ),
+      mesh=mesh,
       compiler_params=compiler_params,
-      backend=backend,
       interpret=interpret,
       debug=debug,
       cost_estimate=cost_estimate,
@@ -1184,13 +1219,15 @@ jax_core.custom_typechecks[core_map_p] = _core_map_typecheck_rule
 
 
 def lower_as_mlir(
-    f, *args, dynamic_shapes=False, device=None, **kwargs
+    f, *args, dynamic_shapes=False, device=None, static_argnames=(), **kwargs
 ) -> mlir.ir.Module:
   with pallas_export_experimental(dynamic_shapes):
-    lowered = jax.jit(f, device=device).lower(*args, **kwargs)
-    stablehlo = lowered.compiler_ir(dialect="stablehlo")
+    f = jax.jit(f, device=device, static_argnames=static_argnames)
+    exported = export(f, platforms=["tpu"])(*args, **kwargs)
+    stablehlo = exported.mlir_module()
 
   return stablehlo  # type: ignore[return-value]
+
 
 _out_shape_to_aval_mapping: dict[
     type[Any], Callable[[Any], jax_core.AbstractValue]

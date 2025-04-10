@@ -72,8 +72,8 @@ def _symmetrize(x: Array) -> Array: return (x + _H(x)) / 2
 
 
 @export
-@partial(jit, static_argnames=['upper'])
-def cholesky(a: ArrayLike, *, upper: bool = False) -> Array:
+@partial(jit, static_argnames=['upper', 'symmetrize_input'])
+def cholesky(a: ArrayLike, *, upper: bool = False, symmetrize_input: bool = True) -> Array:
   """Compute the Cholesky decomposition of a matrix.
 
   JAX implementation of :func:`numpy.linalg.cholesky`.
@@ -98,6 +98,10 @@ def cholesky(a: ArrayLike, *, upper: bool = False) -> Array:
       Must have shape ``(..., N, N)``.
     upper: if True, compute the upper Cholesky decomposition `U`. if False
       (default), compute the lower Cholesky decomposition `L`.
+    symmetrize_input: if True (default) then input is symmetrized, which leads
+      to better behavior under automatic differentiation. Note that when this
+      is set to True, both the upper and lower triangles of the input will
+      be used in computing the decomposition.
 
   Returns:
     array of shape ``(..., N, N)`` representing the Cholesky decomposition
@@ -135,7 +139,7 @@ def cholesky(a: ArrayLike, *, upper: bool = False) -> Array:
   """
   a = ensure_arraylike("jnp.linalg.cholesky", a)
   a, = promote_dtypes_inexact(a)
-  L = lax_linalg.cholesky(a)
+  L = lax_linalg.cholesky(a, symmetrize_input=symmetrize_input)
   return L.mT.conj() if upper else L
 
 
@@ -821,7 +825,9 @@ def eigh(a: ArrayLike, UPLO: str | None = None,
     UPLO: specifies whether the calculation is done with the lower triangular
       part of ``a`` (``'L'``, default) or the upper triangular part (``'U'``).
     symmetrize_input: if True (default) then input is symmetrized, which leads
-      to better behavior under automatic differentiation.
+      to better behavior under automatic differentiation. Note that when this
+      is set to True, both the upper and lower triangles of the input will
+      be used in computing the decomposition.
 
   Returns:
     A namedtuple ``(eigenvalues, eigenvectors)`` where
@@ -863,8 +869,9 @@ def eigh(a: ArrayLike, UPLO: str | None = None,
 
 
 @export
-@partial(jit, static_argnames=('UPLO',))
-def eigvalsh(a: ArrayLike, UPLO: str | None = 'L') -> Array:
+@partial(jit, static_argnames=('UPLO', 'symmetrize_input'))
+def eigvalsh(a: ArrayLike, UPLO: str | None = 'L', *,
+             symmetrize_input: bool = True) -> Array:
   """
   Compute the eigenvalues of a Hermitian matrix.
 
@@ -875,6 +882,10 @@ def eigvalsh(a: ArrayLike, UPLO: str | None = 'L') -> Array:
       or symmetric (if real) matrix.
     UPLO: specifies whether the calculation is done with the lower triangular
       part of ``a`` (``'L'``, default) or the upper triangular part (``'U'``).
+    symmetrize_input: if True (default) then input is symmetrized, which leads
+      to better behavior under automatic differentiation. Note that when this
+      is set to True, both the upper and lower triangles of the input will
+      be used in computing the decomposition.
 
   Returns:
     An array of shape ``(..., M)`` containing the eigenvalues, sorted in
@@ -894,7 +905,7 @@ def eigvalsh(a: ArrayLike, UPLO: str | None = 'L') -> Array:
   """
   a = ensure_arraylike("jnp.linalg.eigvalsh", a)
   a, = promote_dtypes_inexact(a)
-  w, _ = eigh(a, UPLO)
+  w, _ = eigh(a, UPLO, symmetrize_input=symmetrize_input)
   return w
 
 
@@ -1175,7 +1186,7 @@ def norm(x: ArrayLike, ord: int | str | None = None,
       if not keepdims and col_axis > row_axis:
         col_axis -= 1
       return reductions.amax(reductions.sum(ufuncs.abs(x), axis=row_axis, keepdims=keepdims),
-                             axis=col_axis, keepdims=keepdims)
+                             axis=col_axis, keepdims=keepdims, initial=0)
     elif ord == -1:
       if not keepdims and col_axis > row_axis:
         col_axis -= 1
@@ -1185,7 +1196,7 @@ def norm(x: ArrayLike, ord: int | str | None = None,
       if not keepdims and row_axis > col_axis:
         row_axis -= 1
       return reductions.amax(reductions.sum(ufuncs.abs(x), axis=col_axis, keepdims=keepdims),
-                     axis=row_axis, keepdims=keepdims)
+                     axis=row_axis, keepdims=keepdims, initial=0)
     elif ord == -np.inf:
       if not keepdims and row_axis > col_axis:
         row_axis -= 1
@@ -1193,14 +1204,13 @@ def norm(x: ArrayLike, ord: int | str | None = None,
                      axis=row_axis, keepdims=keepdims)
     elif ord in ('nuc', 2, -2):
       x = jnp.moveaxis(x, axis, (-2, -1))
+      s = svd(x, compute_uv=False)
       if ord == 2:
-        reducer = reductions.amax
+        y = reductions.amax(s, axis=-1, initial=0)
       elif ord == -2:
-        reducer = reductions.amin
+        y = reductions.amin(s, axis=-1)
       else:
-        # `sum` takes an extra dtype= argument, unlike `amax` and `amin`.
-        reducer = reductions.sum  # type: ignore[assignment]
-      y = reducer(svd(x, compute_uv=False), axis=-1)
+        y = reductions.sum(s, axis=-1)
       if keepdims:
         y = jnp.expand_dims(y, axis)
       return y
@@ -1652,7 +1662,7 @@ def vector_norm(x: ArrayLike, /, *, axis: int | tuple[int, ...] | None = None, k
     return ufuncs.sqrt(reductions.sum(ufuncs.real(x * ufuncs.conj(x)), axis=axis,
                                       keepdims=keepdims))
   elif ord == np.inf:
-    return reductions.amax(ufuncs.abs(x), axis=axis, keepdims=keepdims)
+    return reductions.amax(ufuncs.abs(x), axis=axis, keepdims=keepdims, initial=0)
   elif ord == -np.inf:
     return reductions.amin(ufuncs.abs(x), axis=axis, keepdims=keepdims)
   elif ord == 0:

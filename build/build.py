@@ -63,6 +63,24 @@ WHEEL_BUILD_TARGET_DICT = {
     "jax-rocm-pjrt": "//jaxlib/tools:build_gpu_plugin_wheel",
 }
 
+# Dictionary with the new wheel build rule. Note that when JAX migrates to the
+# new wheel build rule fully, the build CLI will switch to the new wheel build
+# rule as the default.
+WHEEL_BUILD_TARGET_DICT_NEW = {
+    "jax": "//:jax_wheel",
+    "jax_editable": "//:jax_wheel_editable",
+    "jax_source_package": "//:jax_source_package",
+    "jaxlib": "//jaxlib/tools:jaxlib_wheel",
+    "jaxlib_editable": "//jaxlib/tools:jaxlib_wheel_editable",
+    "jax-cuda-plugin": "//jaxlib/tools:jax_cuda_plugin_wheel",
+    "jax-cuda-plugin_editable": "//jaxlib/tools:jax_cuda_plugin_wheel_editable",
+    "jax-cuda-pjrt": "//jaxlib/tools:jax_cuda_pjrt_wheel",
+    "jax-cuda-pjrt_editable": "//jaxlib/tools:jax_cuda_pjrt_wheel_editable",
+    "jax-rocm-plugin": "//jaxlib/tools:jax_rocm_plugin_wheel",
+    "jax-rocm-pjrt": "//jaxlib/tools:jax_rocm_pjrt_wheel",
+}
+
+_JAX_CUDA_VERSION = "12"
 
 def add_global_arguments(parser: argparse.ArgumentParser):
   """Adds all the global arguments that applies to all the CLI subcommands."""
@@ -144,6 +162,16 @@ def add_artifact_subcommand_arguments(parser: argparse.ArgumentParser):
         --wheels="jaxlib,jax-cuda-plugin", etc.
         Valid options are: jaxlib, jax-cuda-plugin or cuda-plugin, jax-cuda-pjrt or cuda-pjrt,
         jax-rocm-plugin or rocm-plugin, jax-rocm-pjrt or rocm-pjrt
+        """,
+  )
+
+  parser.add_argument(
+      "--use_new_wheel_build_rule",
+      action="store_true",
+      help=
+        """
+        Whether to use the new wheel build rule. Temporary flag and will be
+        removed once JAX migrates to the new wheel build rule fully.
         """,
   )
 
@@ -361,6 +389,11 @@ async def main():
   arch = platform.machine()
   os_name = platform.system().lower()
 
+  custom_wheel_version_suffix = ""
+  wheel_build_date = ""
+  wheel_git_hash = ""
+  wheel_type = "snapshot"
+
   args = parser.parse_args()
 
   logger.info("%s", BANNER)
@@ -386,7 +419,10 @@ async def main():
     for option in args.bazel_startup_options:
       bazel_command_base.append(option)
 
-  bazel_command_base.append("run")
+  if args.command == "requirements_update" or not args.use_new_wheel_build_rule:
+    bazel_command_base.append("run")
+  else:
+    bazel_command_base.append("build")
 
   if args.python_version:
     # Do not add --repo_env=HERMETIC_PYTHON_VERSION with default args.python_version
@@ -465,6 +501,7 @@ async def main():
   if args.use_clang:
     clang_path = args.clang_path or utils.get_clang_path_or_exit()
     clang_major_version = utils.get_clang_major_version(clang_path)
+    clangpp_path = utils.get_clangpp_path(clang_path)
     logging.debug(
         "Using Clang as the compiler, clang path: %s, clang version: %s",
         clang_path,
@@ -474,6 +511,7 @@ async def main():
     # Use double quotes around clang path to avoid path issues on Windows.
     wheel_build_command_base.append(f"--action_env=CLANG_COMPILER_PATH=\"{clang_path}\"")
     wheel_build_command_base.append(f"--repo_env=CC=\"{clang_path}\"")
+    wheel_build_command_base.append(f"--repo_env=CXX=\"{clangpp_path}\"")
     wheel_build_command_base.append(f"--repo_env=BAZEL_COMPILER=\"{clang_path}\"")
 
     if clang_major_version >= 16:
@@ -588,16 +626,33 @@ async def main():
     )
     for option in args.bazel_options:
       wheel_build_command_base.append(option)
+
+      # Parse the build options for the wheel version suffix.
+      if "ML_WHEEL_TYPE" in option:
+        wheel_type = option.split("=")[-1]
+      if "ML_WHEEL_VERSION_SUFFIX" in option:
+        custom_wheel_version_suffix = option.split("=")[-1].replace("-", "")
+      if "ML_WHEEL_BUILD_DATE" in option:
+        wheel_build_date = option.split("=")[-1].replace("-", "")
+      if "ML_WHEEL_GIT_HASH" in option:
+        wheel_git_hash = option.split("=")[-1][:9]
+
     if "cuda" in args.wheels:
       wheel_build_command_base.append("--config=cuda_libraries_from_stubs")
 
   with open(".jax_configure.bazelrc", "w") as f:
-    jax_configure_options = utils.get_jax_configure_bazel_options(wheel_build_command_base.get_command_as_list())
+    jax_configure_options = utils.get_jax_configure_bazel_options(wheel_build_command_base.get_command_as_list(), args.use_new_wheel_build_rule)
     if not jax_configure_options:
       logging.error("Error retrieving the Bazel options to be written to .jax_configure.bazelrc, exiting.")
       sys.exit(1)
     f.write(jax_configure_options)
     logging.info("Bazel options written to .jax_configure.bazelrc")
+
+  if args.use_new_wheel_build_rule:
+    logging.info("Using new wheel build rule")
+    wheel_build_targets = WHEEL_BUILD_TARGET_DICT_NEW
+  else:
+    wheel_build_targets = WHEEL_BUILD_TARGET_DICT
 
   if args.configure_only:
     logging.info("--configure_only is set so not running any Bazel commands.")
@@ -611,7 +666,7 @@ async def main():
       if ("plugin" in wheel or "pjrt" in wheel) and "jax" not in wheel:
         wheel = "jax-" + wheel
 
-      if wheel not in WHEEL_BUILD_TARGET_DICT.keys():
+      if wheel not in wheel_build_targets.keys():
         logging.error(
             "Incorrect wheel name provided, valid choices are jaxlib,"
             " jax-cuda-plugin or cuda-plugin, jax-cuda-pjrt or cuda-pjrt,"
@@ -629,37 +684,91 @@ async def main():
       )
 
       # Append the build target to the Bazel command.
-      build_target = WHEEL_BUILD_TARGET_DICT[wheel]
+      if args.use_new_wheel_build_rule and args.editable:
+        build_target = wheel_build_targets[wheel + "_editable"]
+      else:
+        build_target = wheel_build_targets[wheel]
       wheel_build_command.append(build_target)
+      if args.use_new_wheel_build_rule and wheel == "jax" and not args.editable:
+        wheel_build_command.append(wheel_build_targets["jax_source_package"])
 
-      wheel_build_command.append("--")
+      if not args.use_new_wheel_build_rule:
+        wheel_build_command.append("--")
 
-      if args.editable:
-        logger.info("Building an editable build")
-        output_path = os.path.join(output_path, wheel)
-        wheel_build_command.append("--editable")
+        if args.editable:
+          logger.info("Building an editable build")
+          output_path = os.path.join(output_path, wheel)
+          wheel_build_command.append("--editable")
 
-      wheel_build_command.append(f'--output_path="{output_path}"')
-      wheel_build_command.append(f"--cpu={target_cpu}")
+        wheel_build_command.append(f'--output_path="{output_path}"')
+        wheel_build_command.append(f"--cpu={target_cpu}")
 
-      if "cuda" in wheel:
-        wheel_build_command.append("--enable-cuda=True")
-        if args.cuda_version:
-          cuda_major_version = args.cuda_version.split(".")[0]
-        else:
-          cuda_major_version = args.cuda_major_version
-        wheel_build_command.append(f"--platform_version={cuda_major_version}")
+        if "cuda" in wheel:
+          wheel_build_command.append("--enable-cuda=True")
+          if args.cuda_version:
+            cuda_major_version = args.cuda_version.split(".")[0]
+          else:
+            cuda_major_version = args.cuda_major_version
+          wheel_build_command.append(f"--platform_version={cuda_major_version}")
 
-      if "rocm" in wheel:
-        wheel_build_command.append("--enable-rocm=True")
-        wheel_build_command.append(f"--platform_version={args.rocm_version}")
+        if "rocm" in wheel:
+          wheel_build_command.append("--enable-rocm=True")
+          wheel_build_command.append(f"--platform_version={args.rocm_version}")
 
-      wheel_build_command.append(f"--jaxlib_git_hash={git_hash}")
+        wheel_build_command.append(f"--jaxlib_git_hash={git_hash}")
 
       result = await executor.run(wheel_build_command.get_command_as_string(), args.dry_run, args.detailed_timestamped_log)
       # Exit with error if any wheel build fails.
       if result.return_code != 0:
         raise RuntimeError(f"Command failed with return code {result.return_code}")
+
+  if args.use_new_wheel_build_rule:
+    output_path = args.output_path
+    jax_bazel_dir = os.path.join("bazel-bin", "dist")
+    jaxlib_and_plugins_bazel_dir = os.path.join(
+        "bazel-bin", "jaxlib", "tools", "dist"
+    )
+    for wheel in args.wheels.split(","):
+      if wheel == "jax":
+        bazel_dir = jax_bazel_dir
+      else:
+        bazel_dir = jaxlib_and_plugins_bazel_dir
+      if "cuda" in wheel:
+        wheel_dir = wheel.replace("cuda", f"cuda{_JAX_CUDA_VERSION}").replace(
+            "-", "_"
+        )
+      else:
+        wheel_dir = wheel
+
+      if args.editable:
+        src_dir = os.path.join(bazel_dir, wheel_dir)
+        dst_dir = os.path.join(output_path, wheel_dir)
+        utils.copy_dir_recursively(src_dir, dst_dir)
+      else:
+        wheel_version_suffix = "dev0+selfbuilt"
+        if wheel_type == "release":
+          wheel_version_suffix = custom_wheel_version_suffix
+        elif wheel_type in ["nightly", "custom"]:
+          wheel_version_suffix = f".dev{wheel_build_date}"
+          if wheel_type == "custom":
+            wheel_version_suffix += (
+                f"+{wheel_git_hash}{custom_wheel_version_suffix}"
+            )
+        if wheel in ["jax", "jax-cuda-pjrt"]:
+          python_tag = "py"
+        else:
+          python_tag = "cp"
+        utils.copy_individual_files(
+            bazel_dir,
+            output_path,
+            f"{wheel_dir}*{wheel_version_suffix}-{python_tag}*.whl",
+        )
+        if wheel == "jax":
+          utils.copy_individual_files(
+              bazel_dir,
+              output_path,
+              f"{wheel_dir}*{wheel_version_suffix}.tar.gz",
+          )
 
   # Exit with success if all wheels in the list were built successfully.
   sys.exit(0)

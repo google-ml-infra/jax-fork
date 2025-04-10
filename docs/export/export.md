@@ -44,7 +44,7 @@ Here is an example:
 (ShapedArray(float32[]),)
 
 >>> print(re.search(r".*@main.*", exported.mlir_module()).group(0))
-  func.func public @main(%arg0: tensor<f32> loc("x")) -> (tensor<f32> {jax.result_info = ""}) {
+  func.func public @main(%arg0: tensor<f32> loc("x")) -> (tensor<f32> {jax.result_info = "result"}) {
 
 >>> # And you can serialize the Exported to a bytearray.
 >>> serialized: bytearray = exported.serialize()
@@ -161,7 +161,7 @@ e.g., the inference system.)
 What **matters is when the exporting and consuming components were built**,
 not the time when the exporting and the compilation happen.
 For external JAX users, it is
-[possible to run JAX and jaxlib at different versions](https://jax.readthedocs.io/en/latest/jep/9419-jax-versioning.html#how-are-jax-and-jaxlib-versioned);
+[possible to run JAX and jaxlib at different versions](https://docs.jax.dev/en/latest/jep/9419-jax-versioning.html#how-are-jax-and-jaxlib-versioned);
 what matters is when the jaxlib release was built.
 
 To reduce chances of incompatibility, internal JAX users should:
@@ -206,7 +206,7 @@ as in the following example:
 >>> _ = mlir.register_lowering(new_prim, lambda ctx, o: mlir.custom_call("my_new_prim", operands=[o], result_types=[o.type]).results)
 >>> print(jax.jit(new_prim.bind).lower(1.).compiler_ir())
 module @jit_bind attributes {mhlo.num_partitions = 1 : i32, mhlo.num_replicas = 1 : i32} {
-  func.func public @main(%arg0: tensor<f32>) -> (tensor<f32> {jax.result_info = ""}) {
+  func.func public @main(%arg0: tensor<f32>) -> (tensor<f32> {jax.result_info = "result"}) {
     %0 = stablehlo.custom_call @my_new_prim(%arg0) {api_version = 2 : i32, backend_config = ""} : (tensor<f32>) -> tensor<f32>
     return %0 : tensor<f32>
   }
@@ -349,7 +349,7 @@ devices in the mesh are ignored for tracing and lowering:
 >>> from jax.sharding import PartitionSpec as P
 >>>
 >>> # Use an AbstractMesh for exporting
->>> export_mesh = AbstractMesh((("a", 4),))
+>>> export_mesh = AbstractMesh((4,), ("a",))
 
 >>> def f(x):
 ...   return x.T

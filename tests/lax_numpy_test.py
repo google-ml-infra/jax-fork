@@ -50,7 +50,7 @@ from jax._src import core
 from jax._src import dtypes
 from jax._src import test_util as jtu
 from jax._src.lax import lax as lax_internal
-from jax._src.util import safe_zip, NumpyComplexWarning, tuple_replace
+from jax._src.util import safe_zip, NumpyComplexWarning, tuple_update
 
 config.parse_flags_with_absl()
 
@@ -1143,7 +1143,8 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
           # (constant,)
           (0,), (2.718,),
           # ((before_const, after_const),)
-          ((0, 2),), ((-1, 3.14),),
+          (0, 2),
+          (-1, 3.14),
           # ((before_1, after_1), ..., (before_N, after_N))
           tuple((i / 2, -3.14 * i) for i in range(len(shape))),
       ]
@@ -2126,7 +2127,7 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
     if jtu.numpy_version() < (2, 0, 0):
       np_fun = np.unique
     else:
-      np_fun = np.unique_values
+      np_fun = lambda *args: np.sort(np.unique_values(*args))
     self._CheckAgainstNumpy(jnp.unique_values, np_fun, args_maker)
 
   @jtu.sample_product(
@@ -3495,11 +3496,6 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
     self._CheckAgainstNumpy(np_fun, jnp_fun, args_maker)
     self._CompileAndCheck(jnp_fun, args_maker)
 
-  def testReshapeDeprecatedArgs(self):
-    msg = "The newshape argument to jnp.reshape was removed in JAX v0.4.36."
-    with self.assertRaisesRegex(TypeError, msg):
-      jnp.reshape(jnp.arange(4), newshape=(2, 2))
-
   @jtu.sample_product(
     [dict(arg_shape=arg_shape, out_shape=out_shape)
       for arg_shape, out_shape in [
@@ -3799,9 +3795,10 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
     with self.assertRaisesRegex(OverflowError, "Python int too large.*"):
       jnp.array([0, val])
 
-  def testArrayNoneWarning(self):
-    # TODO(jakevdp): make this an error after the deprecation period.
-    with self.assertWarnsRegex(FutureWarning, r"None encountered in jnp.array\(\)"):
+  def testArrayNone(self):
+    with self.assertRaisesRegex(
+        ValueError, 'None is not a valid value for jnp.array'
+    ):
       jnp.array([0.0, None])
 
   def testIssue121(self):
@@ -6041,7 +6038,10 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
       dict(a_shape=a_shape, i_shape=i_shape, v_shape=v_shape, axis=axis)
       for a_shape in nonempty_array_shapes
       for axis in list(range(-len(a_shape), len(a_shape)))
-      for i_shape in [tuple_replace(a_shape, axis, J) for J in range(a_shape[axis] + 1)]
+      for i_shape in [
+        tuple_update(a_shape, axis if axis >= 0 else axis + len(a_shape), J)
+        for J in range(a_shape[axis] + 1)
+      ]
       for v_shape in [(), (1,), i_shape]
     ] + [
       dict(a_shape=a_shape, i_shape=i_shape, v_shape=v_shape, axis=None)
@@ -6138,6 +6138,42 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
                             check_dtypes=False)
     self._CompileAndCheck(jnp_fun, args_maker, atol=tol, rtol=tol,
                           check_dtypes=False)
+
+  @jtu.sample_product(
+      shape=all_shapes,
+      dtype=default_dtypes,
+      op=['ndim', 'shape', 'size'],
+  )
+  def testNdimShapeSize(self, shape, dtype, op):
+    rng = jtu.rand_default(self.rng())
+    jnp_op = getattr(jnp, op)
+    np_op = getattr(np, op)
+    x = rng(shape, dtype)
+    expected = np_op(x)
+    self.assertEqual(expected, jnp_op(x))  # np.ndarray or scalar input.
+    self.assertEqual(expected, jnp_op(jnp.asarray(x)))  # jax.Array input.
+    self.assertEqual(expected, jax.jit(jnp_op)(x))  # Traced input.
+
+  @jtu.sample_product(
+      shape=nonzerodim_shapes,
+      dtype=default_dtypes,
+  )
+  def testSizeAlongAxis(self, shape, dtype):
+    rng = jtu.rand_default(self.rng())
+    args_maker = lambda: [rng(shape, dtype)]
+    axis = self.rng().randint(-len(shape), len(shape))
+    np_op = partial(np.size, axis=axis)
+    jnp_op = partial(jnp.size, axis=axis)
+    self._CheckAgainstNumpy(np_op, jnp_op, args_maker)
+    self._CompileAndCheck(jnp_op, args_maker)
+
+  @jtu.sample_product(
+      op=[jnp.ndim, jnp.shape, jnp.size],
+  )
+  def testNdimShapeSizeNonArrayInput(self, op):
+    msg = f"{op.__name__} requires ndarray or scalar arguments"
+    with self.assertWarnsRegex(DeprecationWarning, msg):
+      op([1, 2, 3])
 
 
 # Most grad tests are at the lax level (see lax_test.py), but we add some here
@@ -6451,9 +6487,10 @@ class NumpySignaturesTest(jtu.JaxTestCase):
       'compress': ['size', 'fill_value'],
       'einsum': ['subscripts', 'precision'],
       'einsum_path': ['subscripts'],
+      'fill_diagonal': ['inplace'],
       'load': ['args', 'kwargs'],
       'take_along_axis': ['mode', 'fill_value'],
-      'fill_diagonal': ['inplace'],
+      'unique': ['size', 'fill_value'],
     }
 
     mismatches = {}

@@ -32,7 +32,7 @@ from jax._src import dispatch
 from jax._src import test_util as jtu
 from jax._src.interpreters import mlir
 from jax._src.layout import DeviceLocalLayout
-from jax._src.lib import lapack, xla_extension_version
+from jax._src.lib import lapack
 from jax._src.lib.mlir.dialects import hlo
 from jax._src.lax import linalg as lax_linalg_internal
 from jax.experimental.shard_map import shard_map
@@ -208,13 +208,6 @@ class FfiTest(jtu.JaxTestCase):
     with self.assertWarns(DeprecationWarning):
       jax.vmap(ffi_call_geqrf)(x)
 
-  def test_backward_compat_syntax(self):
-    def fun(x):
-      return jax.ffi.ffi_call("test_ffi", x, x, param=0.5)
-    msg = "Calling ffi_call directly with input arguments is deprecated"
-    with self.assertDeprecationWarnsOrRaises("jax-ffi-call-args", msg):
-      jax.jit(fun).lower(jnp.ones(5))
-
   def test_input_output_aliases(self):
     def fun(x):
       return jax.ffi.ffi_call("test", x, input_output_aliases={0: 0})(x)
@@ -333,8 +326,6 @@ def ffi_call_geqrf(x, _use_extend=False, **kwargs):
 class BatchPartitioningTest(jtu.JaxTestCase):
   def setUp(self):
     super().setUp()
-    if xla_extension_version < 313:
-      self.skipTest("Requires XLA extension version >= 313")
     # Register callbacks before checking the number of devices to make sure
     # that we're testing the registration path, even if we can't run the tests.
     for target_name in ["lapack_sgeqrf_ffi", "cusolver_geqrf_ffi",

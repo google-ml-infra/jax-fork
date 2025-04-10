@@ -130,7 +130,7 @@ class custom_jvp(Generic[ReturnValue]):
 
   For a more detailed introduction, see the tutorial_.
 
-  .. _tutorial: https://jax.readthedocs.io/en/latest/notebooks/Custom_derivative_rules_for_Python_code.html
+  .. _tutorial: https://docs.jax.dev/en/latest/notebooks/Custom_derivative_rules_for_Python_code.html
   """
   fun: Callable[..., ReturnValue]
   nondiff_argnums: Sequence[int]
@@ -250,7 +250,15 @@ class custom_jvp(Generic[ReturnValue]):
       msg = f"No JVP defined for custom_jvp function {primal_name} using defjvp."
       raise AttributeError(msg)
 
-    args = resolve_kwargs(self.fun, args, kwargs)
+    try:
+      args = resolve_kwargs(self.fun, args, kwargs)
+    except TypeError as e:
+      raise TypeError(
+          "The input arguments to the custom_jvp-decorated function "
+          f"{primal_name} could not be resolved to positional-only arguments. "
+          f"Binding failed with the error:\n{e}"
+      ) from e
+
     if self.nondiff_argnums:
       nondiff_argnums = set(self.nondiff_argnums)
       args = tuple(_stop_gradient(x) if i in nondiff_argnums else x
@@ -513,7 +521,7 @@ class custom_vjp(Generic[ReturnValue]):
 
   For a more detailed introduction, see the tutorial_.
 
-  .. _tutorial: https://jax.readthedocs.io/en/latest/notebooks/Custom_derivative_rules_for_Python_code.html
+  .. _tutorial: https://docs.jax.dev/en/latest/notebooks/Custom_derivative_rules_for_Python_code.html
   """
 
   def __init__(self,
@@ -634,7 +642,16 @@ class custom_vjp(Generic[ReturnValue]):
     if not self.fwd or not self.bwd:
       msg = f"No VJP defined for custom_vjp function {debug_fun.func_name} using defvjp."
       raise AttributeError(msg)
-    args = resolve_kwargs(self.fun, args, kwargs)
+
+    try:
+      args = resolve_kwargs(self.fun, args, kwargs)
+    except TypeError as e:
+      raise TypeError(
+          "The input arguments to the custom_vjp-decorated function "
+          f"{debug_fun.func_name} could not be resolved to positional-only "
+          f"arguments. Binding failed with the error:\n{e}"
+      ) from e
+
     debug_fwd = debug_info("custom_vjp fwd", self.fwd, args, kwargs,
                            static_argnums=self.nondiff_argnums)
     # TODO(necula): figure out how to construct the debug_bwd args
@@ -1238,7 +1255,7 @@ def closure_convert(fun: Callable, *example_args) -> tuple[Callable, list[Any]]:
 def _maybe_perturbed(x: Any) -> bool:
   # False if x can't represent an AD-perturbed value (i.e. a value
   # with a nontrivial tangent attached), up to heuristics, and True otherwise.
-  # See https://github.com/google/jax/issues/6415 for motivation.
+  # See https://github.com/jax-ml/jax/issues/6415 for motivation.
   if not isinstance(x, core.Tracer):
     # If x is not a Tracer, it can't be perturbed.
     return False
@@ -1407,53 +1424,52 @@ def linear_call(fun: Callable,
                                 (residual_args, linear_args), {})),
       t_in_tree)
 
-  t_jaxpr, t_consts = _initial_style_jaxpr(t, (*res_avals, *out_avals))
-  t_jaxpr_closed = _close_jaxpr(t_jaxpr)
+  @pe._memoize
+  def transpose_thunk():
+    t_jaxpr, t_consts = _initial_style_jaxpr(t, (*res_avals, *out_avals))
+    if t_out_tree() != lin_tree:
+      raise TypeError(
+          'transpose output pytree structure must match that of linear inputs, '
+          f'got output structure {t_out_tree()} '
+          f'and input structure {lin_tree}.')
+    return _close_jaxpr(t_jaxpr), t_consts
 
-  if t_out_tree() != lin_tree:
-    raise TypeError(
-        'transpose output pytree structure must match that of linear inputs, '
-        f'got output structure {t_out_tree()} '
-        f'and input structure {lin_tree}.')
-
-  out = linear_call_p.bind(*f_consts, *t_consts, *operands_res, *operands_lin,
+  out = linear_call_p.bind(*f_consts, *operands_res, *operands_lin,
                            callee=f_jaxpr_closed,
-                           transpose=t_jaxpr_closed,
+                           transpose_thunk=transpose_thunk,
                            num_callee_consts=len(f_consts),
-                           num_transpose_consts=len(t_consts),
                            num_res=len(operands_res))
 
   return tree_unflatten(out_tree(), out)
 
-def _linear_call_impl(*args, callee, transpose, num_callee_consts,
-                      num_transpose_consts, num_res):
-  del transpose
-  consts, _, operands_res, operands_lin = split_list(
-      args, [num_callee_consts, num_transpose_consts, num_res])
-  return core.eval_jaxpr(callee.jaxpr, (), *consts, *operands_res, *operands_lin)
+def _linear_call_impl(*args, callee, transpose_thunk, num_callee_consts,
+                      num_res):
+  del transpose_thunk, num_callee_consts, num_res
+  return core.eval_jaxpr(callee.jaxpr, (), *args)
 
-def _linear_call_transpose_rule(cts, *args, callee, transpose,
-                                num_callee_consts,
-                                num_transpose_consts, num_res):
-  f_consts, t_consts, operands_res, operands_lin = split_list(
-      args, [num_callee_consts, num_transpose_consts, num_res])
+def _linear_call_transpose_rule(cts, *args, callee, transpose_thunk,
+                                num_callee_consts, num_res):
+  transpose, t_consts = transpose_thunk()
+  f_consts, operands_res, operands_lin = split_list(
+      args, [num_callee_consts, num_res])
   _, _, cts_avals = split_list(
-      transpose.in_avals, [num_transpose_consts, num_res])
+      transpose.in_avals, [len(t_consts), num_res])
 
   assert all(ad.is_undefined_primal(x)     for x in operands_lin)
   assert all(not ad.is_undefined_primal(x) for x in operands_res)
 
+  def new_transpose_thunk():
+    return callee, f_consts
+
   cts = [zeros_like_aval(a) if type(ct) is Zero else ct
          for ct, a in zip(cts, cts_avals)]
-
-  cts_out = linear_call_p.bind(*t_consts, *f_consts, *operands_res, *cts,
+  cts_out = linear_call_p.bind(*t_consts, *operands_res, *cts,
                                callee=transpose,
-                               transpose=callee,
+                               transpose_thunk=new_transpose_thunk,
                                num_callee_consts=len(t_consts),
-                               num_transpose_consts=len(f_consts),
                                num_res=len(operands_res))
 
-  return [None] * (num_callee_consts + num_transpose_consts + num_res) + cts_out
+  return [None] * (num_callee_consts + num_res) + cts_out
 
 def _linear_call_abstract_eval(*args, **kwargs):
   return kwargs['callee'].out_avals

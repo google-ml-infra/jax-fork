@@ -19,7 +19,7 @@ contains only tests that use shard_map.
 """
 
 from absl.testing import absltest
-import numpy as np
+from absl.testing import parameterized
 
 import jax
 from jax import lax
@@ -30,6 +30,8 @@ from jax.experimental import shard_map
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
 
+import numpy as np
+
 jax.config.parse_flags_with_absl()
 jtu.request_cpu_devices(8)
 
@@ -37,11 +39,16 @@ P = jax.sharding.PartitionSpec
 
 
 class InterpretDistributedTest(jtu.JaxTestCase):
+  def setUp(self):
+    super().setUp()
+    if jax.device_count() < 4:
+      self.skipTest(f'requires at least 4 devices, found {jax.device_count()}')
 
-  def test_right_permute_example(self):
+  @parameterized.product(
+      dma_execution_mode=['eager', 'on_wait'],
+      detect_races=[True, False])
+  def test_right_permute_example(self, dma_execution_mode, detect_races):
     num_devices = jax.device_count()
-    if num_devices < 4:
-      self.skipTest(f'requires at least 4 devices, found {num_devices}')
     partition = P(None, 'x')
     mesh = jax.make_mesh((num_devices,), ('x',))
     sharding = jax.sharding.NamedSharding(mesh, partition)
@@ -58,36 +65,26 @@ class InterpretDistributedTest(jtu.JaxTestCase):
       right_neighbor = lax.rem(my_id + 1, jnp.int32(num_devices))
 
       barrier_sem = pltpu.get_barrier_semaphore()
-      def _body(ijk):
-        i, (j, k) = ijk
-        lax.cond(
-          (i == 0) | (j == 0),
-          lambda: pltpu.semaphore_signal(
-            barrier_sem,
-            device_id=(left_neighbor,),
-            device_id_type=pltpu.DeviceIdType.MESH),
-          lambda: pltpu.semaphore_signal(
-            barrier_sem,
-            device_id=(right_neighbor,),
-            device_id_type=pltpu.DeviceIdType.MESH))
-        return (i + 1, (j + 1, k + 1))
-      lax.while_loop(lambda ijk: ijk[0] < 2, _body, (0, (0, 0)))
+      pltpu.semaphore_signal(
+          barrier_sem,
+          device_id=(left_neighbor,),
+          device_id_type=pltpu.DeviceIdType.MESH)
+      pltpu.semaphore_signal(
+          barrier_sem,
+          device_id=(right_neighbor,),
+          device_id_type=pltpu.DeviceIdType.MESH)
       pltpu.semaphore_wait(barrier_sem, 2)
 
-      def _body2(i, a):
-        remote_copy_op = pltpu.make_async_remote_copy(
+      remote_copy_op = pltpu.make_async_remote_copy(
           src_ref=input_ref,
           dst_ref=output_ref,
           send_sem=send_sem,
           recv_sem=recv_sem,
           device_id=(right_neighbor,),
           device_id_type=pltpu.DeviceIdType.MESH,
-        )
-        remote_copy_op.start()
-        remote_copy_op.wait()
-
-        return i + 1, a + 1
-      _ = lax.scan(_body2, 0, jnp.arange(4.0), unroll=2)
+      )
+      remote_copy_op.start()
+      remote_copy_op.wait()
 
     out_shape = jax.ShapeDtypeStruct((8, 128), jnp.float32)
     grid_spec = pltpu.PrefetchScalarGridSpec(
@@ -107,7 +104,8 @@ class InterpretDistributedTest(jtu.JaxTestCase):
         out_shape=out_shape,
         grid_spec=grid_spec,
         compiler_params=pltpu.TPUCompilerParams(collective_id=13),
-        interpret=mosaic_interpret.TPUInterpretParams(),
+        interpret=mosaic_interpret.TPUInterpretParams(
+            dma_execution_mode=dma_execution_mode, detect_races=detect_races),
     )
     # Wrap the kernel within a shard_map to call.
     pallas_result = jax.jit(
@@ -129,19 +127,22 @@ class InterpretDistributedTest(jtu.JaxTestCase):
     )(input_arr)
 
     np.testing.assert_allclose(xla_result, pallas_result)
+    if detect_races:
+      self.assertFalse(mosaic_interpret.races.races_found)
 
-
-  def test_all_gather_example(self):
+  @parameterized.product(
+      dma_execution_mode=['eager', 'on_wait'],
+      detect_races=[True, False])
+  def test_all_gather_example(self, dma_execution_mode, detect_races):
     num_devices = jax.device_count()
-    if num_devices < 4:
-      self.skipTest(f'requires at least 4 devices, found {num_devices}')
     partition = P('x', None)
     mesh = jax.make_mesh((num_devices,), ('x',))
     sharding = jax.sharding.NamedSharding(mesh, partition)
 
     # Create an input array that shards the first dimension across
     # all devices.
-    input_arr = jax.random.uniform(jax.random.key(0), (8 * num_devices, 128))
+    input_arr = jax.random.uniform(
+        jax.random.key(0), (8 * num_devices, 128), dtype=jnp.float32)
     input_arr = jax.device_put(input_arr, sharding)
 
     def all_gather_kernel(input_ref,
@@ -224,7 +225,8 @@ class InterpretDistributedTest(jtu.JaxTestCase):
       all_gather_kernel,
       out_shape=out_shape,
       grid_spec=grid_spec,
-      interpret=mosaic_interpret.TPUInterpretParams(),
+      interpret=mosaic_interpret.TPUInterpretParams(
+          dma_execution_mode=dma_execution_mode, detect_races=detect_races),
       compiler_params=pltpu.TPUCompilerParams(collective_id=0),
     )
 
@@ -248,17 +250,20 @@ class InterpretDistributedTest(jtu.JaxTestCase):
     )(input_arr)
 
     np.testing.assert_allclose(xla_result, pallas_result)
+    if detect_races:
+      self.assertFalse(mosaic_interpret.races.races_found)
 
-  def test_all_reduce_sum_example(self):
+  @parameterized.product(
+      dma_execution_mode=['eager', 'on_wait'],
+      detect_races=[True, False])
+  def test_all_reduce_sum_example(self, dma_execution_mode, detect_races):
     num_devices = jax.device_count()
-    if num_devices < 4:
-      self.skipTest(f'requires at least 4 devices, found {num_devices}')
     partition = P(None, 'x')
     mesh = jax.make_mesh((num_devices,), ('x',))
     sharding = jax.sharding.NamedSharding(mesh, partition)
 
     input_arr = jax.random.uniform(
-      jax.random.key(0), shape=(8, 128 * num_devices))
+        jax.random.key(0), shape=(8, 128 * num_devices))
     input_arr = jax.device_put(input_arr, sharding)
 
     def all_reduce_kernel(
@@ -350,10 +355,10 @@ class InterpretDistributedTest(jtu.JaxTestCase):
       remote_copy.wait()
 
     out_shape = (
-      jax.ShapeDtypeStruct((8, 128), jnp.float32),
+      jax.ShapeDtypeStruct((8, 128), input_arr.dtype),
       # We allocate the double-buffer as a Pallas output so that it is
       # resident in HBM.
-      jax.ShapeDtypeStruct((2, 8, 128), jnp.float32),  # hbm_scratch
+      jax.ShapeDtypeStruct((2, 8, 128), input_arr.dtype),  # hbm_scratch
     )
 
     grid_spec = pltpu.PrefetchScalarGridSpec(
@@ -372,7 +377,7 @@ class InterpretDistributedTest(jtu.JaxTestCase):
       scratch_shapes=(
         [pltpu.SemaphoreType.DMA] * 3
         + [pltpu.SemaphoreType.REGULAR]  # capacity_sem
-        + [pltpu.VMEM((8, 128), jnp.float32)]  # receive_scratch
+        + [pltpu.VMEM((8, 128), input_arr.dtype)]  # receive_scratch
       ),
     )
 
@@ -380,7 +385,8 @@ class InterpretDistributedTest(jtu.JaxTestCase):
       all_reduce_kernel,
       out_shape=out_shape,
       grid_spec=grid_spec,
-      interpret=mosaic_interpret.TPUInterpretParams(),
+      interpret=mosaic_interpret.TPUInterpretParams(
+          dma_execution_mode=dma_execution_mode, detect_races=detect_races),
       compiler_params=pltpu.TPUCompilerParams(collective_id=0),
     )
 
@@ -405,12 +411,14 @@ class InterpretDistributedTest(jtu.JaxTestCase):
     )(input_arr)
 
     np.testing.assert_allclose(xla_result, pallas_result, atol=1e-5)
+    if detect_races:
+      self.assertFalse(mosaic_interpret.races.races_found)
 
-
-  def test_reduce_scatter_sum_example(self):
+  @parameterized.product(
+      dma_execution_mode=['eager', 'on_wait'],
+      detect_races=[True, False])
+  def test_reduce_scatter_sum_example(self, dma_execution_mode, detect_races):
     num_devices = jax.device_count()
-    if num_devices < 4:
-      self.skipTest(f'requires at least 4 devices, found {num_devices}')
     partition = P(None, 'x')
     mesh = jax.make_mesh((num_devices,), ('x',))
     sharding = jax.sharding.NamedSharding(mesh, partition)
@@ -661,7 +669,8 @@ class InterpretDistributedTest(jtu.JaxTestCase):
         reduce_scatter_kernel,
         out_shape=out_shape,
         grid_spec=grid_spec,
-        interpret=mosaic_interpret.TPUInterpretParams(),
+        interpret=mosaic_interpret.TPUInterpretParams(
+            dma_execution_mode=dma_execution_mode, detect_races=True),
         compiler_params=pltpu.TPUCompilerParams(collective_id=7),
       )(input_arr)[0]
 
@@ -691,15 +700,19 @@ class InterpretDistributedTest(jtu.JaxTestCase):
     )(input_arr)
 
     np.testing.assert_allclose(xla_result, pallas_result, atol=1e-5)
+    if detect_races:
+      self.assertFalse(mosaic_interpret.races.races_found)
 
-  def test_reduce_scatter_sum_with_emit_pipeline_example(self):
+  @parameterized.product(
+      dma_execution_mode=['eager', 'on_wait'],
+      detect_races=[True, False])
+  def test_reduce_scatter_sum_with_emit_pipeline_example(
+      self, dma_execution_mode, detect_races):
     self.skipTest('requires a patched pallas.emit_pipeline to specify/fake '
                   'the TPU generation')
     if jax.config.jax_enable_x64:
       self.skipTest('pallas.emit_pipeline + x64 is not currently supported')
     num_devices = jax.device_count()
-    if num_devices < 4:
-      self.skipTest(f'requires at least 4 devices, found {num_devices}')
     partition = P(None, 'x')
     mesh = jax.make_mesh((num_devices,), ('x',))
     sharding = jax.sharding.NamedSharding(mesh, partition)
@@ -716,6 +729,7 @@ class InterpretDistributedTest(jtu.JaxTestCase):
         outer_block_size[0] * num_devices,
         outer_block_size[1] * num_devices,
       ),
+      dtype=jnp.float32,
     )
     input_arr = jax.device_put(input_arr, sharding)
 
@@ -925,7 +939,6 @@ class InterpretDistributedTest(jtu.JaxTestCase):
         def _():
           pltpu.semaphore_wait(left_capacity_sem, 1)
 
-
     out_shape = (
       jax.ShapeDtypeStruct(
         (outer_block_size[0], outer_block_size[1]), jnp.float32
@@ -960,7 +973,8 @@ class InterpretDistributedTest(jtu.JaxTestCase):
         reduce_scatter_kernel,
         out_shape=out_shape,
         grid_spec=grid_spec,
-        interpret=mosaic_interpret.TPUInterpretParams(),
+        interpret=mosaic_interpret.TPUInterpretParams(
+            dma_execution_mode=dma_execution_mode, detect_races=detect_races),
         compiler_params=pltpu.TPUCompilerParams(collective_id=19),
       )(input_arr)[0]
 
@@ -989,6 +1003,81 @@ class InterpretDistributedTest(jtu.JaxTestCase):
     )(input_arr)
 
     np.testing.assert_allclose(xla_result, pallas_result, atol=1e-5)
+    if detect_races:
+      self.assertFalse(mosaic_interpret.races.races_found)
+
+  def test_race_detection(self):
+    num_devices = 4
+    mesh = jax.sharding.Mesh(np.array(jax.devices()[:4]), ('x',))
+    sharding = jax.sharding.NamedSharding(mesh, P('x', None))
+
+    input_arr = jax.random.uniform(jax.random.key(0), (8 * num_devices, 128))
+    input_arr = jax.device_put(input_arr, sharding)
+
+    def kernel(src_dst_ids_ref, x_ref, o_ref, send_sem, recv_sem):
+      # Send the specified DMAs.
+      my_id = lax.axis_index('x')
+      src_dst_ids = src_dst_ids_ref[:]
+      recv_count = 0
+      for i in range(src_dst_ids.shape[0]):
+        src_id = src_dst_ids[i, 0]
+        dst_id = src_dst_ids[i, 1]
+        @pl.when(src_id == my_id)
+        def _():
+          dma = pltpu.make_async_remote_copy(
+              src_ref=x_ref,
+              dst_ref=o_ref,
+              send_sem=send_sem,
+              recv_sem=recv_sem,
+              device_id=(dst_id,),
+              device_id_type=pltpu.DeviceIdType.MESH,
+          )
+          dma.start()
+          dma.wait_send()
+        recv_count += jnp.where(dst_id == my_id, 1, 0)
+
+      # Wait until we have received all DMAs.
+      @pl.when(recv_count > 0)
+      def _():
+        fake_dma = pltpu.make_async_remote_copy(
+            src_ref=x_ref.at[pl.ds(0, 8 * recv_count)],
+            dst_ref=o_ref.at[pl.ds(0, 8 * recv_count)],
+            send_sem=send_sem,
+            recv_sem=recv_sem,
+            device_id=(my_id,),
+            device_id_type=pltpu.DeviceIdType.MESH,
+        )
+        fake_dma.wait_recv()
+
+    @jax.jit
+    def run(src_dst_ids):
+      return shard_map.shard_map(
+          pl.pallas_call(
+              kernel,
+              out_shape=jax.ShapeDtypeStruct((8, 128), input_arr.dtype),
+              in_specs=[
+                  pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.SMEM),
+                  pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.ANY),
+              ],
+              out_specs=pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.ANY),
+              scratch_shapes=[pltpu.SemaphoreType.DMA, pltpu.SemaphoreType.DMA],
+              interpret=mosaic_interpret.TPUInterpretParams(
+                  dma_execution_mode='eager',
+                  detect_races=True,
+              ),
+          ),
+          mesh=mesh,
+          in_specs=(P(None), P('x', None)),
+          out_specs=P('x', None),
+          check_rep=False,
+      )(src_dst_ids, input_arr)
+
+    run(jnp.array([[0, 1], [1, 2], [2, 3]], jnp.int32)).block_until_ready()
+    self.assertFalse(mosaic_interpret.races.races_found)
+
+    # Racing writes to device 2.
+    run(jnp.array([[0, 1], [1, 2], [3, 2], [3, 0]], jnp.int32)).block_until_ready()
+    self.assertTrue(mosaic_interpret.races.races_found)
 
 
 if __name__ == "__main__":

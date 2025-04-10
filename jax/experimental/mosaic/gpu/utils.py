@@ -135,7 +135,7 @@ def _debug_scalar_ty_format(arg):
     return "%llu", arg
   if ir.F32Type.isinstance(arg.type):
     return "%f", arg
-  if ir.F16Type.isinstance(arg.type):
+  if ir.BF16Type.isinstance(arg.type) or ir.F16Type.isinstance(arg.type):
     arg = arith.extf(ir.F32Type.get(), arg)
     return "%f", arg
   raise NotImplementedError(f"Can't print the type {arg.type}")
@@ -346,8 +346,11 @@ def bitwidth_impl(ty: ir.Type):
     return ir.IntegerType(ty).width
   if ir.FloatType.isinstance(ty):
     return ir.FloatType(ty).width
-  if dialect is not None and ir.Type.parse("!mosaic_gpu.barrier"):
+  if dialect is not None and ty == ir.Type.parse("!mosaic_gpu.barrier"):
     return MBARRIER_BYTES * 8
+  if ir.VectorType.isinstance(ty):
+    vty = ir.VectorType(ty)
+    return math.prod(vty.shape) * bitwidth(vty.element_type)
   raise NotImplementedError(ty)
 
 
@@ -670,10 +673,10 @@ def parse_indices(
 
 
 def commit_shared():
-  warpgroup_barrier()
   nvvm.fence_proxy(
       nvvm.ProxyKind.async_shared, space=nvvm.SharedSpace.shared_cta
   )
+  warpgroup_barrier()
 
 
 def warpgroup_barrier():
@@ -786,7 +789,7 @@ class BarrierRef:
   def as_dialect_barrier_memref(self) -> ir.Value:
     shape = () if self.num_barriers == 1 else (self.num_barriers,)
     return ptr_as_memref(
-        self.base_address,
+        self.get_ptr(),
         ir.MemRefType.get(shape, ir.Type.parse("!mosaic_gpu.barrier")),
         ptr_memory_space=WORKGROUP_NVPTX_ADDRESS_SPACE,
     )
@@ -1172,4 +1175,98 @@ def getelementptr(
 
 
 def dyn_dot(x, y):
+  assert len(x) == len(y)
   return functools.reduce(arith.addi, (arith.muli(a, b) for a, b in zip(x, y)))
+
+
+def shfl_bfly(x: ir.Value, distance: int | ir.Value):
+  i32 = ir.IntegerType.get_signless(32)
+  if isinstance(distance, int):
+    distance = c(distance, i32)
+  if (result_type := x.type) != i32:
+    x = bitcast(x, i32)
+  y = nvvm.shfl_sync(
+      i32, c(0xFFFFFFFF, i32), x, distance, c(0x1F, i32), nvvm.ShflKind.bfly,
+  )
+  return bitcast(y, result_type)
+
+
+def prmt(high: ir.Value, low: ir.Value, permutation: ir.Value):
+  i32 = ir.IntegerType.get_signless(32)
+  if (result_type := high.type) != low.type:
+    raise ValueError(f"Types must match, got {high.type} and {low.type}")
+  if high.type != i32:
+    high = bitcast(high, i32)
+  if low.type != i32:
+    low = bitcast(low, i32)
+  if permutation.type != i32:
+    permutation = bitcast(permutation, i32)
+  result = llvm.inline_asm(
+      i32, [high, low, permutation], "prmt.b32 $0, $1, $2, $3;", "=r,r,r,r"
+  )
+  return bitcast(result, result_type)
+
+
+def bitcast(x: ir.Value, new_type: ir.Type):
+  if x.type == new_type:
+    return x
+  if ir.VectorType.isinstance(x.type) and ir.IntegerType.isinstance(new_type):
+    new_type = ir.IntegerType(new_type)
+    x_ty = ir.VectorType(x.type)
+    assert new_type.width == bitwidth(x_ty.element_type) * math.prod(x_ty.shape)
+    i0 = arith.ConstantOp.create_index(0)
+    return vector.extractelement(
+        vector.bitcast(ir.VectorType.get((1,), new_type), x), position=i0
+    )
+  if ir.IntegerType.isinstance(x.type) and ir.VectorType.isinstance(new_type):
+    new_type = ir.VectorType(new_type)
+    x_ty = ir.IntegerType(x.type)
+    assert x_ty.width == bitwidth(new_type.element_type) * math.prod(new_type.shape)
+    return vector.bitcast(new_type, vector.splat(ir.VectorType.get((1,), x_ty), x))
+  if ir.VectorType.isinstance(x.type) and ir.VectorType.isinstance(new_type):
+    x_ty = ir.VectorType(x.type)
+    new_ty = ir.VectorType(new_type)
+    if bitwidth(x_ty) != bitwidth(new_ty):
+      raise ValueError(f"Can't bitcast {x.type} to {new_type}")
+    return vector.bitcast(new_type, x)
+  raise ValueError(f"Can't bitcast {x.type} to {new_type}")
+
+
+def ceil_div(x: int, y: int):
+  return (x + y - 1) // y
+
+
+def vector_slice(v: ir.Value, s: slice):
+  v_ty = ir.VectorType(v.type)
+  if len(v_ty.shape) != 1:
+    raise NotImplementedError(v_ty)
+  [v_len] = v_ty.shape
+  slice_length = len(range(v_len)[s])
+  return vector.extract_strided_slice(
+      ir.VectorType.get((slice_length,), v_ty.element_type),
+      v, [s.start or 0], [slice_length], [1],
+  )
+
+
+def vector_concat(vectors: Sequence[ir.Value]) -> ir.Value:
+  index = ir.IndexType.get()
+  if not vectors:
+    raise ValueError("Cannot concatenate an empty list of vectors")
+  vty = vectors[0].type
+  if not ir.VectorType.isinstance(vty):
+    raise ValueError("Cannot concatenate non-vector values")
+  if vty.rank != 1:
+    raise NotImplementedError("Only 1D vectors are supported")
+  for v in vectors:
+    if v.type != vty:
+      raise ValueError("Cannot concatenate vectors of different types")
+  result = llvm.mlir_undef(
+      ir.VectorType.get((vty.shape[0] * len(vectors),), vty.element_type)
+  )
+  offset = 0
+  for v in vectors:
+    for i in range(vty.shape[0]):
+      elem = vector.extractelement(v, position=c(i, index))
+      result = vector.insertelement(elem, result, position=c(offset + i, index))
+    offset += vty.shape[0]
+  return result

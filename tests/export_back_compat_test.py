@@ -31,6 +31,7 @@ from jax._src.export import _export
 
 from jax._src.internal_test_util import export_back_compat_test_util as bctu
 
+from jax._src.internal_test_util.export_back_compat_test_data import annotate_data_placement
 from jax._src.internal_test_util.export_back_compat_test_data import cpu_cholesky_lapack_potrf
 from jax._src.internal_test_util.export_back_compat_test_data import cpu_eig_lapack_geev
 from jax._src.internal_test_util.export_back_compat_test_data import cuda_eigh_cusolver_syev
@@ -38,7 +39,6 @@ from jax._src.internal_test_util.export_back_compat_test_data import rocm_eigh_h
 from jax._src.internal_test_util.export_back_compat_test_data import cpu_eigh_lapack_syev
 from jax._src.internal_test_util.export_back_compat_test_data import cpu_lu_lapack_getrf
 from jax._src.internal_test_util.export_back_compat_test_data import cuda_qr_cusolver_geqrf
-from jax._src.internal_test_util.export_back_compat_test_data import rocm_qr_hipsolver_geqrf
 from jax._src.internal_test_util.export_back_compat_test_data import cpu_qr_lapack_geqrf
 from jax._src.internal_test_util.export_back_compat_test_data import cpu_schur_lapack_gees
 from jax._src.internal_test_util.export_back_compat_test_data import cpu_svd_lapack_gesdd
@@ -57,6 +57,7 @@ from jax._src.internal_test_util.export_back_compat_test_data import tpu_ApproxT
 from jax._src.internal_test_util.export_back_compat_test_data import tpu_Qr
 from jax._src.internal_test_util.export_back_compat_test_data import tpu_Sharding
 from jax._src.internal_test_util.export_back_compat_test_data import tpu_stablehlo_dynamic_reduce_window
+from jax._src.internal_test_util.export_back_compat_test_data import shardy_sharding_ops_with_different_meshes
 from jax._src.internal_test_util.export_back_compat_test_data import stablehlo_dynamic_rng_bit_generator
 from jax._src.internal_test_util.export_back_compat_test_data import stablehlo_dynamic_top_k
 from jax._src.internal_test_util.export_back_compat_test_data import stablehlo_dynamic_approx_top_k
@@ -67,6 +68,7 @@ import jax.numpy as jnp
 
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
+from jax.sharding import NamedSharding as NS
 
 from jax._src import config
 from jax._src import test_util as jtu
@@ -138,14 +140,13 @@ class CompatTest(bctu.CompatTestBase):
         cpu_qr_lapack_geqrf.data_2023_03_17,
         cuda_threefry2x32.data_2024_07_30,
         cpu_lu_lapack_getrf.data_2023_06_14,
-        cuda_lu_pivots_to_permutation.data_2024_08_08,
+        cuda_lu_pivots_to_permutation.data_2025_04_01,
         cuda_lu_cusolver_getrf.data_2024_08_19,
         cuda_qr_cusolver_geqrf.data_2024_09_26,
         cuda_eigh_cusolver_syev.data_2024_09_30,
         cuda_svd_cusolver_gesvd.data_2024_10_08,
         cpu_tridiagonal_solve_lapack_gtsv.data_2025_01_09,
         cuda_tridiagonal_cusolver_sytrd.data_2025_01_09,
-        rocm_qr_hipsolver_geqrf.data_2024_08_05,
         rocm_eigh_hipsolver_syev.data_2024_08_05,
         cpu_schur_lapack_gees.data_2023_07_16,
         cpu_svd_lapack_gesdd.data_2023_06_19,
@@ -161,6 +162,8 @@ class CompatTest(bctu.CompatTestBase):
         stablehlo_dynamic_top_k.data_2023_07_16,
         stablehlo_dynamic_top_k.data_2023_08_11,  # with shape_assertion
         stablehlo_dynamic_approx_top_k.data_2024_05_30,
+        annotate_data_placement.data_2025_04_07_tpu,
+        annotate_data_placement.data_2025_04_07_cuda,
     ]
     # Some of the above are nested structures.
     covering_testdatas = itertools.chain(
@@ -409,7 +412,7 @@ class CompatTest(bctu.CompatTestBase):
   def test_cuda_lu_pivots_to_permutation(self):
     shape = (2, 3, 4)
     func = lambda: CompatTest.lu_pivots_to_permutation_harness(shape)
-    data = self.load_testdata(cuda_lu_pivots_to_permutation.data_2024_08_08)
+    data = self.load_testdata(cuda_lu_pivots_to_permutation.data_2025_04_01)
     self.run_one_test(func, data)
 
   @parameterized.named_parameters(
@@ -451,29 +454,6 @@ class CompatTest(bctu.CompatTestBase):
     data = self.load_testdata(cpu_qr_lapack_geqrf.data_2023_03_17[dtype_name])
     self.run_one_test(func, data, rtol=rtol,
                       expect_current_custom_calls=info["custom_call_targets"])
-
-  # TODO(b/369826500): Remove legacy custom call test after mid March 2025.
-  @parameterized.named_parameters(
-      dict(testcase_name=f"_dtype={dtype_name}_{batched}",
-           dtype_name=dtype_name, batched=batched)
-      for dtype_name in ("f32",)
-      # For batched qr we use cublas_geqrf_batched/hipblas_geqrf_batched.
-      for batched in ("batched", "unbatched"))
-  def test_gpu_qr_solver_geqrf_legacy(self, dtype_name, batched):
-    if jtu.test_device_matches(["rocm"]):
-      data = self.load_testdata(rocm_qr_hipsolver_geqrf.data_2024_08_05[batched])
-      prefix = "hip"
-    elif jtu.test_device_matches(["cuda"]):
-      data = self.load_testdata(cuda_qr_cusolver_geqrf.data_2023_03_18[batched])
-      prefix = "cu"
-    else:
-      self.skipTest("Unsupported platform")
-    dtype = dict(f32=np.float32)[dtype_name]
-    rtol = dict(f32=1e-3)[dtype_name]
-    shape = dict(batched=(2, 3, 3), unbatched=(3, 3))[batched]
-    func = lambda: CompatTest.qr_harness(shape, dtype)
-    self.run_one_test(func, data, rtol=rtol, expect_current_custom_calls=[
-        f"{prefix}solver_geqrf_ffi", f"{prefix}solver_orgqr_ffi"])
 
   @parameterized.named_parameters(
       dict(testcase_name=f"_dtype={dtype_name}", dtype_name=dtype_name)
@@ -840,7 +820,7 @@ class CompatTest(bctu.CompatTestBase):
     )
     self.run_one_test(func, data, rtol=rtol, atol=atol)
 
-  def test_approx_top_k(self):
+  def test_tpu_approx_top_k(self):
     def func():
       x = np.array([3.0, 1.0, 4.0, 2.0, 5.0, 6.0, 7.0])
       y = lax.approx_max_k(x, 3)
@@ -857,7 +837,7 @@ class CompatTest(bctu.CompatTestBase):
       data = self.load_testdata(cuda_threefry2x32.data_2024_07_30)
       self.run_one_test(func, data)
 
-  def test_sharding(self):
+  def test_tpu_sharding(self):
     # Tests "Sharding", "SPMDShardToFullShape", "SPMDFullToShardShape" on TPU
     if not jtu.test_device_matches(["tpu"]) or len(jax.devices()) < 2:
       self.skipTest("Test runs only on TPU with at least 2 devices")
@@ -878,6 +858,31 @@ class CompatTest(bctu.CompatTestBase):
     data = self.load_testdata(tpu_Sharding.data_2023_03_16)
     with mesh:
       self.run_one_test(func, data)
+
+  @parameterized.named_parameters(
+      dict(testcase_name=f"_platform={platform}", platform=platform)
+      for platform in ("tpu", "gpu"))
+  def test_annotate_device_placement(self, platform):
+    if not jtu.test_device_matches([platform]):
+      self.skipTest(f"Test enabled only for {platform}")
+
+    mesh = Mesh(jax.local_devices()[0:1], axis_names=("a"))
+
+    dev_sharding = NS(mesh, P("a"))
+    host_sharding = NS(mesh, P("a"), memory_kind="pinned_host")
+
+    @partial(jax.jit,
+             in_shardings=(dev_sharding, host_sharding),
+             out_shardings=host_sharding)
+    def func(x, y):
+      return x + y
+
+    if platform == "tpu":
+      data = self.load_testdata(annotate_data_placement.data_2025_04_07_tpu)
+    else:
+      data = self.load_testdata(annotate_data_placement.data_2025_04_07_cuda)
+
+    self.run_one_test(func, data)
 
   def test_tpu_stablehlo_dynamic_reduce_window_unary(self):
     # stablehlo.dynamic_reduce_window is used temporarily on TPU for a
@@ -1022,6 +1027,35 @@ class CompatTest(bctu.CompatTestBase):
             "shape_assertion",
         ],
     )
+
+
+@jtu.with_config(jax_use_shardy_partitioner=True)
+class ShardyCompatTest(bctu.CompatTestBase):
+  def test_shardy_sharding_ops_with_different_meshes(self):
+    # Tests whether we can save and load a module with meshes that have the
+    # same axis sizes (and same order) but different axis names.
+    # Also tests "Sharding", "xla.sdy.GlobalToLocalShape",
+    # "xla.sdy.LocalToGlobalShape".
+    if not jtu.test_device_matches(["tpu"]) or len(jax.devices()) < 2:
+      self.skipTest("Test runs only on TPU with at least 2 devices")
+
+    # Must use exactly 2 devices for expected outputs from ppermute.
+    devices = jax.devices()[:2]
+    old_mesh = Mesh(devices, axis_names=('a'))
+
+    def func(x):  # x: f32[4, 4]
+      @partial(shard_map, mesh=old_mesh,
+              in_specs=(P('a', None),), out_specs=P('a', None))
+      def shard_map_func(x):  # b: f32[2, 4]
+        axis_size = lax.psum(1, 'a')
+        perm = [(j, (j + 1) % axis_size) for j in range(axis_size)]
+        return lax.ppermute(x, 'a', perm=perm)
+      x = jax.lax.with_sharding_constraint(x, NS(old_mesh, P('a', None)))
+      return shard_map_func(x)
+
+    data = self.load_testdata(shardy_sharding_ops_with_different_meshes.data_2025_02_12)
+    with Mesh(devices, axis_names=('x')):
+      self.run_one_test(func, data)
 
 
 if __name__ == "__main__":

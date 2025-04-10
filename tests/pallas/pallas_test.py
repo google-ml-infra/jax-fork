@@ -28,14 +28,12 @@ import jax
 import jax.export
 from jax import lax
 from jax import random
-from jax._src import api_util
 from jax._src import checkify
 from jax._src import config
 from jax._src import core as jax_core
 from jax._src import dtypes
 from jax._src import test_util as jtu
 from jax._src.lax.control_flow.for_loop import for_loop
-from jax._src.pallas import core as pallas_core
 from jax._src.pallas import pallas_call
 from jax._src.pallas.pallas_call import _trace_kernel_to_jaxpr
 from jax.experimental import pallas as pl
@@ -130,8 +128,8 @@ def matmul_block_spec(x, y, *, bm, bn, bk, interpret, debug=False):
   def matmul_kernel(x_ref, y_ref, o_ref):
     acc = jnp.zeros(o_ref.shape, dtype=jnp.float32)
     def body(i, acc_ref):
-      x_block = pl.load(x_ref, (slice(None), pl.ds(i * bk, bk)))
-      y_block = pl.load(y_ref, (pl.ds(i * bk, bk), slice(None)))
+      x_block = x_ref[:, pl.ds(i * bk, bk)]
+      y_block = y_ref[pl.ds(i * bk, bk), :]
       acc_ref[:, :] += pl.dot(x_block, y_block)
     acc = for_loop(k // bk, body, acc).astype(o_ref.dtype)
     o_ref[:, :] = acc
@@ -159,6 +157,7 @@ class PallasBaseTest(jtu.JaxTestCase):
 
 
 class PallasCallTest(PallasBaseTest):
+
   def test_add_one(self):
     if jtu.test_device_matches(["tpu"]) and not self.INTERPRET:
       self.skipTest("On TPU the test works only in interpret mode")
@@ -625,8 +624,9 @@ class PallasCallTest(PallasBaseTest):
         out_shape=jax.ShapeDtypeStruct((m, n), jnp.float32),
     )
     def dummy(_, o_ref):
-      pl.store(o_ref, (jnp.arange(m)[:, None], jnp.arange(n)[None, :]),
-               jnp.ones_like(o_ref))
+      o_ref[jnp.arange(m)[:, None], jnp.arange(n)[None, :]] = jnp.ones_like(
+          o_ref
+      )
 
     key = random.key(0)
     x = random.normal(key, (m, n))
@@ -668,8 +668,7 @@ class PallasCallTest(PallasBaseTest):
         out_shape=out_shape,
     )
     def slice_kernel(x_ref, y_ref):
-      x = pl.load(x_ref, (pl.dslice(0, 4), pl.dslice(0, 4)))
-      pl.store(y_ref, (pl.dslice(4), pl.dslice(4)), x)
+      y_ref[:4, :4] = x_ref[:4, :4]
     x = random.normal(random.key(0), (m, n))
     y = slice_kernel(x)
     y_ref = x[:4]
@@ -703,6 +702,9 @@ class PallasCallTest(PallasBaseTest):
       ("float32", jax.lax.DotAlgorithmPreset.DEFAULT),
       ("float32", jax.lax.DotAlgorithmPreset.F16_F16_F32),
       ("float32", jax.lax.DotAlgorithmPreset.BF16_BF16_F32),
+      ("float32", jax.lax.DotAlgorithmPreset.BF16_BF16_F32_X3),
+      ("float32", jax.lax.DotAlgorithmPreset.BF16_BF16_F32_X6),
+      ("float32", jax.lax.DotAlgorithmPreset.BF16_BF16_F32_X9),
       ("float32", jax.lax.DotAlgorithmPreset.TF32_TF32_F32),
       ("float32", jax.lax.DotAlgorithmPreset.TF32_TF32_F32_X3),
       ("float32", jax.lax.DotAlgorithmPreset.F32_F32_F32),
@@ -732,7 +734,61 @@ class PallasCallTest(PallasBaseTest):
         precision=jax.lax.Precision.HIGHEST,
         preferred_element_type=jnp.float32,
     )
-    self.assertAllClose(dot_kernel(x, y), expected, atol=5e-2, rtol=5e-3)
+    if dtype == "bfloat16" or precision in (
+        jax.lax.Precision.HIGHEST,
+        jax.lax.DotAlgorithmPreset.F32_F32_F32,
+        jax.lax.DotAlgorithmPreset.BF16_BF16_F32_X6,
+        jax.lax.DotAlgorithmPreset.BF16_BF16_F32_X9,
+    ):
+      atol = 5e-6
+    elif precision in (
+        jax.lax.DotAlgorithmPreset.BF16_BF16_F32_X3,
+        jax.lax.DotAlgorithmPreset.TF32_TF32_F32_X3,
+    ):
+      atol = 5e-4
+    else:
+      atol = 5e-2
+    self.assertAllClose(dot_kernel(x, y), expected, atol=atol, rtol=atol / 10)
+
+  @parameterized.parameters(jnp.int8, jnp.uint8)
+  def test_integer_dot(self, dtype):
+    if jtu.test_device_matches(["tpu"]) and not jtu.is_device_tpu_at_least(5):
+      self.skipTest("`int8` dot is only supported on v5 TPUs and newer.")
+
+    @functools.partial(
+        self.pallas_call,
+        out_shape=jax.ShapeDtypeStruct((32, 64), jnp.int32),
+    )
+    def dot_kernel(x_ref, y_ref, o_ref):
+      o_ref[()] = pl.dot(x_ref[()], y_ref[()])
+
+    key0, key1 = random.split(random.key(0))
+    # FIXME(cjfj): TPU fails with `uint8` values >= 128.
+    kwargs = dict(minval=jnp.iinfo(dtype).min, maxval=128, dtype=dtype)
+    # TODO(cjfj): Investigate why this fails on GPU with `k == 16`.
+    x = random.randint(key0, (32, 128), **kwargs)
+    y = random.randint(key1, (128, 64), **kwargs)
+    expected = jnp.dot(x, y, preferred_element_type=jnp.int32)
+    self.assertAllClose(dot_kernel(x, y), expected, atol=0.0, rtol=0.0)
+
+  def test_dot_with_vector(self):
+    if not jtu.test_device_matches(["gpu"]) or self.INTERPRET:
+      self.skipTest(
+          "jnp.dot is only restricted to 2D on GPU in non-interpret mode."
+      )
+
+    @functools.partial(
+        self.pallas_call,
+        out_shape=jax.ShapeDtypeStruct((32,), jnp.float32),
+    )
+    def dot_kernel(x_ref, y_ref, o_ref):
+      o_ref[()] = jnp.dot(x_ref[()], y_ref[()])
+
+    key0, key1 = random.split(random.key(0))
+    x = random.normal(key0, (32, 64), dtype=jnp.float32)
+    y = random.normal(key1, (64,), dtype=jnp.float32)
+    with self.assertRaisesRegex(Exception, "must be 2D"):
+      dot_kernel(x, y)
 
   @parameterized.parameters(jnp.int4, jnp.uint4)
   def test_subbyte_load(self, dtype):
@@ -747,6 +803,63 @@ class PallasCallTest(PallasBaseTest):
 
     expected = x.astype(dtype).astype(jnp.int8)
     self.assertAllClose(copy_kernel(x.astype(dtype)), expected)
+
+  @parameterized.parameters(jnp.int4, jnp.uint4)
+  def test_subbyte_load_non_contiguous(self, dtype):
+    if not jtu.test_device_matches(["gpu"]):
+      self.skipTest("`[u]int4` loads only supported on GPU.")
+
+    x = jnp.arange(-128, 64, dtype=jnp.int8)
+    expected = x.astype(dtype).astype(jnp.int8)[::3]
+
+    @functools.partial(self.pallas_call, out_shape=expected)
+    def copy_kernel(x_ref, o_ref):
+      o_ref[()] = x_ref[::3].astype(jnp.int8)
+
+    self.assertAllClose(copy_kernel(x.astype(dtype)), expected)
+
+  @parameterized.parameters(True, False)
+  def test_float8_e4m3b11fnuz_dot(self, transpose):
+    if not jtu.test_device_matches(["tpu"]) or not jtu.is_device_tpu_at_least(5):
+      self.skipTest("`float8_e4m3b11fnuz` dot only supported on TPU.")
+
+    dtype = jnp.float8_e4m3b11fnuz
+    x = jax.random.normal(jax.random.key(0), (2048, 1024), dtype=jnp.bfloat16)
+    y = jax.random.normal(jax.random.key(1), (1024, 1024), dtype=dtype)
+    if transpose:
+      expected = x @ y.T.astype(jnp.bfloat16)
+    else:
+      expected = x @ y.astype(jnp.bfloat16)
+
+    @functools.partial(
+        self.pallas_call,
+        in_specs=(pl.BlockSpec(), pl.BlockSpec()),
+        out_shape=expected,
+    )
+    def dot_kernel(x_ref, y_ref, o_ref):
+      o_ref[...] = pl.dot(
+          x_ref[...], y_ref[...], trans_b=transpose
+      ).astype(o_ref.dtype)
+
+    self.assertAllClose(dot_kernel(x, y), expected)
+
+  @parameterized.parameters(
+      ((32,), 2, 0), ((32, 64), 4, 0), ((32, 16), 8, 1), ((32, 16, 2), 16, 1)
+  )
+  def test_split(self, shape, num_parts, axis):
+    if jtu.test_device_matches(["tpu"]) and shape[axis] == num_parts:
+      self.skipTest("TPU doesn't support fully split axis.")
+
+    x = jax.random.normal(jax.random.key(0), shape)
+    expected = jnp.split(x, num_parts, axis)
+
+    @functools.partial(self.pallas_call, out_shape=expected)
+    def kernel(x_ref, *o_ref):
+      x_parts = jnp.split(x_ref[()], num_parts, axis)
+      for o_ref, x_part in zip(o_ref, x_parts):
+        o_ref[...] = x_part
+
+    self.assertAllClose(kernel(x), expected)
 
 
 class PallasCallInterpretTest(PallasCallTest):
@@ -971,9 +1084,25 @@ class ApiErrorTest(PallasBaseTest):
     with self.assertRaisesRegex(
         ValueError,
         "Index map function my_index_map at .*pallas_test.py.* "
-        "for x_ref must return 1 values to match .*"
+        "for args\\[0\\] must return 1 values to match .*"
         "Currently returning 2 values."):
       f(a)
+
+  def test_pallas_call_index_map_pytree_input_wrong_number_of_results(self):
+    a = np.arange(256, dtype=np.int32)
+    def my_index_map():
+      return 0, 0
+    f = self.pallas_call(lambda x_ref, o_ref: None,
+                         out_shape=a,
+                         in_specs=[dict(one=pl.BlockSpec((4,), my_index_map),
+                                        two=pl.BlockSpec((8,), my_index_map))])
+    with self.assertRaisesRegex(
+        ValueError,
+        "Index map function my_index_map at .*pallas_test.py.* "
+        "for args\\[0\\]\\['one'\\] must return 1 values to match .*"
+        "Currently returning 2 values."):
+      f(dict(one=a, two=a))
+
 
   def test_pallas_call_index_map_wrong_return_type(self):
     a = np.arange(256, dtype=np.int32)
@@ -986,7 +1115,7 @@ class ApiErrorTest(PallasBaseTest):
     with self.assertRaisesRegex(
         ValueError,
         "Index map function my_index_map at .*pallas_test.py.* "
-        "for x_ref must return integer scalars. Output\\[0\\] has "
+        "for args\\[0\\] must return integer scalars. Output\\[0\\] has "
         "type .*float"):
       f(a)
 
@@ -1001,7 +1130,7 @@ class ApiErrorTest(PallasBaseTest):
     with self.assertRaisesRegex(
         ValueError,
         "Index map function my_index_map at .*pallas_test.py.* "
-        "for x_ref must return integer scalars. Output\\[0\\] has "
+        "for args\\[0\\] must return integer scalars. Output\\[0\\] has "
         "type .*int32\\[4\\]"):
       f(a)
 
@@ -1015,7 +1144,7 @@ class ApiErrorTest(PallasBaseTest):
                                                 lambda i: jnp.array(index_map_result)[i])])
     with self.assertRaisesRegex(
         ValueError,
-        "Index map function .* for x_ref must not capture constants:"):
+        "Index map function .* for args\\[0\\] must not capture constants:"):
       f(a)
 
   def test_pallas_call_out_specs_mismatch_shape(self):
@@ -1036,7 +1165,7 @@ class ApiErrorTest(PallasBaseTest):
                          in_specs=[pl.BlockSpec((1, 1), lambda: (0, 0))])
     with self.assertRaisesRegex(
         ValueError,
-        "Block shape for x_ref .* must have the same number of dimensions as the "
+        "Block shape for args\\[0\\] .* must have the same number of dimensions as the "
         "array shape"):
 
       f(a)
@@ -1087,40 +1216,6 @@ class ApiErrorTest(PallasBaseTest):
       self.pallas_call(lambda x_ref, y_ref, o1_ref: None,
                        out_shape=[jax.ShapeDtypeStruct(x.shape, jnp.float32)],
                        input_output_aliases={1: 0})(x, x)
-
-  def test_name_and_src_info(self):
-    def the_kernel(): return None
-    ns1 = pallas_core.NameAndSrcInfo.from_pallas_call(
-        "my_name", api_util.fun_sourceinfo(the_kernel))
-    self.assertEqual("my_name", ns1.name)
-    self.assertIn("the_kernel", ns1.src_info)
-    self.assertIn("pallas_test.py:", ns1.src_info)
-    self.assertRegex(
-        str(ns1),
-        "my_name for kernel function the_kernel at .*pallas_test.py:.*")
-
-    ns2 = pallas_core.NameAndSrcInfo.from_pallas_call(
-        None,
-        api_util.fun_sourceinfo(the_kernel))
-    self.assertEqual("the_kernel", ns2.name)
-    self.assertIn("pallas_test.py:", ns2.src_info)
-    self.assertRegex(
-        str(ns2),
-        "the_kernel at .*pallas_test.py:.*")
-
-    ns3 = pallas_core.NameAndSrcInfo.from_pallas_call("my_name", None)
-    self.assertEqual("my_name", ns3.name)
-    self.assertEqual("", ns3.src_info)
-    self.assertEqual(str(ns3), "my_name")
-
-    ns4 = pallas_core.NameAndSrcInfo.from_pallas_call("my name with spaces",
-                                                      None)
-    self.assertEqual("my_name_with_spaces", ns4.name)
-    self.assertEqual("", ns4.src_info)
-
-    ns5 = pallas_core.NameAndSrcInfo.from_pallas_call(None, None)
-    self.assertEqual("unknown", ns5.name)
-    self.assertEqual("", ns5.src_info)
 
 
 class ApiErrorInterpretTest(ApiErrorTest):
@@ -1638,7 +1733,7 @@ class PallasControlFlowTest(PallasBaseTest):
     def kernel(x_ref, r_ref):
       @pl.when(pl.program_id(0) == 0)
       def _():
-        pl.store(r_ref, (0, 0), 0)
+        r_ref[0, 0] = 0
 
       def cond(carry):
         i, j = carry
@@ -1650,8 +1745,7 @@ class PallasControlFlowTest(PallasBaseTest):
         sl = jax.lax.div(i, 128)
         l = jax.lax.rem(i, 128)
         v = x_ref[0, sl, l]
-        s = pl.load(r_ref, (0, 0))
-        pl.store(r_ref, (0, 0), s + v)
+        r_ref[0, 0] += v
         return io + 1, j
 
       i = 128
@@ -1703,7 +1797,7 @@ class PallasControlFlowTest(PallasBaseTest):
     def kernel(x_ref, r_ref):
       @pl.when(pl.program_id(0) == 0)
       def _():
-        pl.store(r_ref, (0, 0), 0)
+        r_ref[0, 0] = 0
 
       def cond(state):
         i, s = state
@@ -1713,14 +1807,11 @@ class PallasControlFlowTest(PallasBaseTest):
         i, s = state
         sl = jax.lax.div(i, jnp.astype(128, i.dtype))
         l = jax.lax.rem(i, jnp.astype(128, i.dtype))
-        v = pl.load(x_ref, (0, sl, l))
+        v = x_ref[0, sl, l]
         return i + 1, s + v
 
       i = jnp.int32(0)
-      s = pl.load(r_ref, (0, 0))
-
-      i, s = jax.lax.while_loop(cond, body, (i, s))
-      pl.store(r_ref, (0, 0), s)
+      _, r_ref[0, 0] = jax.lax.while_loop(cond, body, (i, r_ref[0, 0]))
 
     x = jnp.arange(4096)
     x = jnp.reshape(x, [4, 8, 128])
@@ -2090,13 +2181,15 @@ class PallasOutOfBoundsInterpretTest(PallasBaseTest):
     # TODO(justinfu): This test has low precision on GPU. Improve precision.
     if jtu.test_device_matches(["gpu"]):
       atol = 1e-2
+      rtol = 5e-3
     else:
       atol = 1e-5
+      rtol = 1e-7
 
     # With a masked matmul implementation, uninitialized values will be
     # masked before computation. This should return the correct result.
     with self.subTest('MaskedOutputIsCorrect'):
-      np.testing.assert_allclose(out, expected, atol=atol)
+      np.testing.assert_allclose(out, expected, atol=atol, rtol=rtol)
 
 
 class PallasCheckifyTest(PallasBaseTest):
@@ -2440,7 +2533,8 @@ class SymbolicPallasTest(PallasBaseTest):
     )
     assert exported_module is not None
     self.assertIn(
-        "tensor<?x?xf32>, %arg6: tensor<?x?xf32>, %arg7: tensor<?x?xf32>",
+        "%arg0: tensor<?x?xf32> loc(unknown), %arg1: tensor<?x?xf32>"
+        " loc(unknown), %arg2: tensor<?x?xf32>",
         str(exported_module),
     )
     x = jax.ShapeDtypeStruct((128, 1024), jax.numpy.float32)
@@ -2451,7 +2545,7 @@ class SymbolicPallasTest(PallasBaseTest):
     )
     assert exported_module is not None
     self.assertIn(
-        "@sym_matmul(%arg0: tensor<128x1024xf32>, %arg1: tensor<1024x512xf32>",
+        "call @sym_matmul(%arg0, %arg1)",
         str(exported_module),
     )
 

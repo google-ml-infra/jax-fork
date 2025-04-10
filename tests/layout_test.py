@@ -21,10 +21,10 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import NamedSharding, PartitionSpec as P, SingleDeviceSharding
 from jax._src import config
-from jax._src.layout import Layout, DeviceLocalLayout as DLL
 from jax._src import test_util as jtu
-from jax._src.lib import xla_extension_version
 from jax._src.util import safe_zip
+from jax.experimental.layout import (with_dll_constraint, Layout,
+                                     DeviceLocalLayout as DLL)
 from jax.experimental.compute_on import compute_on
 
 config.parse_flags_with_absl()
@@ -32,12 +32,6 @@ jtu.request_cpu_devices(8)
 
 
 class LayoutTest(jtu.JaxTestCase):
-
-  # Remove this setUp once the released xla_extension_version is >= 308.
-  def setUp(self):
-    if xla_extension_version < 308 and not jtu.test_device_matches(['tpu', 'gpu']):
-      self.skipTest("Layouts do not work on CPU backend yet.")
-    super().setUp()
 
   def test_auto_layout(self):
     mesh = jtu.create_mesh((2, 2), ('x', 'y'))
@@ -730,6 +724,56 @@ class LayoutTest(jtu.JaxTestCase):
 
     self.assertArraysEqual(out, np_inp @ np_inp.T)
     self.assertArraysEqual(out2, np_inp @ np_inp.T)
+
+  def test_layout_donation_with_default_layout(self):
+    mesh = jtu.create_mesh((2, 2), ('x', 'y'))
+    s = NamedSharding(mesh, P('x', 'y'))
+    shape = (16, 16)
+    np_inp = np.arange(math.prod(shape)).reshape(shape)
+    arr = jax.device_put(np_inp, s)
+    out_layout = Layout(arr.layout.device_local_layout, s)
+
+    @partial(jax.jit, out_shardings=out_layout, donate_argnums=0)
+    def f(x):
+      return x * 2
+
+    lowered_text = f.lower(arr).as_text()
+    self.assertIn('tf.aliasing_output = 0', lowered_text)
+    self.assertNotIn('jax.buffer_donor', lowered_text)
+
+    out = f(arr)
+    self.assertArraysEqual(out, np_inp * 2)
+    self.assertEqual(out.layout, out_layout)
+
+  def test_with_dll_constraint(self):
+    if not jtu.test_device_matches(['tpu']):
+      self.skipTest('Only works for TPU')
+    mesh = jtu.create_mesh((2, 2), ('x', 'y'))
+    shape = (16, 128)
+    s = NamedSharding(mesh, P('x'))
+    np_inp = np.arange(math.prod(shape)).reshape(shape)
+    arr = jax.device_put(np_inp, s)
+
+    # Create a custom layout instead of using `arr.layout` to test the API.
+    custom_dll = DLL(major_to_minor=arr.layout.dll.major_to_minor[::-1])
+
+    def f(x):
+      y = x.T
+      # Constrain `y` to the original layout of `arr` because without it,
+      # the layout of `y` would be the transpose of `arr`.
+      y = with_dll_constraint(y, custom_dll)
+      return y * 2
+
+    f(arr)  # doesn't crash
+
+    f = jax.jit(f)
+    out = f(arr)
+    self.assertEqual(out.layout.device_local_layout.major_to_minor,
+                     custom_dll.major_to_minor)
+    self.assertArraysEqual(out, np_inp.T * 2)
+
+    lowered_text = f.lower(arr).as_text()
+    self.assertIn('LayoutConstraint', lowered_text)
 
 
 if __name__ == '__main__':

@@ -26,7 +26,10 @@ package(
 
 py_library(
     name = "core",
-    srcs = ["core.py"],
+    srcs = [
+        "__init__.py",
+        "core.py",
+    ],
     deps = [
         "//jax",
         "//jax/_src/pallas",
@@ -155,7 +158,11 @@ py_library(
     deps = [
         ":core",
         ":primitives",
+        ":verification",
         "//jax",
+        "//jax:core",
+        "//jax:source_info_util",
+        "//jax:util",
         "//jax/_src/lib",
         "//jax/_src/pallas",
     ] + py_deps("numpy"),

@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for the LAPAX linear algebra module."""
-
 from functools import partial
 import itertools
 from typing import Iterator
@@ -98,7 +96,7 @@ class NumpyLinalgTest(jtu.JaxTestCase):
       a = rng(factor_shape, dtype)
       return [np.matmul(a, jnp.conj(T(a)))]
 
-    jnp_fun = partial(jnp.linalg.cholesky, upper=upper)
+    jnp_fun = partial(jnp.linalg.cholesky, upper=upper, symmetrize_input=True)
 
     def np_fun(x, upper=upper):
       # Upper argument added in NumPy 2.0.0
@@ -614,6 +612,11 @@ class NumpyLinalgTest(jtu.JaxTestCase):
     jtu.assert_dot_precision(
         lax.Precision.HIGHEST, partial(jvp, jnp.linalg.eigh), (a,), (a,))
 
+  def testEighGradRankPromotion(self):
+    rng = jtu.rand_default(self.rng())
+    a = rng((10, 3, 3), np.float32)
+    jvp(jnp.linalg.eigh, (a,), (a,))  # doesn't crash
+
   @jtu.sample_product(
     shape=[(1, 1), (4, 4), (5, 5), (300, 300)],
     dtype=float_types + complex_types,
@@ -710,6 +713,16 @@ class NumpyLinalgTest(jtu.JaxTestCase):
     self._CheckAgainstNumpy(np_fn, jnp_fn, args_maker, tol=1e-3)
     self._CompileAndCheck(jnp_fn, args_maker)
 
+  @jtu.sample_product(
+      shape=[(0, 2), (2, 0), (0, 0)],
+      dtype=float_types + complex_types,
+      ord=[1, 2, np.inf, 'fro', 'nuc'],
+  )
+  def testEmptyMatrixNorm(self, shape, dtype, ord):
+    x = jnp.zeros(shape, dtype)
+    norm = jnp.linalg.matrix_norm(x, ord=ord)
+    self.assertEqual(norm, 0)
+
   @skipIf(jtu.numpy_version() < (2, 0, 0), "np.linalg.vector_norm requires NumPy 2.0")
   @jtu.sample_product(
       [
@@ -729,6 +742,15 @@ class NumpyLinalgTest(jtu.JaxTestCase):
     tol = 1E-3 if jtu.test_device_matches(['tpu']) else None
     self._CheckAgainstNumpy(np_fn, jnp_fn, args_maker, tol=tol)
     self._CompileAndCheck(jnp_fn, args_maker, tol=tol)
+
+  @jtu.sample_product(
+      dtype=float_types + complex_types,
+      ord=[1, 2, np.inf],
+  )
+  def testEmptyVectorNorm(self, dtype, ord):
+    x = jnp.zeros(0, dtype)
+    norm = jnp.linalg.vector_norm(x, ord=ord)
+    self.assertEqual(norm, 0)
 
   # jnp.linalg.vecdot is an alias of jnp.vecdot; do a minimal test here.
   @jtu.sample_product(
@@ -836,9 +858,18 @@ class NumpyLinalgTest(jtu.JaxTestCase):
       b=[(), (3,), (2, 3)],
       dtype=float_types + complex_types,
       compute_uv=[False, True],
+      algorithm=[None, lax.linalg.SvdAlgorithm.QR, lax.linalg.SvdAlgorithm.JACOBI],
   )
   @jax.default_matmul_precision("float32")
-  def testSVD(self, b, m, n, dtype, full_matrices, compute_uv, hermitian):
+  def testSVD(self, b, m, n, dtype, full_matrices, compute_uv, hermitian, algorithm):
+    if algorithm is not None:
+      if hermitian:
+        self.skipTest("Hermitian SVD doesn't support the algorithm parameter.")
+      if not jtu.test_device_matches(["cpu", "gpu"]):
+        self.skipTest("SVD algorithm selection only supported on CPU and GPU.")
+      if jtu.test_device_matches(["cpu"]) and algorithm == lax.linalg.SvdAlgorithm.JACOBI:
+        self.skipTest("Jacobi SVD not supported on GPU.")
+
     rng = jtu.rand_default(self.rng())
     args_maker = lambda: [rng(b + (m, n), dtype)]
 
@@ -857,8 +888,11 @@ class NumpyLinalgTest(jtu.JaxTestCase):
     a, = args_maker()
     if hermitian:
       a = a + np.conj(T(a))
-    out = jnp.linalg.svd(a, full_matrices=full_matrices, compute_uv=compute_uv,
-                         hermitian=hermitian)
+    if algorithm is None:
+      fun = partial(jnp.linalg.svd, hermitian=hermitian)
+    else:
+      fun = partial(lax.linalg.svd, algorithm=algorithm)
+    out = fun(a, full_matrices=full_matrices, compute_uv=compute_uv)
     if compute_uv:
       # Check the reconstructed matrices
       out = list(out)
@@ -901,13 +935,12 @@ class NumpyLinalgTest(jtu.JaxTestCase):
       self.assertTrue(np.allclose(np.linalg.svd(a, compute_uv=False),
                                   np.asarray(out), atol=1e-4, rtol=1e-4))
 
-    self._CompileAndCheck(partial(jnp.linalg.svd, full_matrices=full_matrices,
+    self._CompileAndCheck(partial(fun, full_matrices=full_matrices,
                                   compute_uv=compute_uv),
                           args_maker)
 
     if not compute_uv and a.size < 100000:
-      svd = partial(jnp.linalg.svd, full_matrices=full_matrices,
-                    compute_uv=compute_uv)
+      svd = partial(fun, full_matrices=full_matrices, compute_uv=compute_uv)
       # TODO(phawkins): these tolerances seem very loose.
       if dtype == np.complex128:
         jtu.check_jvp(svd, partial(jvp, svd), (a,), rtol=1e-4, atol=1e-4,
@@ -1688,8 +1721,6 @@ class ScipyLinalgTest(jtu.JaxTestCase):
     if pivoting:
       if not jtu.test_device_matches(["cpu", "gpu"]):
         self.skipTest("Pivoting is only supported on CPU and GPU.")
-      if jtu.test_device_matches(["gpu"]) and jtu.jaxlib_version() <= (0, 5, 0):
-        self.skipTest("Pivoting is only supported on GPU for jaxlib > 0.5.0")
     rng = jtu.rand_default(self.rng())
     jsp_func = partial(jax.scipy.linalg.qr, mode=mode, pivoting=pivoting)
     sp_func = partial(scipy.linalg.qr, mode=mode, pivoting=pivoting)
@@ -2297,6 +2328,22 @@ class LaxLinalgTest(jtu.JaxTestCase):
     self.assertAllClose(new_product, old_product, atol=atol)
     self.assertAllClose(
         new_product_with_batching, old_product, atol=atol)
+
+  @jtu.sample_product(
+    n=[0, 1, 5, 10, 20],
+    kind=["symmetric", "lower", "upper"],
+  )
+  @jax.default_matmul_precision("float32")
+  def testPascal(self, n, kind):
+    args_maker = lambda: []
+    osp_fun = partial(osp.linalg.pascal, n=n, kind=kind, exact=False)
+    jsp_fun = partial(jsp.linalg.pascal, n=n, kind=kind)
+    self._CheckAgainstNumpy(osp_fun,
+                            jsp_fun, args_maker,
+                            atol=1e-3,
+                            rtol=1e-2 if jtu.test_device_matches(['tpu']) else 1e-3,
+                            check_dtypes=False)
+    self._CompileAndCheck(jsp_fun, args_maker)
 
 
 if __name__ == "__main__":

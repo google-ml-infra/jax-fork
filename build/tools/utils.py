@@ -14,6 +14,7 @@
 # ==============================================================================
 # Helper script for tools/utilities used by the JAX build CLI.
 import collections
+import glob
 import hashlib
 import logging
 import os
@@ -28,44 +29,44 @@ import urllib.request
 
 logger = logging.getLogger(__name__)
 
-BAZEL_BASE_URI = "https://github.com/bazelbuild/bazel/releases/download/6.5.0/"
+BAZEL_BASE_URI = "https://github.com/bazelbuild/bazel/releases/download/7.4.1/"
 BazelPackage = collections.namedtuple(
     "BazelPackage", ["base_uri", "file", "sha256"]
 )
 bazel_packages = {
     ("Linux", "x86_64"): BazelPackage(
         base_uri=None,
-        file="bazel-6.5.0-linux-x86_64",
+        file="bazel-7.4.1-linux-x86_64",
         sha256=(
-            "a40ac69263440761199fcb8da47ad4e3f328cbe79ffbf4ecc14e5ba252857307"
+            "c97f02133adce63f0c28678ac1f21d65fa8255c80429b588aeeba8a1fac6202b"
         ),
     ),
     ("Linux", "aarch64"): BazelPackage(
         base_uri=None,
-        file="bazel-6.5.0-linux-arm64",
+        file="bazel-7.4.1-linux-arm64",
         sha256=(
-            "5afe973cadc036496cac66f1414ca9be36881423f576db363d83afc9084c0c2f"
+            "d7aedc8565ed47b6231badb80b09f034e389c5f2b1c2ac2c55406f7c661d8b88"
         ),
     ),
     ("Darwin", "x86_64"): BazelPackage(
         base_uri=None,
-        file="bazel-6.5.0-darwin-x86_64",
+        file="bazel-7.4.1-darwin-x86_64",
         sha256=(
-            "bbf9c2c03bac48e0514f46db0295027935535d91f6d8dcd960c53393559eab29"
+            "52dd34c17cc97b3aa5bdfe3d45c4e3938226f23dd0bfb47beedd625a953f1f05"
         ),
     ),
     ("Darwin", "arm64"): BazelPackage(
         base_uri=None,
-        file="bazel-6.5.0-darwin-arm64",
+        file="bazel-7.4.1-darwin-arm64",
         sha256=(
-            "c6b6dc17efcdf13fba484c6fe0b6c3361b888ae7b9573bc25a2dbe8c502448eb"
+            "02b117b97d0921ae4d4f4e11d27e2c0930381df416e373435d5d0419c6a26f24"
         ),
     ),
     ("Windows", "AMD64"): BazelPackage(
         base_uri=None,
-        file="bazel-6.5.0-windows-x86_64.exe",
+        file="bazel-7.4.1-windows-x86_64.exe",
         sha256=(
-            "6eae8e7f28e1b68b833503d1a58caf139c11e52de19df0d787d974653a0ea4c6"
+            "4a76eddf6c5115e1d93355fd11db5ac2fc20e58f197f5d65d3f21da92aa0925b"
         ),
     ),
 }
@@ -137,7 +138,7 @@ def get_bazel_paths(bazel_path_flag):
 def get_bazel_path(bazel_path_flag):
   """Returns the path to a Bazel binary, downloading Bazel if not found.
 
-  Also, checks Bazel's version is at least newer than 6.5.0
+  Also, checks Bazel's version is at least newer than 7.4.1
 
   A manual version check is needed only for really old bazel versions.
   Newer bazel releases perform their own version check against .bazelversion
@@ -151,7 +152,7 @@ def get_bazel_path(bazel_path_flag):
 
   print(
       "Cannot find or download a suitable version of bazel."
-      "Please install bazel >= 6.5.0."
+      "Please install bazel >= 7.4.1."
   )
   sys.exit(-1)
 
@@ -201,6 +202,20 @@ def get_clang_major_version(clang_path):
 
   return major_version
 
+def get_clangpp_path(clang_path):
+  clang_path = pathlib.Path(clang_path)
+  clang_exec_name = clang_path.name
+  clangpp_exec_name = clang_exec_name
+  if "clang++" not in clang_exec_name:
+    clangpp_exec_name = clang_exec_name.replace("clang", "clang++")
+  clangpp_path = clang_path.parent / clangpp_exec_name
+  if not clangpp_path.exists():
+    raise FileNotFoundError(
+      f"Failed to get clang++ path from clang path: '{clang_path!s}'. "
+      f"Tried the path: '{clangpp_path!s}'."
+    )
+  return str(clangpp_path)
+
 def get_gcc_major_version(gcc_path: str):
   gcc_version_proc = subprocess.run(
     [gcc_path, "-dumpversion"],
@@ -208,16 +223,20 @@ def get_gcc_major_version(gcc_path: str):
     capture_output=True,
     text=True,
   )
-  major_version = int(gcc_version_proc.stdout)
+  major_version = int(gcc_version_proc.stdout.split(".")[0])
 
   return major_version
 
 
-def get_jax_configure_bazel_options(bazel_command: list[str]):
+def get_jax_configure_bazel_options(bazel_command: list[str], use_new_wheel_build_rule: bool):
   """Returns the bazel options to be written to .jax_configure.bazelrc."""
   # Get the index of the "run" parameter. Build options will come after "run" so
-  # we find the index of "run" and filter everything after it.
-  start = bazel_command.index("run")
+  # we find the index of "run" and filter everything after it. If we are using
+  # the new wheel build rule, we will find the index of "build" instead.
+  if use_new_wheel_build_rule:
+    start = bazel_command.index("build")
+  else:
+    start = bazel_command.index("run")
   jax_configure_bazel_options = ""
   try:
     for i in range(start + 1, len(bazel_command)):
@@ -252,3 +271,28 @@ def _parse_string_as_bool(s):
     return False
   else:
     raise ValueError(f"Expected either 'true' or 'false'; got {s}")
+
+
+def copy_dir_recursively(src, dst):
+  if os.path.exists(dst):
+    shutil.rmtree(dst)
+  os.makedirs(dst, exist_ok=True)
+  for root, dirs, files in os.walk(src):
+    relative_path = os.path.relpath(root, src)
+    dst_dir = os.path.join(dst, relative_path)
+    os.makedirs(dst_dir, exist_ok=True)
+    for f in files:
+      src_file = os.path.join(root, f)
+      dst_file = os.path.join(dst_dir, f)
+      shutil.copy2(src_file, dst_file)
+  logging.info("Editable wheel path: %s" % dst)
+
+
+def copy_individual_files(src, dst, regex):
+  os.makedirs(dst, exist_ok=True)
+  for f in glob.glob(os.path.join(src, regex)):
+    dst_file = os.path.join(dst, os.path.basename(f))
+    if os.path.exists(dst_file):
+      os.remove(dst_file)
+    shutil.copy2(f, dst_file)
+    logging.info("Distribution path: %s" % dst_file)

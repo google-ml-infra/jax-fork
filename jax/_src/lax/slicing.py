@@ -114,6 +114,8 @@ def dynamic_slice(
     operand: Array | np.ndarray,
     start_indices: Array | np.ndarray | Sequence[ArrayLike],
     slice_sizes: Shape,
+    *,
+    allow_negative_indices: bool | Sequence[bool] = True
 ) -> Array:
   """Wraps XLA's `DynamicSlice
   <https://www.tensorflow.org/xla/operation_semantics#dynamicslice>`_
@@ -127,6 +129,12 @@ def dynamic_slice(
       integers with length equal to `ndim(operand)`. Inside a JIT compiled
       function, only static values are supported (all JAX arrays inside JIT
       must have statically known size).
+    allow_negative_indices: a bool or sequence of bools, one per dimension; if
+      a bool is passed, it applies to all dimensions. For each dimension,
+      if true, negative indices are permitted and are are interpreted relative
+      to the end of the array. If false, negative indices are treated as if they
+      were out of bounds and the result is implementation defined, typically
+      clamped to the first index.
 
   Returns:
     An array containing the slice.
@@ -158,18 +166,25 @@ def dynamic_slice(
     - :func:`jax.lax.dynamic_slice_in_dim`
     - :func:`jax.lax.dynamic_index_in_dim`
   """
-  start_indices = _dynamic_slice_indices(operand, start_indices)
+  start_indices = _dynamic_slice_indices(
+      operand, start_indices, allow_negative_indices)
   if config.dynamic_shapes.value:
     dynamic_sizes, static_sizes = lax._extract_tracers_dyn_shape(slice_sizes)
   else:
     dynamic_sizes = []
     static_sizes = core.canonicalize_shape(slice_sizes)  # type: ignore
+  operand, *start_indices = core.standard_insert_pbroadcast(
+      operand, *start_indices)
   return dynamic_slice_p.bind(operand, *start_indices, *dynamic_sizes,
                               slice_sizes=tuple(static_sizes))
 
 
-def dynamic_update_slice(operand: Array | np.ndarray, update: ArrayLike,
-                         start_indices: Array | Sequence[ArrayLike]) -> Array:
+def dynamic_update_slice(
+    operand: Array | np.ndarray, update: ArrayLike,
+    start_indices: Array | Sequence[ArrayLike],
+    *,
+    allow_negative_indices: bool | Sequence[bool] = True
+) -> Array:
   """Wraps XLA's `DynamicUpdateSlice
   <https://www.tensorflow.org/xla/operation_semantics#dynamicupdateslice>`_
   operator.
@@ -178,6 +193,12 @@ def dynamic_update_slice(operand: Array | np.ndarray, update: ArrayLike,
     operand: an array to slice.
     update: an array containing the new values to write onto `operand`.
     start_indices: a list of scalar indices, one per dimension.
+    allow_negative_indices: a bool or sequence of bools, one per dimension; if
+      a bool is passed, it applies to all dimensions. For each dimension,
+      if true, negative indices are permitted and are are interpreted relative
+      to the end of the array. If false, negative indices are treated as if they
+      were out of bounds and the result is implementation defined, typically
+      clamped to the first index.
 
   Returns:
     An array containing the slice.
@@ -213,7 +234,10 @@ def dynamic_update_slice(operand: Array | np.ndarray, update: ArrayLike,
     - :attr:`lax.dynamic_update_index_in_dim`
     - :attr:`lax.dynamic_update_slice_in_dim`
   """
-  start_indices = _dynamic_slice_indices(operand, start_indices)
+  start_indices = _dynamic_slice_indices(
+      operand, start_indices, allow_negative_indices)
+  operand, update, *start_indices = core.standard_insert_pbroadcast(
+      operand, update, *start_indices)
   return dynamic_update_slice_p.bind(operand, update, *start_indices)
 
 
@@ -396,6 +420,7 @@ def gather(operand: ArrayLike, start_indices: ArrayLike,
         raise ValueError(f"Unsupported dtype for gather fill_value {dtype}")
   else:
     fill_value = None
+  operand, start_indices = core.standard_insert_pbroadcast(operand, start_indices)
   return gather_p.bind(
       operand, start_indices, dimension_numbers=dimension_numbers,
       slice_sizes=core.canonicalize_shape(slice_sizes),
@@ -485,6 +510,8 @@ def scatter_add(
   """
   jaxpr, consts = lax._reduction_jaxpr(lax.add,
                                        core.get_aval(lax._const(operand, 0)))
+  operand, scatter_indices, updates = core.standard_insert_pbroadcast(
+      operand, scatter_indices, updates)
   return scatter_add_p.bind(
       operand, scatter_indices, updates, update_jaxpr=jaxpr,
       update_consts=consts, dimension_numbers=dimension_numbers,
@@ -539,6 +566,8 @@ def scatter_sub(
   jaxpr, consts = lax._reduction_jaxpr(
       lax.sub, core.get_aval(lax._const(operand, 0))
   )
+  operand, scatter_indices, updates = core.standard_insert_pbroadcast(
+      operand, scatter_indices, updates)
   return scatter_sub_p.bind(
       operand,
       scatter_indices,
@@ -593,6 +622,8 @@ def scatter_mul(
   """
   jaxpr, consts = lax._reduction_jaxpr(lax.mul,
                                        core.get_aval(lax._const(operand, 1)))
+  operand, scatter_indices, updates = core.standard_insert_pbroadcast(
+      operand, scatter_indices, updates)
   return scatter_mul_p.bind(
       operand, scatter_indices, updates, update_jaxpr=jaxpr,
       update_consts=consts, dimension_numbers=dimension_numbers,
@@ -640,6 +671,8 @@ def scatter_min(
   """
   jaxpr, consts = lax._reduction_jaxpr(lax.min,
                                        core.get_aval(lax._const(operand, 0)))
+  operand, scatter_indices, updates = core.standard_insert_pbroadcast(
+      operand, scatter_indices, updates)
   return scatter_min_p.bind(
       operand, scatter_indices, updates, update_jaxpr=jaxpr,
       update_consts=consts, dimension_numbers=dimension_numbers,
@@ -687,6 +720,8 @@ def scatter_max(
   """
   jaxpr, consts = lax._reduction_jaxpr(lax.max,
                                        core.get_aval(lax._const(operand, 0)))
+  operand, scatter_indices, updates = core.standard_insert_pbroadcast(
+      operand, scatter_indices, updates)
   return scatter_max_p.bind(
       operand, scatter_indices, updates, update_jaxpr=jaxpr,
       update_consts=consts, dimension_numbers=dimension_numbers,
@@ -751,6 +786,8 @@ def scatter_apply(
     pass
   jaxpr, consts = lax._reduction_jaxpr(_apply, core.get_aval(lax._zero(operand)))
   # TODO: implement this via its own primitive so we can define appropriate autodiff rules.
+  operand, scatter_indices, unused = core.standard_insert_pbroadcast(
+      operand, scatter_indices, unused)
   return scatter_p.bind(
       operand, scatter_indices, unused, update_jaxpr=jaxpr,
       update_consts=consts, dimension_numbers=dimension_numbers,
@@ -834,6 +871,8 @@ def scatter(
     ...             mode=lax.GatherScatterMode.PROMISE_IN_BOUNDS)
     Array([0., 2., 3., 0., 4.], dtype=float32)
   """
+  operand, scatter_indices, updates = core.standard_insert_pbroadcast(
+      operand, scatter_indices, updates)
   return scatter_p.bind(
       operand, scatter_indices, updates, update_jaxpr=None,
       update_consts=(), dimension_numbers=dimension_numbers,
@@ -939,7 +978,7 @@ def index_in_dim(operand: Array | np.ndarray, index: int, axis: int = 0,
                  keepdims: bool = True) -> Array:
   """Convenience wrapper around :func:`lax.slice` to perform int indexing.
 
-  This is effectively equivalent to ``operand[..., start_index:limit_index:stride]``
+  This is effectively equivalent to ``operand[..., index]``
   with the indexing applied on the specified axis.
 
   Args:
@@ -997,7 +1036,8 @@ def index_in_dim(operand: Array | np.ndarray, index: int, axis: int = 0,
 
 def dynamic_slice_in_dim(operand: Array | np.ndarray,
                          start_index: ArrayLike,
-                         slice_size: int, axis: int = 0) -> Array:
+                         slice_size: int, axis: int = 0, *,
+                         allow_negative_indices: bool = True) -> Array:
   """Convenience wrapper around :func:`lax.dynamic_slice` applied to one dimension.
 
   This is roughly equivalent to the following Python indexing syntax applied
@@ -1008,6 +1048,10 @@ def dynamic_slice_in_dim(operand: Array | np.ndarray,
     start_index: the (possibly dynamic) start index
     slice_size: the static slice size
     axis: the axis along which to apply the slice (defaults to 0)
+    allow_negative_indices: boolean specifying whether negative indices are
+      allowed. If true, negative indices are taken relative to the end of the
+      array. If false, negative indices are out of bounds and the result is
+      implementation defined.
 
   Returns:
     An array containing the slice.
@@ -1046,16 +1090,20 @@ def dynamic_slice_in_dim(operand: Array | np.ndarray,
   """
   start_indices: list[ArrayLike] = [lax._const(start_index, 0)] * operand.ndim
   slice_sizes = list(operand.shape)
-
   axis = int(axis)
+  allow_negative = [False] * operand.ndim
+  allow_negative[axis] = allow_negative_indices
   start_indices[axis] = start_index
   slice_sizes[axis] = core._canonicalize_dimension(slice_size)
-  return dynamic_slice(operand, start_indices, slice_sizes)
+  return dynamic_slice(operand, start_indices, slice_sizes,
+                       allow_negative_indices=allow_negative)
 
 
 def dynamic_index_in_dim(operand: Array | np.ndarray,
                          index: int | Array,
-                         axis: int = 0, keepdims: bool = True) -> Array:
+                         axis: int = 0, keepdims: bool = True,
+                         *,
+                         allow_negative_indices: bool = True) -> Array:
   """Convenience wrapper around dynamic_slice to perform int indexing.
 
   This is roughly equivalent to the following Python indexing syntax applied
@@ -1067,6 +1115,10 @@ def dynamic_index_in_dim(operand: Array | np.ndarray,
     axis: the axis along which to apply the slice (defaults to 0)
     keepdims: boolean specifying whether the output should have the same rank as
       the input (default = True)
+    allow_negative_indices: boolean specifying whether negative indices are
+      allowed. If true, negative indices are taken relative to the end of the
+      array. If false, negative indices are out of bounds and the result is
+      implementation defined.
 
   Returns:
     An array containing the slice.
@@ -1098,7 +1150,8 @@ def dynamic_index_in_dim(operand: Array | np.ndarray,
     - :func:`jax.lax.dynamic_slice`
     - :func:`jax.lax.dynamic_slice_in_dim`
   """
-  result = dynamic_slice_in_dim(operand, index, 1, axis)
+  result = dynamic_slice_in_dim(operand, index, 1, axis,
+                                allow_negative_indices=allow_negative_indices)
   if keepdims:
     return result
   else:
@@ -1107,7 +1160,9 @@ def dynamic_index_in_dim(operand: Array | np.ndarray,
 
 def dynamic_update_slice_in_dim(operand: Array | np.ndarray,
                                 update: ArrayLike,
-                                start_index: ArrayLike, axis: int) -> Array:
+                                start_index: ArrayLike, axis: int,
+                                *,
+                                allow_negative_indices: bool = True) -> Array:
   """Convenience wrapper around :func:`dynamic_update_slice` to update
   a slice in a single ``axis``.
 
@@ -1116,6 +1171,10 @@ def dynamic_update_slice_in_dim(operand: Array | np.ndarray,
     update: an array containing the new values to write onto `operand`.
     start_index: a single scalar index
     axis: the axis of the update.
+    allow_negative_indices: boolean specifying whether negative indices are
+      allowed. If true, negative indices are taken relative to the end of the
+      array. If false, negative indices are out of bounds and the result is
+      implementation defined.
 
   Returns:
     The updated array
@@ -1164,12 +1223,16 @@ def dynamic_update_slice_in_dim(operand: Array | np.ndarray,
   axis = int(axis)
   start_indices: list[ArrayLike] = [lax._const(start_index, 0)] * lax._ndim(operand)
   start_indices[axis] = start_index
-  return dynamic_update_slice(operand, update, start_indices)
+  allow_negative = [False] * operand.ndim
+  allow_negative[axis] = allow_negative_indices
+  return dynamic_update_slice(operand, update, start_indices,
+                              allow_negative_indices=allow_negative)
 
 
 def dynamic_update_index_in_dim(operand: Array | np.ndarray,
                                 update: ArrayLike, index: ArrayLike,
-                                axis: int) -> Array:
+                                axis: int, *,
+                                allow_negative_indices: bool = True) -> Array:
   """Convenience wrapper around :func:`dynamic_update_slice` to update a slice
   of size 1 in a single ``axis``.
 
@@ -1178,6 +1241,10 @@ def dynamic_update_index_in_dim(operand: Array | np.ndarray,
     update: an array containing the new values to write onto `operand`.
     index: a single scalar index
     axis: the axis of the update.
+    allow_negative_indices: boolean specifying whether negative indices are
+      allowed. If true, negative indices are taken relative to the end of the
+      array. If false, negative indices are out of bounds and the result is
+      implementation defined.
 
   Returns:
     The updated array
@@ -1229,7 +1296,9 @@ def dynamic_update_index_in_dim(operand: Array | np.ndarray,
   if lax._ndim(update) != lax._ndim(operand):
     assert lax._ndim(update) + 1 == lax._ndim(operand)
     update = lax.expand_dims(update, (axis,))
-  return dynamic_update_slice_in_dim(operand, update, index, axis)
+  return dynamic_update_slice_in_dim(
+      operand, update, index, axis,
+      allow_negative_indices=allow_negative_indices)
 
 
 def _slice_shape_rule(operand, *, start_indices, limit_indices, strides):
@@ -1283,7 +1352,7 @@ def _get_sharding_for_varying_out_shape(out_shape, operand, name):
       operand.shape, out_shape, operand.sharding.spec):
     if (op_sh != out_sh and op_spec is not None and
         out_sh % _get_sub_spec_size(mesh, op_spec) != 0):
-      raise NotImplementedError(
+      raise core.ShardingTypeError(
           f"{name} on sharded dims where out dim ({out_sh}) is not divisble by"
           f" mesh axes ({_get_sub_spec_size(mesh, op_spec)}) with spec"
           f" ({op_spec}) is not implemented.")
@@ -1343,7 +1412,8 @@ def _slice_batching_rule(batched_args, batch_dims, *, start_indices,
   return out, bdim
 
 slice_p = standard_primitive(_slice_shape_rule, _input_dtype, 'slice',
-                             sharding_rule=_slice_sharding_rule)
+                             sharding_rule=_slice_sharding_rule,
+                             vma_rule=partial(core.standard_vma_rule, 'slice'))
 ad.deflinear2(slice_p, _slice_transpose_rule)
 batching.primitive_batchers[slice_p] = _slice_batching_rule
 # TODO(mvoz): A better slice rule for ragged prop, enforcing boundaries
@@ -1370,7 +1440,7 @@ def _slice_lower(ctx, x, *, start_indices, limit_indices, strides):
   aval_out, = ctx.avals_out
   out = mlir.slice_op(ctx, x, aval_out, start_indices=start_indices,
                       limit_indices=limit_indices, strides=strides)
-  return [mlir.lower_sharding_under_shit(ctx, out, aval_out)]
+  return [mlir.lower_with_sharding_in_types(ctx, out, aval_out)]
 
 mlir.register_lowering(slice_p, _slice_lower)
 
@@ -1426,7 +1496,8 @@ def _dynamic_slice_transpose_rule(t, operand, *start_indices, slice_sizes):
   if type(t) is ad_util.Zero:
     return [ad_util.Zero(operand.aval)] + [None] * len(start_indices)
   else:
-    zeros = lax.full(operand_shape, 0, operand_dtype)
+    zeros = lax.full(operand_shape, 0, operand_dtype,
+                     sharding=operand.aval.sharding)
     return ([dynamic_update_slice_p.bind(zeros, t, *start_indices)] +
             [None] * len(start_indices))
 
@@ -1508,7 +1579,8 @@ def _dynamic_slice_padding_rule(in_avals, out_avals, x, *starts_and_dyn,
 dynamic_slice_p = standard_primitive(
     _dynamic_slice_shape_rule, _dynamic_slice_dtype_rule, 'dynamic_slice',
     weak_type_rule=_argnum_weak_type(0),
-    sharding_rule=_dynamic_slice_sharding_rule)
+    sharding_rule=_dynamic_slice_sharding_rule,
+    vma_rule=partial(core.standard_vma_rule, 'dynamic_slice'))
 ad.primitive_jvps[dynamic_slice_p] = _dynamic_slice_jvp
 ad.primitive_transposes[dynamic_slice_p] = _dynamic_slice_transpose_rule
 batching.primitive_batchers[dynamic_slice_p] = _dynamic_slice_batching_rule
@@ -1523,7 +1595,7 @@ def _dynamic_slice_lower(ctx, x, *starts_and_dyn_sizes, slice_sizes):
   if dyn:
     aval_out = aval_out.update(shape=lax._merge_dyn_shape(slice_sizes, dyn))
   out = mlir.dynamic_slice(ctx, aval_out, x, start_indices=start_indices)
-  return [mlir.lower_sharding_under_shit(ctx, out, aval_out)]
+  return [mlir.lower_with_sharding_in_types(ctx, out, aval_out)]
 
 mlir.register_lowering(dynamic_slice_p, _dynamic_slice_lower)
 
@@ -1556,10 +1628,11 @@ def _dynamic_update_slice_shape_rule(operand, update, *start_indices):
 
 def _dynamic_update_slice_sharding_rule(operand, update, *start_indices):
   if operand.sharding != update.sharding:
-    raise TypeError(
+    raise core.ShardingTypeError(
         "dynamic_update_slice update sharding must be equal to operand"
-        f" sharding, got update sharding {update.sharding} for operand sharding"
-        f" {operand.sharding}.")
+        " sharding, got update sharding"
+        f" {update.str_short(mesh_axis_types=True)} for operand sharding"
+        f" {operand.str_short(mesh_axis_types=True)}.")
   return operand.sharding
 
 def _dynamic_update_slice_dtype_rule(operand, update, *start_indices):
@@ -1627,7 +1700,8 @@ def _dynamic_update_slice_batching_rule(batched_args, batch_dims):
 
 dynamic_update_slice_p = standard_primitive(
     _dynamic_update_slice_shape_rule, _dynamic_update_slice_dtype_rule,
-    'dynamic_update_slice', sharding_rule=_dynamic_update_slice_sharding_rule)
+    'dynamic_update_slice', sharding_rule=_dynamic_update_slice_sharding_rule,
+    vma_rule=partial(core.standard_vma_rule, 'dynamic_update_slice'))
 ad.primitive_jvps[dynamic_update_slice_p] = _dynamic_update_slice_jvp
 ad.primitive_transposes[dynamic_update_slice_p] = \
     _dynamic_update_slice_transpose_rule
@@ -1638,7 +1712,7 @@ def _dynamic_update_slice_lower(ctx, x, update, *start_indices):
   aval_out, = ctx.avals_out
   out = mlir.dynamic_update_slice(ctx, aval_out, x, update,
                                   start_indices=start_indices)
-  return [mlir.lower_sharding_under_shit(ctx, out, aval_out)]
+  return [mlir.lower_with_sharding_in_types(ctx, out, aval_out)]
 
 mlir.register_lowering(dynamic_update_slice_p, _dynamic_update_slice_lower)
 
@@ -1870,9 +1944,6 @@ def _gather_shape_computation(indices, dimension_numbers, slice_sizes):
               else next(indices_shape_gen) for i in range(output_shape_rank))
   return ans
 
-class GatherShardingError(Exception):
-  pass
-
 def _gather_sharding_rule(operand, indices, *, dimension_numbers,
                           slice_sizes, unique_indices, indices_are_sorted,
                           mode, fill_value):
@@ -1884,7 +1955,7 @@ def _gather_sharding_rule(operand, indices, *, dimension_numbers,
       all(s is None for s in operand.sharding.spec) and
       all(s is None for s in indices.sharding.spec)):
     return core.get_cur_mesh_sharding()
-  raise GatherShardingError(
+  raise core.ShardingTypeError(
       "Use `.at[...].get(out_sharding=)` to provide output PartitionSpec for"
       " the gather indexing.")
 
@@ -2068,7 +2139,8 @@ def _gather_pad_rule(in_avals, out_avals, operand, indices, *,
 
 gather_p = standard_primitive(
     _gather_shape_rule, _gather_dtype_rule, 'gather',
-    weak_type_rule=_argnum_weak_type(0), sharding_rule=_gather_sharding_rule)
+    weak_type_rule=_argnum_weak_type(0), sharding_rule=_gather_sharding_rule,
+    vma_rule=partial(core.standard_vma_rule, 'gather'))
 ad.defjvp(gather_p, _gather_jvp_rule, None)
 ad.primitive_transposes[gather_p] = _gather_transpose_rule
 batching.primitive_batchers[gather_p] = _gather_batching_rule
@@ -2550,7 +2622,8 @@ def _scatter_batching_rule(scatter_op, batched_args, batch_dims, *,
 
 scatter_add_p = standard_primitive(
     _scatter_shape_rule, _scatter_dtype_rule, 'scatter-add',
-    weak_type_rule=_argnum_weak_type(0))
+    weak_type_rule=_argnum_weak_type(0),
+    vma_rule=partial(core.standard_vma_rule, 'scatter_add'))
 ad.primitive_jvps[scatter_add_p] = partial(_scatter_addsub_jvp, scatter_add_p)
 ad.primitive_transposes[scatter_add_p] = partial(_scatter_addsub_transpose_rule, scatter_add_p)
 batching.primitive_batchers[scatter_add_p] = (
@@ -2561,6 +2634,7 @@ scatter_sub_p = standard_primitive(
     _scatter_dtype_rule,
     "scatter-sub",
     weak_type_rule=_argnum_weak_type(0),
+    vma_rule=partial(core.standard_vma_rule, 'scatter_sub')
 )
 ad.primitive_jvps[scatter_sub_p] = partial(_scatter_addsub_jvp, scatter_sub_p)
 ad.primitive_transposes[scatter_sub_p] = partial(_scatter_addsub_transpose_rule, scatter_sub_p)
@@ -2570,7 +2644,8 @@ batching.primitive_batchers[scatter_sub_p] = partial(
 
 scatter_mul_p = standard_primitive(
     _scatter_shape_rule, _scatter_dtype_rule, 'scatter-mul',
-    weak_type_rule=_argnum_weak_type(0))
+    weak_type_rule=_argnum_weak_type(0),
+    vma_rule=partial(core.standard_vma_rule, 'scatter_mul'))
 
 def _scatter_mul_jvp_rhs(g, x, i, y, *, dimension_numbers,
                          indices_are_sorted, unique_indices, mode, **kw):
@@ -2699,14 +2774,16 @@ def _scatter_extremal_jvp(scatter_op, primals, tangents, update_jaxpr,
 
 scatter_min_p = standard_primitive(
     _scatter_shape_rule, _scatter_dtype_rule, 'scatter-min',
-    weak_type_rule=_argnum_weak_type(0))
+    weak_type_rule=_argnum_weak_type(0),
+    vma_rule=partial(core.standard_vma_rule, 'scatter_min'))
 batching.primitive_batchers[scatter_min_p] = (
   partial(_scatter_batching_rule, scatter_min_p))
 ad.primitive_jvps[scatter_min_p] = partial(_scatter_extremal_jvp, scatter_min_p)
 
 scatter_max_p = standard_primitive(
     _scatter_shape_rule, _scatter_dtype_rule, 'scatter-max',
-    weak_type_rule=_argnum_weak_type(0))
+    weak_type_rule=_argnum_weak_type(0),
+    vma_rule=partial(core.standard_vma_rule, 'scatter_max'))
 batching.primitive_batchers[scatter_max_p] = (
   partial(_scatter_batching_rule, scatter_max_p))
 ad.primitive_jvps[scatter_max_p] = partial(_scatter_extremal_jvp, scatter_max_p)
@@ -2864,7 +2941,8 @@ def _scatter_transpose_rule(t, operand, indices, updates, *,
 
 scatter_p = standard_primitive(
     _scatter_shape_rule, _scatter_dtype_rule, 'scatter',
-    weak_type_rule=_argnum_weak_type(0))
+    weak_type_rule=_argnum_weak_type(0),
+    vma_rule=partial(core.standard_vma_rule, 'scatter'))
 ad.primitive_jvps[scatter_p] = _scatter_jvp
 ad.primitive_transposes[scatter_p] = _scatter_transpose_rule
 batching.primitive_batchers[scatter_p] = (
@@ -3038,7 +3116,8 @@ mlir.register_lowering(
 
 def _dynamic_slice_indices(
     operand: Array | np.ndarray,
-    start_indices: Array | np.ndarray | Sequence[ArrayLike]
+    start_indices: Array | np.ndarray | Sequence[ArrayLike],
+    allow_negative_indices: bool | Sequence[bool],
   ) -> list[ArrayLike]:
   # Normalize the start_indices w.r.t. operand.shape
   if len(start_indices) != operand.ndim:
@@ -3051,20 +3130,39 @@ def _dynamic_slice_indices(
                        .format(start_indices.shape))  # type: ignore[union-attr]
     start_indices = list(start_indices)
   result: list[ArrayLike] = []
+  if isinstance(allow_negative_indices, bool):
+    allow_negative_indices = [allow_negative_indices] * len(start_indices)
   # Loop to correct for negative indices.
-  for i, d in zip(start_indices, operand.shape):
+  for i, d, allow_negative_index in zip(
+      start_indices, operand.shape, allow_negative_indices
+  ):
     # If i is unsigned, then it cannot be negative.
     if dtypes.issubdtype(_dtype(i), np.unsignedinteger):
       result.append(i)
       continue
     # Test whether i and d are static to avoid unnecessary staging.
     if isinstance(i, (int, np.integer)) and core.is_constant_dim(d):
-      result.append(lax.convert_element_type(i + d if i < 0 else i, _dtype(i)))
+      if allow_negative_index:
+        result.append(lax.convert_element_type(i + d if i < 0 else i, _dtype(i)))
+      elif i < 0:
+        raise ValueError(f"Index {i} is out of bounds for dimension {d} if "
+                          "allow_negative_indices=False")
+      else:
+        result.append(lax.convert_element_type(i, _dtype(i)))
       continue
     d = core.dimension_as_value(d)
     if isinstance(i, (int, np.integer)):
-      result.append(i + lax.convert_element_type(d, _dtype(i)) if i < 0 else i)
+      if allow_negative_index:
+        result.append(i + lax.convert_element_type(d, _dtype(i)) if i < 0 else i)
+      elif i < 0:
+        raise ValueError(f"Index {i} is out of bounds for dimension {d} if "
+                          "allow_negative_indices=False")
+      else:
+        result.append(i)
       continue
-    d_arr = lax.convert_element_type(d, _dtype(i))
-    result.append(lax.select(i < 0, i + d_arr, i))
+    if allow_negative_index:
+      d_arr = lax.convert_element_type(d, _dtype(i))
+      result.append(lax.select(i < 0, i + d_arr, i))
+    else:
+      result.append(i)
   return result
