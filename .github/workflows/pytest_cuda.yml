@@ -58,8 +58,7 @@ jobs:
     runs-on: ${{ inputs.runner }}
     # Test the oldest and newest supported CUDA versions.
     container:  ${{ (contains(inputs.cuda, '12.1') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build-cuda12.1-cudnn9.8:latest') ||
-                (contains(inputs.cuda, '12.8') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build-cuda12.8-cudnn9.8:latest') ||
-                (contains(inputs.cuda, 'CUDA pip') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest') }}
+                (contains(inputs.cuda, '12.8') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build-cuda12.8-cudnn9.8:latest')}}
     name: "Pytest CUDA (${{ inputs.runner }}, CUDA ${{ inputs.cuda }}, Python ${{ inputs.python }}, x64=${{ inputs.enable-x64 }})"
     env:
       JAXCI_HERMETIC_PYTHON_VERSION: "${{ inputs.python }}"
