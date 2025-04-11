@@ -9,7 +9,7 @@ jobs:
   jax-build-and-test:
     runs-on: linux-x86-ct5lp-224-8tpu
     container:
-      image: us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/quoct-test-ml-build:latest
+      image: us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest
 
     env:
       JAXCI_HERMETIC_PYTHON_VERSION: 3.11
