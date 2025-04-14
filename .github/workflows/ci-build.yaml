@@ -79,6 +79,11 @@ jobs:
         pip install uv~=0.5.30
         uv pip install --system .[minimum-jaxlib] -r build/test-requirements.txt
 
+    - name: Wait For Connection
+      uses: google-ml-infra/actions/ci_connection@main
+      with:
+        halt-dispatch-input: ${{ inputs.halt-for-connection }}
+
     - name: Run tests
       env:
         JAX_NUM_GENERATED_CASES: ${{ matrix.num_generated_cases }}
