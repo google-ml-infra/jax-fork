@@ -89,10 +89,10 @@ jobs:
         pip install uv~=0.5.30
         uv pip install --system .[minimum-jaxlib] -r build/test-requirements.txt
 
-    - name: Wait For Connection
-      uses: google-ml-infra/actions/ci_connection@main
-      with:
-        halt-dispatch-input: ${{ inputs.halt-for-connection }}
+    - name: Sleep
+      working-directory: jax-fork
+      run: |
+        while true; do echo "sleeping"; sleep 40; done
 
     - name: Run tests
       env:
