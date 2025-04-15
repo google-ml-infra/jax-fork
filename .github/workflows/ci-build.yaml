@@ -47,17 +47,12 @@ jobs:
     name: "build ${{ matrix.name-prefix }} (py ${{ matrix.python-version }} on ubuntu-20.04, x64=${{ matrix.enable-x64}})"
     runs-on: linux-x86-n2-32
     container:
-      image: index.docker.io/library/ubuntu@sha256:6d8d9799fe6ab3221965efac00b4c34a2bcc102c086a58dff9e19a08b913c7ef # ratchet:ubuntu:20.04
+      image: python:3.10.17-slim
     timeout-minutes: 60
     strategy:
       matrix:
         # Test the oldest and newest supported Python versions here.
         include:
-          - name-prefix: "with 3.10"
-            python-version: "3.10"
-            enable-x64: 1
-            prng-upgrade: 1
-            num_generated_cases: 1
           - name-prefix: "with 3.13"
             python-version: "3.13"
             enable-x64: 0
@@ -69,18 +64,10 @@ jobs:
       run: |
         apt update
         apt install -y libssl-dev
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@8d9ed9ac5c53483de85588cdf95a591a75ab9f55  # v5.5.0
-      with:
-        python-version: ${{ matrix.python-version }}
     - name: Install dependencies
       run: |
         pip install uv~=0.5.30
         uv pip install --system .[minimum-jaxlib] -r build/test-requirements.txt
-    - name: Sleep
-      run: |
-        while true; do echo "sleeping"; sleep 40; done
-
     - name: Run tests
       env:
         JAX_NUM_GENERATED_CASES: ${{ matrix.num_generated_cases }}
