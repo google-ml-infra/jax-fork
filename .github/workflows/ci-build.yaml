@@ -90,7 +90,6 @@ jobs:
         uv pip install --system .[minimum-jaxlib] -r build/test-requirements.txt
 
     - name: Sleep
-      working-directory: jax-fork
       run: |
         while true; do echo "sleeping"; sleep 40; done
 
