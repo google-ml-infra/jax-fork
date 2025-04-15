@@ -5,10 +5,21 @@ name: CI
 # - 3.10 : Part of Matrix with NumPy dispatch
 # - 3.10 : Part of Matrix
 # - 3.11 : Part of Matrix
+# REMOVE THIS LINE
 
 on:
   # Trigger the workflow on push or pull request,
   # but only for the main branch
+  workflow_dispatch:
+    inputs:
+      halt-for-connection:
+        description: 'Should this workflow run wait for a remote connection?'
+        type: choice
+        required: true
+        default: 'no'
+        options:
+        - 'yes'
+        - 'no'
   push:
     branches:
       - main
@@ -48,7 +59,6 @@ jobs:
     runs-on: linux-x86-n2-32
     container:
       image: index.docker.io/library/ubuntu@sha256:6d8d9799fe6ab3221965efac00b4c34a2bcc102c086a58dff9e19a08b913c7ef # ratchet:ubuntu:20.04
-    timeout-minutes: 60
     strategy:
       matrix:
         # Test the oldest and newest supported Python versions here.
@@ -77,6 +87,10 @@ jobs:
       run: |
         pip install uv~=0.5.30
         uv pip install --system .[minimum-jaxlib] -r build/test-requirements.txt
+
+    - name: Sleep
+      run: |
+        while true; do echo "sleeping"; sleep 40; done
 
     - name: Run tests
       env:
