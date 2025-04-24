@@ -15,7 +15,8 @@ concurrency:
 jobs:
   build:
 
-    runs-on: ubuntu-latest
+    runs-on: linux-x86-n2-32
+    container: us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest
     strategy:
       matrix:
         python-version: [3.11]
