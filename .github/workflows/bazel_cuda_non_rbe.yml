@@ -18,7 +18,7 @@ on:
         description: "Which runner should the workflow run on?"
         type: string
         required: true
-        default: "linux-x86-n2-16"
+        default: "linux-x86-n2-32"
       python:
         description: "Which python version to test?"
         type: string
