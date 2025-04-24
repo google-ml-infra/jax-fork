@@ -26,7 +26,6 @@ concurrency:
 
 jobs:
   run_tests:
-    if: github.event.repository.fork == false
     runs-on: ${{ matrix.runner }}
     container: ${{ (contains(matrix.runner, 'linux-x86') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest') ||
                    (contains(matrix.runner, 'linux-arm64') && 'us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build-arm64:latest') }}
@@ -37,7 +36,7 @@ jobs:
     strategy:
       matrix:
         python: ["3.10", "3.13"]
-        runner: ["linux-x86-n2-16", "linux-arm64-c4a-16"]
+        runner: ["linux-x86-n2-32"]
         enable-x_64: [1, 0]
         exclude:
             # Exclude x64=1 on the oldest Python and x64=0 on the newest Python. As long as we have
