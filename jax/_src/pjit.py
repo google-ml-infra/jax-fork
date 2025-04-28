@@ -1921,19 +1921,21 @@ def pjit_staging_rule(trace, *args, **params):
       # shapes are enabled, use eval_jaxpr, which uses the tracing machinery,
       # but redundantly performs abstract evaluation again.
       with core.set_current_trace(trace):
-        return core.eval_jaxpr(jaxpr.jaxpr, jaxpr.consts, *args,
-                                      propagate_source_info=False)
+        out = core.eval_jaxpr(jaxpr.jaxpr, jaxpr.consts, *args,
+                              propagate_source_info=False)
     else:
-      return pe.inline_jaxpr_into_trace(
+      out = pe.inline_jaxpr_into_trace(
           trace, jaxpr.jaxpr, jaxpr.consts, *args)
+    source_info = source_info_util.current()
+    return [trace.to_jaxpr_tracer(x, source_info) for x in out]
 
   jaxpr = params['jaxpr']
+  source_info = source_info_util.current()
   if config.dynamic_shapes.value:
     jaxpr, in_fwd, out_shardings, out_layouts = _pjit_forwarding(
         jaxpr, params['out_shardings'], params['out_layouts'])
     params = dict(params, jaxpr=jaxpr, out_shardings=out_shardings,
                   out_layouts=out_layouts)
-    source_info = source_info_util.current()
     out_tracers = []
     for aval in _out_type(jaxpr):
       if type(aval) is core.DShapedArray:
@@ -1952,7 +1954,7 @@ def pjit_staging_rule(trace, *args, **params):
     assert next(out_tracers_, None) is None
   elif any(isinstance(c, core.MutableArray) for c in jaxpr.consts):
     jaxpr, consts = pxla._move_mutable_consts(jaxpr)
-    consts = map(trace.new_const, consts)
+    consts = map(partial(trace.new_const, source_info=source_info), consts)
     in_shardings = (*params['in_shardings'],) + (UNSPECIFIED,) * len(consts)
     in_layouts = (*params['in_layouts'],) + (None,) * len(consts)
     donated_invars = (*params['donated_invars'],) + (False,) * len(consts)
@@ -2044,12 +2046,19 @@ def _pjit_cached_lower_jaxpr_to_fun(ctx: mlir.LoweringRuleContext,
     # TODO(b/228598865): inlined calls cannot have shardings set directly on the
     # inputs or outputs because they are lost during MLIR->HLO conversion.
     # using_sharding_annotation=False means we add an identity operation instead.
+    num_callbacks = len(mod_ctx.host_callbacks)
     func = mlir.lower_jaxpr_to_fun(
         mod_ctx, name, jaxpr, effects, ctx.name_stack,
         arg_shardings=arg_shardings, result_shardings=result_shardings,
         use_sharding_annotations=False, api_name=api_name,
         arg_layouts=in_layouts, result_layouts=out_layouts)
-    mod_ctx.cached_primitive_lowerings[key] = func
+
+    # If this Jaxpr includes callbacks, we can't cache the lowering because
+    # on TPU every callback must have a globally unique channel, but the
+    # channel gets assigned during lowering.
+    has_callbacks = len(mod_ctx.host_callbacks) > num_callbacks
+    if not has_callbacks or "tpu" not in mod_ctx.platforms:
+      mod_ctx.cached_primitive_lowerings[key] = func
   return func
 
 

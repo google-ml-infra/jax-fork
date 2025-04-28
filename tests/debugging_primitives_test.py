@@ -16,7 +16,7 @@ import functools
 import textwrap
 import unittest
 
-from absl.testing import absltest
+from absl.testing import absltest, parameterized
 import jax
 from jax import lax
 from jax.experimental import pjit
@@ -25,7 +25,7 @@ from jax._src import ad_checkpoint
 from jax._src import debugging
 from jax._src import dispatch
 from jax._src import test_util as jtu
-from jax._src.lib import jaxlib_extension_version
+from jax.sharding import PartitionSpec as P
 import jax.numpy as jnp
 import numpy as np
 
@@ -274,6 +274,28 @@ class DebugPrintTest(jtu.JaxTestCase):
       jax.jit(f)(x)
       jax.effects_barrier()
     self.assertEqual(output(), "[1.23 2.35 0.  ]\n")
+
+  @parameterized.parameters([False, True])
+  def test_debug_print_in_unrolled_loop(self, use_jit):
+    def body(i, _):
+      jax.debug.print("{}", i)
+    if use_jit:
+      body = jax.jit(body)
+    @jax.jit
+    def f():
+      return jax.lax.fori_loop(0, 4, body, None, unroll=2)
+    with jtu.capture_stdout() as output:
+      f()
+      jax.effects_barrier()
+    actual = tuple(sorted(map(int, output().splitlines())))
+    self.assertEqual(actual, tuple(range(4)))
+
+  def test_debug_print_extended_dtype(self):
+    def f(k):
+      jax.debug.print("{}", k)
+    with jtu.capture_stdout():
+      f(jax.random.key(0))  # doesn't crash
+      jax.effects_barrier()
 
 
 @jtu.thread_unsafe_test_class()  # printing isn't thread-safe
@@ -1121,6 +1143,28 @@ class VisualizeShardingTest(jtu.JaxTestCase):
     """)
     self.assertEqual(output(), expected)
 
+  def test_visualize_sharding_shard_map(self):
+    mesh = jtu.create_mesh((2,), 'x')
+
+    def f():
+      a = jnp.zeros(1000)
+      debugging.visualize_array_sharding(a)
+      return a
+
+    with jtu.capture_stdout() as output:
+      f()  # doesn't crash
+
+    with jtu.capture_stdout() as output:
+      jax.jit(f, out_shardings=jax.NamedSharding(mesh, P('x')))()  # doesn't crash
+
+    with jtu.capture_stdout() as output:
+      jax.shard_map(f, mesh=mesh, in_specs=P(None), out_specs=P("x"))()  # doesn't crash
+
+    with jtu.capture_stdout() as output:
+      jax.shard_map(f, mesh=mesh, in_specs=P(None), out_specs=P("x"),
+                    check_vma=False)()  # doesn't crash
+
+
 class InspectShardingTest(jtu.JaxTestCase):
 
   def test_inspect_sharding_is_called_in_pjit(self):
@@ -1221,11 +1265,6 @@ class PartitionedDebugCallbackTest(jtu.JaxTestCase):
     if (jtu.device_under_test() not in ("cpu", "gpu")):
       raise unittest.SkipTest(
           f"Test requires CPU or GPU devices. Got {jtu.device_under_test()}"
-      )
-    if jaxlib_extension_version < 329:
-      self.skipTest(
-          "Requires jaxlib_extension_version >= 329. Got"
-          f" {jaxlib_extension_version}."
       )
     if len(jax.devices()) < 2:
       raise unittest.SkipTest("Test requires >= 2 devices.")

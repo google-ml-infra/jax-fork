@@ -33,7 +33,7 @@ The table below shows all supported platforms and installation options. Check if
 | CPU              | {ref}`yes <install-cpu>`              | {ref}`yes <install-cpu>`        | {ref}`jax≤0.4.38 only <install-cpu>`  | {ref}`yes <install-cpu>`              | {ref}`yes <install-cpu>` | {ref}`yes <install-cpu>`                 |
 | NVIDIA GPU       | {ref}`yes <install-nvidia-gpu>`       | {ref}`yes <install-nvidia-gpu>` | no                                    | n/a                                   | no                       | {ref}`experimental <install-nvidia-gpu>` |
 | Google Cloud TPU | {ref}`yes <install-google-tpu>`       | n/a                             | n/a                                   | n/a                                   | n/a                      | n/a                                      |
-| AMD GPU          | {ref}`experimental <install-amd-gpu>` | no                              | {ref}`experimental <install-mac-gpu>` | n/a                                   | no                       | no                                       |
+| AMD GPU          | {ref}`yes <install-amd-gpu>`          | no                              | {ref}`experimental <install-mac-gpu>` | n/a                                   | no                       | no                                       |
 | Apple GPU        | n/a                                   | no                              | n/a                                   | {ref}`experimental <install-mac-gpu>` | n/a                      | n/a                                      |
 | Intel GPU        | {ref}`experimental <install-intel-gpu>`| n/a                            | n/a                                   | n/a                                     | no                       | no                                       |
 
@@ -226,10 +226,10 @@ refer to
 (install-amd-gpu)=
 ## AMD GPU (Linux)
 
-JAX has experimental ROCm support. There are two ways to install JAX:
+AMD GPU support is provided by a ROCm JAX plugin supported by AMD.
 
-* Use [AMD's Docker container](https://hub.docker.com/r/rocm/jax-community/tags); or
-* Build from source. Refer to the section [Additional notes for building a ROCm jaxlib for AMD GPUs](https://docs.jax.dev/en/latest/developer.html#additional-notes-for-building-a-rocm-jaxlib-for-amd-gpus).
+There are several ways to use JAX on AMDGPU devices.
+Please see [AMD's instructions](https://github.com/jax-ml/jax/blob/main/build/rocm/README.md) for details.
 
 (install-intel-gpu)=
 ## Intel GPU
@@ -281,22 +281,34 @@ Unlike the instructions for installing a JAX release, here we name all of JAX's
 packages explicitly on the command line, so `pip` will upgrade them if a newer
 version is available.
 
+JAX publishes nightlies, release candidates(RCs), and releases to several non-pypi [PEP 503](https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/) indexes.
+
+All JAX packages can be reached from the index `https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/`
+as well as PyPI mirrored packages. This additional mirroring enables nightly
+installation to use --index (-i) as the install method with pip.
+
+**Note:** The unified index could return an RC or release as the newest version
+even with `--pre` immediately after a release before the newest nightly is
+rebuilt. If automation or testing must be done against nightlies or you cannot
+use our full index, use the extra index `https://us-python.pkg.dev/ml-oss-artifacts-published/jax-public-nightly-artifacts-registry/simple/`
+which only contains nightly artifacts.
+
 - CPU only:
 
 ```bash
-pip install -U --pre jax jaxlib -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
+pip install -U --pre jax jaxlib -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
 ```
 
 - Google Cloud TPU:
 
 ```bash
-pip install -U --pre jax jaxlib libtpu requests -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+pip install -U --pre jax jaxlib libtpu requests -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
 ```
 
 - NVIDIA GPU (CUDA 12):
 
 ```bash
-pip install -U --pre jax jaxlib "jax-cuda12-plugin[with-cuda]" jax-cuda12-pjrt -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
+pip install -U --pre jax jaxlib "jax-cuda12-plugin[with-cuda]" jax-cuda12-pjrt -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
 ```
 
 - NVIDIA GPU (CUDA 12) legacy:
@@ -322,10 +334,10 @@ still be installed directly via the URLs here. For example:
 
 ```bash
 # Install jaxlib on CPU via the wheel archive
-pip install "jax[cpu]==0.3.25" -f https://storage.googleapis.com/jax-releases/jax_releases.html
+pip install "jax[cpu]==0.3.25" -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
 
 # Install the jaxlib 0.3.25 CPU wheel directly
-pip install jaxlib==0.3.25 -f https://storage.googleapis.com/jax-releases/jax_releases.html
+pip install jaxlib==0.3.25 -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
 ```
 For specific older GPU wheels, be sure to use the `jax_cuda_releases.html` URL; for example
 ```bash

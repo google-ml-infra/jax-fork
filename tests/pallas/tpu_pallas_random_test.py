@@ -19,7 +19,7 @@ from jax import random as jax_random
 from jax._src import test_util as jtu
 from jax._src.pallas.mosaic import random as plrandom
 from jax.experimental import pallas as pl
-from jax.experimental import shard_map
+from jax._src import shard_map
 from jax.experimental.pallas import tpu as pltpu
 from jax.experimental.pallas.ops.tpu.random import philox  # pylint: disable=unused-import  # noqa: F401
 from jax.experimental.pallas.ops.tpu.random import threefry  # pylint: disable=unused-import  # noqa: F401
@@ -117,7 +117,7 @@ class PRNGTest(jtu.JaxTestCase):
     o_shape = jax.ShapeDtypeStruct((8, 128), jnp.float32)
     result = pl.pallas_call(
         body,
-        in_specs=[pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.SMEM)],
+        in_specs=[pl.BlockSpec(memory_space=pltpu.SMEM)],
         out_shape=o_shape,
     )(key)
     self.assertGreaterEqual(jnp.min(result), 0)
@@ -135,7 +135,7 @@ class PRNGTest(jtu.JaxTestCase):
     o_shape = jax.ShapeDtypeStruct((8, 128), jnp.float32)
     result = pl.pallas_call(
         body,
-        in_specs=[pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.SMEM)],
+        in_specs=[pl.BlockSpec(memory_space=pltpu.SMEM)],
         out_shape=o_shape,
     )(key)
     self.assertGreaterEqual(jnp.min(result), 0)
@@ -143,7 +143,9 @@ class PRNGTest(jtu.JaxTestCase):
 
   def test_key_data(self):
     def body(key_ref, o_ref):
-      o_ref[...] = jax.random.key_data(key_ref[...])
+      x0, x1 = plrandom.unwrap_pallas_seed(key_ref[...])
+      o_ref[0, 0] = x0
+      o_ref[0, 1] = x1
     rbg_key = jax_random.key(0, impl="rbg")
     key = plrandom.to_pallas_key(rbg_key)
     expected_key_data = jax.random.key_data(key)
@@ -151,10 +153,11 @@ class PRNGTest(jtu.JaxTestCase):
                                    expected_key_data.dtype)
     result = pl.pallas_call(
         body,
-        in_specs=[pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.SMEM)],
+        in_specs=[pl.BlockSpec(memory_space=pltpu.SMEM)],
+        out_specs=pl.BlockSpec(memory_space=pltpu.SMEM),
         out_shape=o_shape,
     )(key)
-    self.assertEqual(result, expected_key_data)
+    self.assertArraysEqual(result, expected_key_data)
 
   def test_fold_in(self):
     # Test that folding in a value results in different random numbers.
@@ -174,7 +177,7 @@ class PRNGTest(jtu.JaxTestCase):
     o_shape = jax.ShapeDtypeStruct((2, 8, 128), jnp.float32)
     result = pl.pallas_call(
         body,
-        in_specs=[pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.SMEM)],
+        in_specs=[pl.BlockSpec(memory_space=pltpu.SMEM)],
         out_shape=o_shape,
     )(key)
     result_a = result[0]
@@ -208,7 +211,7 @@ class BlockInvarianceTest(parameterized.TestCase):
 
     global_key = jax_random.key(0, impl="pallas_tpu")
     o_shape = jnp.ones((64, 512), dtype=jnp.float32)
-    key_spec = pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.SMEM)
+    key_spec = pl.BlockSpec(memory_space=pltpu.SMEM)
     out_spec = pl.BlockSpec((16, 128), lambda i, j: (i, j))
     result_16x128 = pl.pallas_call(
         make_kernel_body(index_map=lambda i, j: (i, j)),
@@ -254,7 +257,7 @@ class ThreefryTest(parameterized.TestCase):
       # TODO(justinfu): support passing keys into VMEM.
       result = pl.pallas_call(
           body,
-          in_specs=[pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.VMEM)],
+          in_specs=[pl.BlockSpec(memory_space=pltpu.VMEM)],
           out_shape=o_shape,
       )(jax.random.key_data(threefry_key))
       jax_result = jax_random.uniform(
@@ -303,7 +306,7 @@ class ThreefryTest(parameterized.TestCase):
           mesh=mesh,
           in_specs=partition,
           out_specs=partition,
-          check_rep=False,
+          check_vma=False,
       )
       jax_gen = generate(key_jax)
       pl_gen = generate(key_pallas)

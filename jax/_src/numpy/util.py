@@ -27,8 +27,8 @@ from jax._src.lax import lax
 from jax._src.lib import xla_client as xc
 from jax._src.sharding_impls import SingleDeviceSharding
 from jax._src.util import safe_zip, safe_map, set_module
-from jax._src.typing import (Array, ArrayLike, DimSize, DType, DTypeLike,
-                             Shape, SupportsNdim, SupportsShape, SupportsSize)
+from jax._src.typing import (
+    Array, ArrayLike, DimSize, Shape, SupportsNdim, SupportsShape, SupportsSize)
 from jax.sharding import Sharding
 
 import numpy as np
@@ -124,11 +124,6 @@ def promote_dtypes_complex(*args: ArrayLike) -> list[Array]:
           for x in args]
 
 
-def _complex_elem_type(dtype: DTypeLike) -> DType:
-  """Returns the float type of the real/imaginary parts of a complex dtype."""
-  return np.abs(np.zeros((), dtype)).dtype
-
-
 def _arraylike(x: ArrayLike) -> bool:
   return (isinstance(x, np.ndarray) or isinstance(x, Array) or
           hasattr(x, '__jax_array__') or np.isscalar(x))
@@ -139,6 +134,10 @@ def _arraylike_asarray(x: Any) -> Array:
   if hasattr(x, '__jax_array__'):
     x = x.__jax_array__()
   return lax.asarray(x)
+
+
+def _check_jax_array_protocol(x: Any) -> Any:
+  return x.__jax_array__() if hasattr(x, '__jax_array__') else x
 
 
 @overload
@@ -223,6 +222,7 @@ def check_for_prngkeys(fun_name: str, *args: Any):
 def promote_args(fun_name: str, *args: ArrayLike) -> list[Array]:
   """Convenience function to apply Numpy argument shape and dtype promotion."""
   check_arraylike(fun_name, *args)
+  args = tuple(_check_jax_array_protocol(arg) for arg in args)
   _check_no_float0s(fun_name, *args)
   check_for_prngkeys(fun_name, *args)
   return promote_shapes(fun_name, *promote_dtypes(*args))
@@ -230,6 +230,7 @@ def promote_args(fun_name: str, *args: ArrayLike) -> list[Array]:
 
 def promote_args_numeric(fun_name: str, *args: ArrayLike) -> list[Array]:
   check_arraylike(fun_name, *args)
+  args = tuple(_check_jax_array_protocol(arg) for arg in args)
   _check_no_float0s(fun_name, *args)
   check_for_prngkeys(fun_name, *args)
   return promote_shapes(fun_name, *promote_dtypes_numeric(*args))
@@ -240,9 +241,17 @@ def promote_args_inexact(fun_name: str, *args: ArrayLike) -> list[Array]:
 
   Promotes non-inexact types to an inexact type."""
   check_arraylike(fun_name, *args)
+  args = tuple(_check_jax_array_protocol(arg) for arg in args)
   _check_no_float0s(fun_name, *args)
   check_for_prngkeys(fun_name, *args)
   return promote_shapes(fun_name, *promote_dtypes_inexact(*args))
+
+
+def canonicalize_device_to_sharding(device: xc.Device | Sharding | None
+                                    ) -> Sharding | None:
+  if isinstance(device, xc.Device):
+    return SingleDeviceSharding(device)
+  return device
 
 
 @partial(api.jit, inline=True)
@@ -287,6 +296,7 @@ def _broadcast_to(arr: ArrayLike, shape: DimSize | Shape, sharding=None
 # materialize the broadcast forms of scalar arguments.
 @api.jit
 def _where(condition: ArrayLike, x: ArrayLike, y: ArrayLike) -> Array:
+  condition, x, y = ensure_arraylike("where", condition, x, y)
   if x is None or y is None:
     raise ValueError("Either both or neither of the x and y arguments should "
                      "be provided to jax.numpy.where, got {} and {}."

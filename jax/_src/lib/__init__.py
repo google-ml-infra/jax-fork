@@ -85,13 +85,24 @@ cpu_feature_guard.check_cpu_features()
 
 import jaxlib.lapack as lapack  # noqa: F401
 import jaxlib.utils as utils  # noqa: F401
-import jaxlib.xla_extension as xla_extension  # noqa: F401
-from jaxlib.xla_extension import guard_lib as guard_lib  # noqa: F401
-from jaxlib.xla_extension import jax_jit as jax_jit  # noqa: F401
-from jaxlib.xla_extension import pmap_lib as pmap_lib  # noqa: F401
-from jaxlib.xla_extension import pytree as pytree  # noqa: F401
 
-from jaxlib.xla_extension import Device as Device  # noqa: F401
+if version >= (0, 6, 1):
+  import jaxlib._jax as _jax  # noqa: F401
+  from jaxlib._jax import guard_lib as guard_lib  # noqa: F401
+  from jaxlib._jax import jax_jit as jax_jit  # noqa: F401
+  from jaxlib._jax import pmap_lib as pmap_lib  # noqa: F401
+  from jaxlib._jax import pytree as pytree  # noqa: F401
+  from jaxlib._jax import Device as Device  # noqa: F401
+  from jaxlib import _profiler as _profiler  # noqa: F401
+else:
+  import jaxlib.xla_extension as _jax  # type: ignore  # pytype: disable=import-error  # noqa: F401
+  from jaxlib.xla_extension import guard_lib as guard_lib  # type: ignore  # pytype: disable=import-error  # noqa: F401
+  from jaxlib.xla_extension import jax_jit as jax_jit  # type: ignore  # pytype: disable=import-error  # noqa: F401
+  from jaxlib.xla_extension import pmap_lib as pmap_lib  # type: ignore  # pytype: disable=import-error  # noqa: F401
+  from jaxlib.xla_extension import pytree as pytree  # type: ignore  # pytype: disable=import-error  # noqa: F401
+  from jaxlib.xla_extension import Device as Device  # type: ignore  # pytype: disable=import-error  # noqa: F401
+  from jaxlib.xla_extension import profiler as _profiler  # type: ignore  # pytype: disable=import-error  # noqa: F401
+
 
 import jaxlib.xla_client as xla_client  # noqa: F401
 
@@ -102,11 +113,7 @@ import jaxlib.xla_client as xla_client  # noqa: F401
 jaxlib_extension_version: int = getattr(xla_client, '_version', 0)
 ifrt_version: int = getattr(xla_client, '_ifrt_version', 0)
 
-# TODO(phawkins): remove type: ignore once the minimum jaxlib is bumped.
-if jaxlib_extension_version >= 328:
-  import jaxlib.weakref_lru_cache as weakref_lru_cache  # type: ignore  # noqa: F401
-else:
-  weakref_lru_cache = xla_extension  # type: ignore  # noqa: F401
+import jaxlib.weakref_lru_cache as weakref_lru_cache  # noqa: F401
 
 # XLA garbage collection: see https://github.com/jax-ml/jax/issues/14882
 def _xla_gc_callback(*args):
@@ -131,9 +138,6 @@ import jaxlib.gpu_triton as gpu_triton # pytype: disable=import-error  # noqa: F
 
 import jaxlib.mosaic.python.mosaic_gpu as mosaic_gpu_dialect  # pytype: disable=import-error  # noqa: F401
 import jaxlib.mosaic.python.tpu as tpu  # pytype: disable=import-error  # noqa: F401
-
-# Version number for MLIR:Python APIs, provided by jaxlib.
-mlir_api_version = xla_client.mlir_api_version
 
 # TODO(rocm): check if we need the same for rocm.
 

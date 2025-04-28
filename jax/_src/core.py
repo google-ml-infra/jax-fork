@@ -1688,6 +1688,9 @@ class UnshapedArray(AbstractValue):
     return '{}({}{})'.format(self.__class__.__name__, self.str_short(),
                              ", weak_type=True" if self.weak_type else "")
 
+  def __str__(self):
+    return '{}{}'.format("~" if self.weak_type else "", self.str_short())
+
   _bool    = concretization_function_error(bool)
   _int     = concretization_function_error(int, True)
   _float   = concretization_function_error(float, True)
@@ -1808,7 +1811,7 @@ def _make_lengths_same(sharding, ndim):
   if ndim > len(sharding.spec):
     return sharding.with_spec(sharding.spec._normalized_spec_for_aval(ndim))
   if ndim < len(sharding.spec):
-    assert all(s is None for s in sharding.spec[ndim:])
+    assert all(s is None for s in sharding.spec[ndim:]), (ndim, sharding.spec)
     return sharding.with_spec(sharding.spec[:ndim])
   assert False, "unreachable"
 
@@ -1829,19 +1832,13 @@ def modify_spec_for_auto_manual(spec, mesh) -> P:
 
 def _maybe_modify_sharding(sharding, ndim):
   if len(sharding.spec) == 0 or all(s is None for s in sharding.spec):
-    if len(sharding.spec) != ndim:
-      return _make_lengths_same(sharding, ndim)
-    return sharding
-
-  if sharding.mesh._are_all_axes_explicit:
-    if ndim > len(sharding.spec):
-      return sharding.with_spec(sharding.spec._normalized_spec_for_aval(ndim))
-    return sharding
-
-  out = sharding.with_spec(modify_spec_for_auto_manual(
-      sharding.spec, sharding.mesh))
-  if (len(out.spec) != ndim and
-      (out.mesh.empty or out.mesh._are_all_axes_auto_or_manual)):
+    out = sharding
+  elif sharding.mesh._are_all_axes_explicit:
+    out = sharding
+  else:
+    out = sharding.with_spec(modify_spec_for_auto_manual(
+        sharding.spec, sharding.mesh))
+  if len(out.spec) != ndim:
     out = _make_lengths_same(out, ndim)
   return out
 
@@ -1897,7 +1894,10 @@ def str_short_aval(shape, dtype, mesh, spec, vma,
 def get_vma(vma, mesh):
   if mesh.empty:
     return vma
+  axis_env_names = get_axis_env().axis_names()
   for i in vma:
+    if i in axis_env_names and i not in mesh._name_to_type:
+      continue
     if mesh._name_to_type[i] != AxisType.Manual:
       raise ValueError(
           "Axes mentioned in `vma` field of ShapedArray should"
@@ -2006,9 +2006,7 @@ pvary_p.multiple_results = True
 pvary_p.def_impl(lambda *args, axes, axis_index_groups: args)
 
 def _pvary_abstract_eval(*args, axes, axis_index_groups):
-  if not config.varying_axes_in_types.value:
-    return args
-  if not config._check_rep.value:
+  if not config._check_vma.value:
     return args
   assert isinstance(axes, tuple)
   arg_vma = [a.vma for a in args]
@@ -2019,17 +2017,15 @@ def _pvary_abstract_eval(*args, axes, axis_index_groups):
         f"non-device-varying type, but got {arg_vma} for collective acting "
         f"over axis name {axes}. Please open an issue at "
         "https://github.com/jax-ml/jax/issues, and as a temporary "
-        "workaround pass the check_rep=False argument to shard_map")
+        "workaround pass the check_vma=False argument to `jax.shard_map`")
   sharding = NamedSharding(mesh_lib.get_abstract_mesh(), P())
   return [a.update(sharding=sharding, vma=a.vma.union(frozenset(axes)))
           for a in args]
 pvary_p.def_abstract_eval(_pvary_abstract_eval)
 
 
-def standard_insert_pbroadcast(*args):
-  if not config.varying_axes_in_types.value:
-    return args
-  if not config._check_rep.value:
+def standard_insert_pvary(*args):
+  if not config._check_vma.value:
     return args
   if not args:
     return args
@@ -2040,9 +2036,7 @@ def standard_insert_pbroadcast(*args):
           if out_vma - src else arg for arg, src in zip(args, in_vma)]
 
 def standard_vma_rule(prim_name, *avals, **kwargs) -> frozenset[AxisName]:
-  if not config.varying_axes_in_types.value:
-    return frozenset()
-  if not config._check_rep.value:
+  if not config._check_vma.value:
     return frozenset()
   avals = tuple(a for a in avals if a is not abstract_token)
   if not avals:
@@ -2053,7 +2047,7 @@ def standard_vma_rule(prim_name, *avals, **kwargs) -> frozenset[AxisName]:
         f'Primitive {prim_name} requires varying manual axes '
         f'to match, but got {[vma, *vmas]}. Please open an issue at '
         'https://github.com/jax-ml/jax/issues and as a temporary '
-        'workaround pass the check_rep=False argument to shard_map')
+        'workaround pass the check_vma=False argument to `jax.shard_map`')
   return vma
 
 # Dynamic shape stuff below here! We keep the abstract values distinct just so

@@ -75,10 +75,6 @@ def MosaicGPU_InitializeBarrierOp : Op<MosaicGPU_Dialect, "initialize_barrier",
 
 def MosaicGPU_ArriveExpectTxOp : Op<MosaicGPU_Dialect, "arrive_expect_tx", []> {
   let summary = "Executes an arrive.expect_tx operation on the given barrier.";
-  let description = [{
-    A single thread in the warpgroup will execute an `arrive.expect_tx`
-    operation on the provided barrier with the provided `expect_tx`.
-  }];
 
   let arguments = (ins
     MemRefRankOf<[MosaicGPU_Barrier], [0]>:$barrier,
@@ -375,6 +371,29 @@ def MosaicGPU_LayoutCastOp : Op<MosaicGPU_Dialect, "layout_cast",
       return ::mlir::success();
     }
   }];
+}
+
+
+def MosaicGPU_BroadcastInDimOp : Op<MosaicGPU_Dialect, "broadcast_in_dim", []> {
+  let summary = "Broadcasts a vector to a new shape.";
+  let description = [{
+    `broadcast_dimensions` must have the same size as the rank of the input
+    vector and for each input dimension, specifies which output dimension it
+    corresponds to.
+  }];
+
+  let arguments = (ins
+    AnyVectorOfAnyRank:$operand,
+
+    // Attributes
+    DenseI64ArrayAttr:$broadcast_dimensions
+  );
+
+  let results = (outs AnyVectorOfAnyRank);
+  let assemblyFormat = [{
+    `(` $operand `:` type($operand) `)` attr-dict `->` type(results)
+  }];
+  let hasVerifier = 1;
 }
 
 

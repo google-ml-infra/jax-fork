@@ -12,18 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import gzip as _gzip
 from jax._src.lib import xla_client as _xc
 
-get_topology_for_devices = _xc.get_topology_for_devices
-heap_profile = _xc.heap_profile
-mlir_api_version = _xc.mlir_api_version
-Client = _xc.Client
-CompileOptions = _xc.CompileOptions
-DeviceAssignment = _xc.DeviceAssignment
-Frame = _xc.Frame
-HloSharding = _xc.HloSharding
-OpSharding = _xc.OpSharding
-Traceback = _xc.Traceback
+def _heap_profile(client):
+  return _gzip.compress(client.heap_profile())
 
 _deprecations = {
     # Finalized 2025-03-25; remove after 2025-06-25
@@ -85,17 +78,97 @@ _deprecations = {
         ),
         None,
     ),
+    # Added April 4 2025.
+    "get_topology_for_devices": (
+        (
+            "jax.lib.xla_client.get_topology_for_devices was deprecated in JAX"
+            " v0.6.0 and will be removed in JAX v0.7.0"
+        ),
+        _xc.get_topology_for_devices,
+    ),
+    "heap_profile": (
+        (
+            "jax.lib.xla_client.heap_profile was deprecated in JAX v0.6.0 and"
+            " will be removed in JAX v0.7.0"
+        ),
+        _heap_profile,
+    ),
+    "mlir_api_version": (
+        (
+            "jax.lib.xla_client.mlir_api_version was deprecated in JAX v0.6.0"
+            " and will be removed in JAX v0.7.0"
+        ),
+        58,
+    ),
+    "Client": (
+        (
+            "jax.lib.xla_client.Client was deprecated in JAX v0.6.0 and will be"
+            " removed in JAX v0.7.0"
+        ),
+        _xc.Client,
+    ),
+    "CompileOptions": (
+        (
+            "jax.lib.xla_client.CompileOptions was deprecated in JAX v0.6.0 and"
+            " will be removed in JAX v0.7.0"
+        ),
+        _xc.CompileOptions,
+    ),
+    "DeviceAssignment": (
+        (
+            "jax.lib.xla_client.DeviceAssignment was deprecated in JAX v0.6.0"
+            " and will be removed in JAX v0.7.0"
+        ),
+        _xc.DeviceAssignment,
+    ),
+    "Frame": (
+        (
+            "jax.lib.xla_client.Frame was deprecated in JAX v0.6.0 and will be"
+            " removed in JAX v0.7.0"
+        ),
+        _xc.Frame,
+    ),
+    "HloSharding": (
+        (
+            "jax.lib.xla_client.HloSharding was deprecated in JAX v0.6.0 and"
+            " will be removed in JAX v0.7.0"
+        ),
+        _xc.HloSharding,
+    ),
+    "OpSharding": (
+        (
+            "jax.lib.xla_client.OpSharding was deprecated in JAX v0.6.0 and"
+            " will be removed in JAX v0.7.0"
+        ),
+        _xc.OpSharding,
+    ),
+    "Traceback": (
+        (
+            "jax.lib.xla_client.Traceback was deprecated in JAX v0.6.0 and will"
+            " be removed in JAX v0.7.0"
+        ),
+        _xc.Traceback,
+    ),
 }
 
 import typing as _typing
 
 if _typing.TYPE_CHECKING:
-  Shape = _xc.Shape
-  XlaComputation = _xc.XlaComputation
+  get_topology_for_devices = _xc.get_topology_for_devices
+  heap_profile = _heap_profile
+  mlir_api_version = 58
+  Client = _xc.Client
+  CompileOptions = _xc.CompileOptions
+  DeviceAssignment = _xc.DeviceAssignment
+  Frame = _xc.Frame
+  HloSharding = _xc.HloSharding
+  OpSharding = _xc.OpSharding
+  Traceback = _xc.Traceback
 else:
   from jax._src.deprecations import deprecation_getattr as _deprecation_getattr
 
   __getattr__ = _deprecation_getattr(__name__, _deprecations)
   del _deprecation_getattr
 del _typing
+del _heap_profile
 del _xc

@@ -237,6 +237,7 @@ jax_multiplatform_test(
         "//jax:internal_export_back_compat_test_util",
         "//jax:pallas",
         "//jax:pallas_gpu",  # build_cleaner: keep
+        "//jax:pallas_mosaic_gpu",  # build_cleaner: keep
         "//jax:pallas_tpu_ops",  # build_cleaner: keep
     ],
 )
@@ -652,6 +653,7 @@ jax_multiplatform_test(
         "gpu_h100",
     ],
     env = {"XLA_FLAGS": "--xla_gpu_autotune_level=0"},
+    shard_count = 4,
     deps = [
         "//jax:pallas",
         "//jax:pallas_experimental_gpu_ops",
@@ -702,8 +704,8 @@ jax_multiplatform_test(
 )
 
 jax_multiplatform_test(
-    name = "tpu_fusable_matmul_test",
-    srcs = ["tpu_fusable_matmul_test.py"],
+    name = "tpu_fusible_matmul_test",
+    srcs = ["tpu_fusible_matmul_test.py"],
     disable_configs = [
         "tpu_v3",
         "tpu_pjrt_c_api",

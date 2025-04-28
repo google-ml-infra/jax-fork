@@ -49,7 +49,7 @@ from jax._src import test_util as jtu
 from jax._src.internal_test_util import lax_test_util
 from jax._src.interpreters import pxla
 from jax._src.lax import parallel
-from jax._src.lib import xla_extension
+from jax._src.lib import _jax
 from jax._src.util import safe_map, safe_zip
 
 config.parse_flags_with_absl()
@@ -318,12 +318,12 @@ class PythonPmapTest(jtu.JaxTestCase):
     lowered = f.lower(x)
 
     self.assertRaisesRegex(
-        xla_extension.XlaRuntimeError, "No such compile option: 'invalid_key'",
+        _jax.XlaRuntimeError, "No such compile option: 'invalid_key'",
         lambda: lowered.compile(
             compiler_options={"invalid_key": "invalid_value"}))
 
     self.assertRaisesRegex(
-        xla_extension.XlaRuntimeError, "is not a valid bool value.",
+        _jax.XlaRuntimeError, "is not a valid bool value.",
         lambda: lowered.compile(
             compiler_options={"xla_embed_ir_in_executable": "invalid_value"}))
 
@@ -356,7 +356,7 @@ class PythonPmapTest(jtu.JaxTestCase):
 
     # We should still error on invalid options after some valid compiles
     self.assertRaisesRegex(
-        xla_extension.XlaRuntimeError, "No such compile option: 'invalid_key'",
+        _jax.XlaRuntimeError, "No such compile option: 'invalid_key'",
         lambda: lowered.compile(
             compiler_options={"invalid_key": "invalid_value"}))
 
@@ -499,7 +499,7 @@ class PythonPmapTest(jtu.JaxTestCase):
   def testTrees(self):
     ptranspose = lambda x, axis_name: lax.all_to_all(x, axis_name, 0, 0)
     def protate(x, axis_name):
-      n = lax.psum(1, axis_name)
+      n = lax.axis_size(axis_name)
       return lax.ppermute(x, axis_name, [(i, (i + 1) % n) for i in range(n)])
 
     tree_f = lambda f: partial(jax.tree.map, f)
@@ -1395,7 +1395,7 @@ class PythonPmapTest(jtu.JaxTestCase):
 
   def testCollectiveConstant(self):
     device_count = jax.device_count()
-    f = self.pmap(lambda x: lax.psum(1, 'i'), 'i')
+    f = self.pmap(lambda x: lax.axis_size('i'), 'i')
     x = jnp.arange(device_count)
     ans = f(x)
     expected = np.repeat(device_count, device_count)
@@ -1408,9 +1408,9 @@ class PythonPmapTest(jtu.JaxTestCase):
     def f(x):
       @partial(self.pmap, axis_name='j')
       def g(y):
-        a = lax.psum(1, 'i')
-        b = lax.psum(1, 'j')
-        c = lax.psum(1, ('i', 'j'))
+        a = lax.axis_size('i')
+        b = lax.axis_size('j')
+        c = lax.axis_size(('i', 'j'))
         return a, b, c
       return g(x)
 

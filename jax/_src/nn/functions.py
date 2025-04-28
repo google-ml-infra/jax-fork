@@ -48,12 +48,6 @@ from jax._src.typing import Array, ArrayLike, DType, DTypeLike
 from jax._src.ops.special import logsumexp as _logsumexp
 
 
-class Unspecified:
-  def __repr__(self):
-    return "_UNSPECIFIED"
-_UNSPECIFIED = Unspecified()
-
-
 # activations
 @jax.jit
 def identity(x: ArrayLike) -> Array:
@@ -525,8 +519,7 @@ logsumexp = _logsumexp
 @partial(jax.jit, static_argnames=("axis",))
 def log_softmax(x: ArrayLike,
                 axis: int | tuple[int, ...] | None = -1,
-                where: ArrayLike | None = None,
-                initial: Unspecified = _UNSPECIFIED) -> Array:
+                where: ArrayLike | None = None) -> Array:
   r"""Log-Softmax function.
 
   Computes the logarithm of the :code:`softmax` function, which rescales
@@ -552,10 +545,6 @@ def log_softmax(x: ArrayLike,
   See also:
     :func:`softmax`
   """
-  # TODO(jakevdp): remove the initial argument after JAX v0.4.40.
-  if initial is not _UNSPECIFIED:
-    raise TypeError("The initial argument to jax.nn.log_softmax was removed in JAX v0.4.36.")
-  del initial
   numpy_util.check_arraylike("log_softmax", x)
   x_arr = jnp.asarray(x)
   x_max = jnp.max(x_arr, axis, where=where, initial=-jnp.inf, keepdims=True)
@@ -573,8 +562,7 @@ def log_softmax(x: ArrayLike,
 # @partial(jax.jit, static_argnames=("axis",))
 def softmax(x: ArrayLike,
             axis: int | tuple[int, ...] | None = -1,
-            where: ArrayLike | None = None,
-            initial: Unspecified = _UNSPECIFIED) -> Array:
+            where: ArrayLike | None = None) -> Array:
   r"""Softmax function.
 
   Computes the function which rescales elements to the range :math:`[0, 1]`
@@ -600,10 +588,6 @@ def softmax(x: ArrayLike,
   See also:
     :func:`log_softmax`
   """
-  # TODO(jakevdp): remove the initial argument after JAX v0.4.40.
-  if initial is not _UNSPECIFIED:
-    raise TypeError("The initial argument to jax.nn.softmax was removed in JAX v0.4.36.")
-  del initial
   if config.softmax_custom_jvp.value:
     # mypy is confused by the `functools.partial` application in the definition
     # of `_softmax` and incorrectly concludes that `_softmax` returns
@@ -679,7 +663,7 @@ def _one_hot(x: Array, num_classes: int, *,
   try:
     output_pos_axis = util.canonicalize_axis(axis, x.ndim + 1)
   except TypeError:
-    axis_size = lax.psum(1, axis)
+    axis_size = lax.axis_size(axis)
     if num_classes != axis_size:
       raise ValueError(f"Expected num_classes to match the size of axis {axis}, "
                        f"but {num_classes} != {axis_size}") from None
