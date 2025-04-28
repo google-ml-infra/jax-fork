@@ -45,6 +45,7 @@ from jax._src.partition_spec import PartitionSpec
 from jax._src.util import safe_map, safe_zip, use_cpp_class, use_cpp_method
 import numpy as np
 
+config_ext = xc._xla.config
 
 Shape = tuple[int, ...]
 Device = xc.Device
@@ -199,6 +200,7 @@ class SingleDeviceSharding(jsharding.Sharding):
       return xb.process_index(self._device.client) == self._device.process_index
     return True
 
+SingleDeviceSharding.__module__ = 'jax.sharding'
 
 @util.cache(max_size=4096, trace_context_in_key=False)
 def pmap_sharding_devices_indices_map(
@@ -367,6 +369,7 @@ class PmapSharding(jsharding.Sharding):
           f'the number of devices={len(self._device_assignment)}')
     return sharded_shape
 
+PmapSharding.__module__ = 'jax.sharding'
 
 def _op_sharding_to_pos_sharding(
     op_sharding: xc.OpSharding | xc.HloSharding,
@@ -898,7 +901,11 @@ def parse_flatten_op_sharding(
       while dim_size > 1:
         axis = next(mesh_axis)
         axis_size = mesh_shape[axis]
-        assert dim_size % axis_size == 0
+        if dim_size % axis_size != 0:
+          raise ValueError(
+              f'{shape=} is incompatible with {mesh_shape=}: '
+              f'{dim_size=} is not divisible by {axis_size=}.'
+          )
         dim_size //= axis_size
         dim_partitions.append(axis)
       partitions.append(tuple(dim_partitions))
@@ -1394,17 +1401,17 @@ def set_mesh(mesh: mesh_lib.Mesh | None) -> mesh_lib.Mesh | None:
   if mesh is not None and not isinstance(mesh, mesh_lib.Mesh):
     raise ValueError(
         f"Expected mesh of type `jax.sharding.Mesh`. Got {type(mesh)}")
+  assert mesh is None or isinstance(mesh, mesh_lib.Mesh)
   if not core.trace_state_clean():
     raise ValueError('`set_mesh` can only be used outside of `jax.jit`.')
 
   if mesh is None:
-    config.abstract_mesh_context_manager.set_global(mesh_lib.empty_abstract_mesh)  # type: ignore
+    config.abstract_mesh_context_manager.set_local(mesh_lib.empty_abstract_mesh)  # type: ignore
   else:
-    config.abstract_mesh_context_manager.set_global(mesh.abstract_mesh)  # type: ignore
+    config.abstract_mesh_context_manager.set_local(mesh.abstract_mesh)  # type: ignore
 
-  prev_mesh = config.device_context.get_global()
-  config.device_context.set_global(mesh)
-  return prev_mesh
+  prev_mesh = config.device_context.swap_local(mesh)
+  return None if prev_mesh is config_ext.unset else prev_mesh
 
 @contextlib.contextmanager
 def use_concrete_mesh(mesh: mesh_lib.Mesh | None):

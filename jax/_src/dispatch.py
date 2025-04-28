@@ -44,7 +44,6 @@ from jax._src.interpreters import mlir
 from jax._src.interpreters import pxla
 from jax._src.interpreters import xla
 from jax._src.layout import DeviceLocalLayout, Layout
-from jax._src.lib import jaxlib_extension_version
 from jax._src.lib import xla_client as xc
 from jax._src.mesh import AbstractMesh, Mesh
 from jax._src.monitoring import record_event_duration_secs, record_event_time_span
@@ -52,7 +51,7 @@ from jax._src.partition_spec import PartitionSpec
 from jax._src.sharding import Sharding
 from jax._src.sharding_impls import (
     NamedSharding, SingleDeviceSharding, TransferToMemoryKind, GSPMDSharding,
-    PositionalSharding, is_single_device_sharding)
+    is_single_device_sharding)
 import numpy as np
 
 
@@ -133,7 +132,8 @@ class RuntimeTokenSet(threading.local):
       # TODO(yueshengys): This might still be buggy in a multi-process SPMD
       # scenario. Revise the logic later. A distributed shutdown barrier inside
       # the XLA program may be needed.
-      return jax.device_put(tok, PositionalSharding(devices))
+      return jax.device_put(
+          tok, NamedSharding(Mesh(devices, 'x'), PartitionSpec('x')))
 
     # We only use replicated sharding for the first time when the token for the
     # order effect hasn't been created.
@@ -241,7 +241,7 @@ class SourceInfo(NamedTuple):
 def get_intermediate_shardings(
     jaxpr: core.Jaxpr) -> Sequence[tuple[Sharding, SourceInfo]]:
   from jax._src import pjit
-  from jax.experimental import shard_map
+  from jax._src import shard_map
 
   out = []
   for eqn in jaxpr.eqns:
@@ -496,7 +496,7 @@ def _device_put_sharding_impl(x, aval, device, copy):
         return _DeferredShardArg(x, x.sharding, aval, x.committed, copy)
     elif is_single_device_sharding(x.sharding):
       device = x.sharding._device_assignment[0] if device is None else device
-      if copy == CopySemantics.COPY and jaxlib_extension_version >= 327:
+      if copy == CopySemantics.COPY:
         return xc.batched_device_put(aval, SingleDeviceSharding(device), [x],
                                      [device], True, True)
       return pxla.batched_device_put(aval, SingleDeviceSharding(device), [x],

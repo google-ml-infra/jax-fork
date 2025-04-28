@@ -605,6 +605,116 @@ class DialectTest(MosaicGpuTest):
         parsed_layout = layouts.from_tiled_layout_attr(attr)
         self.assertEqual(layout, parsed_layout)
 
+  def test_broadcast_in_dim_ok(self):
+    with ir.InsertionPoint(self.module.body):
+      func.FuncOp.from_py_func(
+          ir.VectorType.get([64], ir.F32Type.get()),
+          name="broadcast_in_dim",
+      )(
+          lambda operand: mgpu.dialect.broadcast_in_dim(
+              ir.VectorType.get([64, 64], ir.F32Type.get()),
+              operand,
+              broadcast_dimensions=[0],
+          )
+      )
+
+    self.assertTrue(self.module.operation.verify())
+
+  def test_broadcast_in_dim_no_0d(self):
+    with ir.InsertionPoint(self.module.body):
+      func.FuncOp.from_py_func(
+          ir.VectorType.get([], ir.F32Type.get()),
+          name="broadcast_in_dim",
+      )(
+          lambda operand: mgpu.dialect.broadcast_in_dim(
+              ir.VectorType.get([64], ir.F32Type.get()),
+              operand,
+              broadcast_dimensions=[],
+          )
+      )
+
+    with self.assertRaisesRegex(
+        ir.MLIRError,
+        r"The input vector must have rank > 0",
+    ):
+      self.module.operation.verify()
+
+  def test_broadcast_in_dim_no_input_larger_than_output(self):
+    with ir.InsertionPoint(self.module.body):
+      func.FuncOp.from_py_func(
+          ir.VectorType.get([64, 64], ir.F32Type.get()),
+          name="broadcast_in_dim",
+      )(
+          lambda operand: mgpu.dialect.broadcast_in_dim(
+              ir.VectorType.get([64], ir.F32Type.get()),
+              operand,
+              broadcast_dimensions=[],
+          )
+      )
+
+    with self.assertRaisesRegex(
+        ir.MLIRError,
+        r"rank of the input vector must be smaller",
+    ):
+      self.module.operation.verify()
+
+  def test_broadcast_in_dim_too_many_dims(self):
+    with ir.InsertionPoint(self.module.body):
+      func.FuncOp.from_py_func(
+          ir.VectorType.get([64], ir.F32Type.get()),
+          name="broadcast_in_dim",
+      )(
+          lambda operand: mgpu.dialect.broadcast_in_dim(
+              ir.VectorType.get([64, 64], ir.F32Type.get()),
+              operand,
+              broadcast_dimensions=[0, 1],
+          )
+      )
+
+    with self.assertRaisesRegex(
+        ir.MLIRError,
+        r"size of the `broadcast_dimensions` attribute must be",
+    ):
+      self.module.operation.verify()
+
+  def test_broadcast_in_dim_dim_oob(self):
+    with ir.InsertionPoint(self.module.body):
+      func.FuncOp.from_py_func(
+          ir.VectorType.get([64], ir.F32Type.get()),
+          name="broadcast_in_dim",
+      )(
+          lambda operand: mgpu.dialect.broadcast_in_dim(
+              ir.VectorType.get([64, 64], ir.F32Type.get()),
+              operand,
+              broadcast_dimensions=[2],
+          )
+      )
+
+    with self.assertRaisesRegex(
+        ir.MLIRError,
+        r"must be in the range \[0, result.shape.rank",
+    ):
+      self.module.operation.verify()
+
+  def test_broadcast_in_dim_dim_transpose(self):
+    with ir.InsertionPoint(self.module.body):
+      func.FuncOp.from_py_func(
+          ir.VectorType.get([64, 64, 64, 64], ir.F32Type.get()),
+          name="broadcast_in_dim",
+      )(
+          lambda operand: mgpu.dialect.broadcast_in_dim(
+              ir.VectorType.get([64, 64, 64, 64], ir.F32Type.get()),
+              operand,
+              broadcast_dimensions=[0, 1, 3, 2],
+          )
+      )
+
+    with self.assertRaisesRegex(
+        ir.MLIRError,
+        r"`broadcast_dimensions` attribute must be stricly increasing",
+    ):
+      self.module.operation.verify()
+
 
 class DialectLoweringTest(MosaicGpuTest):
 
@@ -666,11 +776,14 @@ class DialectLoweringTest(MosaicGpuTest):
     # One nvvm.mbarrier_init_shared is issued per barrier.
     self.assertLen(all_mbarrier_init_shared_ops, num_shape_elements)
 
-    # Each barrier has its count equal to the arrival count.
+    # Each barrier has its count equal to the arrival count times the
+    # warpgroup size.
     for op in all_mbarrier_init_shared_ops:
       count = op.count.owner.opview
       self.assertIsInstance(count, arith.ConstantOp)
-      self.assertEqual(count.literal_value, arrival_count)
+      self.assertEqual(
+          count.literal_value, arrival_count * mgpu_utils.WARPGROUP_SIZE
+      )
 
   def test_lowering_vector_op_without_layout_fails(self):
     shape = (3, 4)
@@ -937,8 +1050,6 @@ class DialectLoweringTest(MosaicGpuTest):
       self.assertEqual(ty_transformed.shape, [8, 2, 16, 32])
       strides, _ = ty_transformed.get_strides_and_offset()
       self.assertEqual(strides, [512, 4096, 1, 16])
-
-
 
 
 if __name__ == "__main__":

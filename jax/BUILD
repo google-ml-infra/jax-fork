@@ -254,6 +254,7 @@ py_library_providing_imports_info(
         "_src/public_test_util.py",
         "_src/random.py",
         "_src/shard_alike.py",
+        "_src/shard_map.py",
         "_src/sourcemap.py",
         "_src/stages.py",
         "_src/tree.py",
@@ -609,6 +610,7 @@ pytype_strict_library(
         ":dtypes",
         ":effects",
         ":layout",
+        ":mesh",
         ":op_shardings",
         ":partial_eval",
         ":partition_spec",
@@ -669,7 +671,6 @@ pytype_strict_library(
             "experimental/pallas/**/*.py",
         ],
         exclude = [
-            "experimental/pallas/gpu.py",
             "experimental/pallas/mosaic_gpu.py",
             "experimental/pallas/ops/gpu/**/*.py",
             "experimental/pallas/ops/tpu/**/*.py",
@@ -721,7 +722,7 @@ pytype_strict_library(
         ":pallas",  # build_cleaner: keep
         "//jax/_src/pallas/fuser:block_spec",
         "//jax/_src/pallas/fuser:custom_evaluate",
-        "//jax/_src/pallas/fuser:fusable",
+        "//jax/_src/pallas/fuser:fusible",
         "//jax/_src/pallas/fuser:fusion",
         "//jax/_src/pallas/fuser:jaxpr_fusion",
     ],
@@ -782,7 +783,6 @@ pytype_strict_library(
 pytype_strict_library(
     name = "pallas_triton",
     srcs = [
-        "experimental/pallas/gpu.py",
         "experimental/pallas/triton.py",
     ],
     visibility = [

@@ -358,7 +358,7 @@ def disable_jit(disable: bool = True):
   ...   return y + 3
   ...
   >>> print(f(jax.numpy.array([1, 2, 3])))  # doctest:+ELLIPSIS
-  Value of y is Traced<ShapedArray(int32[3])>with<DynamicJaxprTrace...>
+  Value of y is Traced<int32[3]>with<DynamicJaxprTrace...>
   [5 7 9]
 
   Here ``y`` has been abstracted by :py:func:`jit` to a :py:class:`ShapedArray`,
@@ -574,6 +574,67 @@ def _check_output_dtype_revderiv(name, holomorphic, x):
                     "For differentiation of functions with integer outputs, use "
                     "jax.vjp directly.")
 _check_output_dtype_grad = partial(_check_output_dtype_revderiv, "grad")
+
+def fwd_and_bwd(
+    fun: Callable, has_aux: bool = False, jitted: bool = True
+  ) -> tuple[Callable, Callable]:
+  """Creates functions ``fwd`` and ``bwd`` corresponding to the forward and
+  backward pass of a given function ``fun``. The forward function ``fwd(*args)``
+  functionally behaves much like ``y, fun_vjp = jax.vjp(fun, *args)``, but allows
+  reuse of the backward function ``bwd`` across multiple iterations, which is
+  useful to avoid recompilation when the forward and backward do not end up in a
+  single jitted function:
+
+  >>> import jax
+  >>>
+  >>> x = W = cot_out = jax.numpy.ones((4,4))
+  >>>
+  >>> def f(x, W):
+  ...     return x @ W
+  ...
+  >>> f_jitted = jax.jit(f)
+  >>> for i in range(3):
+  ...     y, f_vjp = jax.vjp(f_jitted, x, W)
+  ...     cot_x, cot_W = f_vjp(cot_out)           # not jitted
+  ...     cot_x, cot_W = jax.jit(f_vjp)(cot_out)  # recompiles on every iteration
+  ...
+  >>> fwd, bwd = jax.fwd_and_bwd(f)
+  >>> for i in range(3):
+  ...     y, residuals = fwd(x, W)
+  ...     cot_x, cot_W = bwd(residuals, cot_out)  # jitted, compiles once
+  ...
+
+  Args:
+    fun: Function to produce a forward and backward of.
+    has_aux: Optional, bool. Indicates whether ``fun`` returns a pair where the
+     first element is considered the output of the mathematical function to be
+     differentiated and the second element is auxiliary data. Default False.
+    jitted: Optional, bool. Indicates whether to return the ``jax.jit`` of
+      forward and backward. Note that jit-ing only the backward but not the
+      forward will result in the backward recompiling on every invocation, so we
+      default to jit-ing both.
+
+  Returns:
+    The two functions, ``fwd`` and ``bwd``.
+
+    If ``has_aux`` is ``False``, ``fwd(*primals)`` returns a tuple
+    ``(primals_out, residuals)``, where ``primals_out`` is ``fun(*primals)``.
+    If ``has_aux`` is ``True``, returns a ``(primals_out, residuals, aux)`` tuple
+    where ``aux`` is the auxiliary data returned by ``fun``.
+
+    ``bwd`` is a function from ``residuals`` and a cotangent vector with the same
+    shape as ``primals_out`` to a tuple of cotangent vectors with the same number
+    and shapes as ``primals``, representing the vector-Jacobian product of ``fun``
+    evaluated at ``primals``.
+  """
+  def fwd(*args):
+    return vjp(fun, *args, has_aux=has_aux)  # type: ignore
+  def bwd(f_vjp, outgrad):
+    return f_vjp(outgrad)
+  if jitted:
+    fwd = jit(fwd)
+    bwd = jit(bwd)
+  return fwd, bwd
 
 
 def jacfwd(fun: Callable, argnums: int | Sequence[int] = 0,
@@ -1407,10 +1468,8 @@ def pmap(
         " removed from JAX. Please migrate to pjit and remove global_arg_shapes"
         " from pmap.")
 
-  # TODO(yashkatariya): Move this out after shard_map is out of experimental and
-  # in _src
   if config.pmap_shmap_merge.value:
-    from jax.experimental.shard_map import pmap
+    from jax._src.shard_map import pmap
     return pmap(fun, axis_name, in_axes=in_axes, out_axes=out_axes,
                 static_broadcasted_argnums=static_broadcasted_argnums,
                 devices=devices, backend=backend,
@@ -1933,10 +1992,27 @@ def _lift_linearized(jaxpr, primal_avals, io_tree, out_pvals, consts, *py_args):
     for primal_aval, tangent_aval in zip(primal_avals, tangent_avals):
       expected_tangent_aval  = primal_aval.to_tangent_aval()
       if not core.typecompat(expected_tangent_aval, tangent_aval):
-        raise ValueError("linearized function called on tangent values inconsistent with "
-                         "the original primal values: "
-                         f"got tangent aval {tangent_aval} for primal aval {primal_aval} "
-                         f"but expected {expected_tangent_aval}")
+        extra_msg = ''
+        if (isinstance(primal_aval, core.ShapedArray) and
+            isinstance(tangent_aval, core.ShapedArray) and
+            primal_aval.vma != tangent_aval.vma):
+          pvary_applications = []
+          if left := tangent_aval.vma - primal_aval.vma:
+            pvary_applications.append(
+                f"applying `jax.lax.pvary(..., {tuple(left)})` to the primal"
+                " value passed to `jax.linearize`")
+          if left := primal_aval.vma - tangent_aval.vma:
+            pvary_applications.append(
+                f"applying `jax.lax.pvary(..., {tuple(left)})` to the tangent"
+                " value passed to the callable `f_jvp` returned by"
+                " `jax.linearize`")
+          extra_msg = " \nThis might be fixed by:\n" + "\n".join(
+              f"  * {d};" for d in pvary_applications)
+        raise ValueError(
+            "linearized function called on tangent values inconsistent with "
+            "the original primal values:\n"
+            f"Got tangent aval {tangent_aval} for primal aval {primal_aval} "
+            f"but expected {expected_tangent_aval}.{extra_msg}")
     tangents_out = eval_jaxpr(jaxpr, consts, *tangents)
     tangents_out_ = iter(tangents_out)
     full_out = [pval.get_known() if pval.is_known() else next(tangents_out_)

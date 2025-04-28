@@ -70,7 +70,6 @@ from jax._src.config import (
   transfer_guard_host_to_device as transfer_guard_host_to_device,
   transfer_guard_device_to_device as transfer_guard_device_to_device,
   transfer_guard_device_to_host as transfer_guard_device_to_host,
-  spmd_mode as spmd_mode,
 )
 from jax._src.core import ensure_compile_time_eval as ensure_compile_time_eval
 from jax._src.environment_info import print_environment_info as print_environment_info
@@ -100,6 +99,7 @@ from jax._src.xla_bridge import devices as devices
 from jax._src.api import disable_jit as disable_jit
 from jax._src.api import eval_shape as eval_shape
 from jax._src.dtypes import float0 as float0
+from jax._src.api import fwd_and_bwd as fwd_and_bwd
 from jax._src.api import grad as grad
 from jax._src.api import hessian as hessian
 from jax._src.xla_bridge import host_count as host_count
@@ -130,6 +130,8 @@ from jax._src.api import vjp as vjp
 from jax._src.api import vmap as vmap
 from jax._src.sharding_impls import NamedSharding as NamedSharding
 from jax._src.sharding_impls import make_mesh as make_mesh
+
+from jax._src.shard_map import shard_map as shard_map
 
 # Force import, allowing jax.interpreters.* to be used after import jax.
 from jax.interpreters import ad, batching, mlir, partial_eval, pxla, xla

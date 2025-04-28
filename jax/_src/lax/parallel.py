@@ -43,6 +43,7 @@ from jax._src.lib.mlir import ir
 from jax._src.lib.mlir.dialects import hlo
 from jax._src.util import (canonicalize_axis, moveaxis, safe_map, safe_zip,
                            unzip2)
+import jax.numpy as jnp
 import numpy as np
 
 unsafe_map, map = map, safe_map  # type: ignore
@@ -144,7 +145,7 @@ def psum(x, axis_name, *, axis_index_groups=None):
       size = math.prod([core.get_axis_env().axis_size(name) for name in named_axes])
     out_flat = tuple(lax._const(leaf, size) * pos_reduce(leaf) for leaf in leaves)
   else:
-    if config.varying_axes_in_types.value and config._check_rep.value:
+    if config._check_vma.value:
       out_flat = bind_psum_invariant(
           leaves, axes=tuple(axis_name), axis_index_groups=axis_index_groups)
     else:
@@ -195,7 +196,7 @@ def pmean(x, axis_name, *, axis_index_groups=None):
   [0.        0.6666667 1.3333334 2.       ]
   """
   x = psum(x, axis_name=axis_name, axis_index_groups=axis_index_groups)
-  n = psum(1, axis_name=axis_name, axis_index_groups=axis_index_groups)
+  n = _axis_size(axis_name, axis_index_groups)
   return tree_util.tree_map(lambda v: v / n, x)
 
 def pmax(x, axis_name, *, axis_index_groups=None):
@@ -446,14 +447,14 @@ def all_to_all(x, axis_name, split_axis, concat_axis, *, axis_index_groups=None,
       np.insert(np.delete(x.shape, split_axis), concat_axis, axis_size)
 
     where ``axis_size`` is the size of the mapped axis named ``axis_name`` in
-    the input ``x``, i.e. ``axis_size = lax.psum(1, axis_name)``.
+    the input ``x``.
 
     Otherwise array with shape similar to the input shape, except with split_axis
     divided by axis size and concat_axis multiplied by axis size.
   """
   axis_index_groups = _canonicalize_axis_index_groups(axis_index_groups)
   def bind(x, split_axis=split_axis, concat_axis=concat_axis):
-    group_size = psum(1, axis_name, axis_index_groups=axis_index_groups)
+    group_size = _axis_size(axis_name, axis_index_groups)
     if tiled:
       if x.shape[split_axis] % group_size != 0:
         raise ValueError(f"The size of all_to_all split_axis ({x.shape[split_axis]}) "
@@ -638,7 +639,7 @@ def ragged_all_to_all(
                                   axis_index_groups=axis_index_groups)
 
 
-def axis_index(axis_name):
+def axis_index(axis_name: AxisName) -> jax.Array:
   """Return the index along the mapped axis ``axis_name``.
 
   Args:
@@ -654,16 +655,16 @@ def axis_index(axis_name):
   ... def f(_):
   ...   return lax.axis_index('i')
   ...
-  >>> f(np.zeros(4))
+  >>> f(jnp.zeros(4))
   Array([0, 1, 2, 3], dtype=int32)
-  >>> f(np.zeros(8))
+  >>> f(jnp.zeros(8))
   Array([0, 1, 2, 3, 4, 5, 6, 7], dtype=int32)
   >>> @partial(jax.pmap, axis_name='i')
   ... @partial(jax.pmap, axis_name='j')
   ... def f(_):
   ...   return lax.axis_index('i'), lax.axis_index('j')
   ...
-  >>> x, y = f(np.zeros((4, 2)))
+  >>> x, y = f(jnp.zeros((4, 2)))
   >>> print(x)
   [[0 0]
   [1 1]
@@ -679,11 +680,52 @@ def axis_index(axis_name):
     return axis_index_p.bind(axis_name=axis_name)
   else:
     inner_size = 1
-    index = 0
+    index = jnp.asarray(0)
     for name in reversed(axis_name):
       index += axis_index(name) * inner_size
-      inner_size *= psum(1, name)
+      inner_size *= axis_size(name)
     return index
+
+
+def axis_size(axis_name: AxisName) -> int:
+  """Return the size of the mapped axis ``axis_name``.
+
+  Args:
+    axis_name: hashable Python object used to name the mapped axis.
+
+  Returns:
+    An integer representing the size.
+
+  For example, with 8 XLA devices available:
+
+  >>> from functools import partial
+  >>> from jax.sharding import PartitionSpec as P
+  >>> mesh = jax.make_mesh((8,), 'i')
+  >>> @partial(jax.shard_map, mesh=mesh, in_specs=P('i'), out_specs=P())
+  ... def f(_):
+  ...   return lax.axis_size('i')
+  ...
+  >>> f(jnp.zeros(16))
+  Array(8, dtype=int32, weak_type=True)
+  >>> mesh = jax.make_mesh((4, 2), ('i', 'j'))
+  >>> @partial(jax.shard_map, mesh=mesh, in_specs=P('i', 'j'), out_specs=P())
+  ... def f(_):
+  ...   return lax.axis_size(('i', 'j'))
+  ...
+  >>> f(jnp.zeros((16, 8)))
+  Array(8, dtype=int32, weak_type=True)
+  """
+  return _axis_size(axis_name)
+
+
+def _axis_size(
+    axis_name: AxisName,
+    axis_index_groups: Sequence[Sequence[int]] | None = None,
+    /,
+) -> int:
+  axis_index_groups = _canonicalize_axis_index_groups(axis_index_groups)
+  return psum(1, axis_name, axis_index_groups=axis_index_groups)
+
 
 def pgather(src, idx, axes: int | AxisName):
   """Uses the last positional axis of idx to index into src's axes."""
@@ -691,7 +733,6 @@ def pgather(src, idx, axes: int | AxisName):
     axes = (axes,)
   # TODO: Canonicalize exes!
   return pgather_p.bind(src, idx, axes=tuple(axes))
-
 
 ### parallel primitives
 
@@ -827,10 +868,7 @@ def _allreduce_effectful_abstract_eval(*args, axes, axis_index_groups):
   return out_avals, {core.NamedAxisEffect(axis) for axis in named_axes}
 
 def _psum_invariant_abstract_eval(name, *args, axes, axis_index_groups):
-  if not config.varying_axes_in_types.value:
-    return psum_p.abstract_eval(
-        *args, axes=axes, axis_index_groups=axis_index_groups)
-  if not config._check_rep.value:
+  if not config._check_vma.value:
     return psum_p.abstract_eval(
         *args, axes=axes, axis_index_groups=axis_index_groups)
 
@@ -844,7 +882,7 @@ def _psum_invariant_abstract_eval(name, *args, axes, axis_index_groups):
         f"type, but got {arg_vma} for collective acting "
         f"over axis name {axes}. Please open an issue at "
         "https://github.com/jax-ml/jax/issues, and as a temporary "
-        "workaround pass the check_rep=False argument to shard_map")
+        "workaround pass the check_vma=False argument to `jax.shard_map`")
 
   named_axes = tuple(axis for axis in axes if not isinstance(axis, int))
   pos_axes = tuple(axis for axis in axes if isinstance(axis, int))
@@ -865,10 +903,7 @@ def _psum_invariant_abstract_eval(name, *args, axes, axis_index_groups):
 
 # TODO(yashkatariya): Replace this with _psum_invariant_abstract_eval
 def _pmin_pmax_abstract_eval(name, *args, axes, axis_index_groups):
-  if not config.varying_axes_in_types.value:
-    return _allreduce_effectful_abstract_eval(
-        *args, axes=axes, axis_index_groups=axis_index_groups)
-  if not config._check_rep.value:
+  if not config._check_vma.value:
     return _allreduce_effectful_abstract_eval(
         *args, axes=axes, axis_index_groups=axis_index_groups)
   return _psum_invariant_abstract_eval(
@@ -1260,7 +1295,11 @@ def _all_to_all_effectful_abstract_eval(
     axis_name = (axis_name,)
   _check_axis_names(axis_name)
   shape = list(input_aval.shape)
-  axis_size = psum(1, axis_name) if axis_index_groups is None else len(axis_index_groups[0])
+  axis_size = (
+      _axis_size(axis_name)
+      if axis_index_groups is None
+      else len(axis_index_groups[0])
+  )
   assert shape[split_axis] % axis_size == 0, (shape[split_axis], axis_size)
   shape[split_axis] //= axis_size
   shape[concat_axis] *= axis_size
@@ -1417,9 +1456,7 @@ batching.fancy_primitive_batchers[ragged_all_to_all_p] = _ragged_all_to_all_batc
 batching.skippable_batchers[ragged_all_to_all_p] = partial(_names_in_param, 'axis_name')
 
 def insert_collective_pvary(axis_name, x):
-  if not config.varying_axes_in_types.value:
-    return x
-  if not config._check_rep.value:
+  if not config._check_vma.value:
     return x
 
   axis_name = (axis_name,) if not isinstance(axis_name, tuple) else axis_name
@@ -1495,7 +1532,7 @@ def all_gather(x, axis_name, *, axis_index_groups=None, axis=0, tiled=False):
   if not isinstance(axis_name, tuple):
     axis_name = axis_name,
   axis_index_groups = _canonicalize_axis_index_groups(axis_index_groups)
-  axis_size = psum(1, axis_name, axis_index_groups=axis_index_groups)
+  axis_size = _axis_size(axis_name, axis_index_groups)
   def bind(leaf):
     leaf = insert_collective_pvary(axis_name, leaf)
     return all_gather_p.bind(
@@ -1503,7 +1540,7 @@ def all_gather(x, axis_name, *, axis_index_groups=None, axis=0, tiled=False):
         all_gather_dimension=canonicalize_axis(
             axis, np.ndim(leaf) if tiled else np.ndim(leaf) + 1),
         axis_name=axis_name, axis_index_groups=axis_index_groups,
-        axis_size=int(axis_size), tiled=tiled)
+        axis_size=axis_size, tiled=tiled)
   return tree_util.tree_map(bind, x)
 
 def _all_gather_impl(x, *, all_gather_dimension, axis_name, axis_index_groups, axis_size, tiled):
@@ -1551,9 +1588,7 @@ def _all_gather_lowering(ctx, x, *, all_gather_dimension, axis_name,
 
 
 def collective_vma_rule(prim_name, axis_name, x_aval):
-  if not config.varying_axes_in_types.value:
-    return frozenset()
-  if not config._check_rep.value:
+  if not config._check_vma.value:
     return frozenset()
   axis_name = (axis_name,) if not isinstance(axis_name, tuple) else axis_name
   if any(a not in x_aval.vma for a in axis_name):
@@ -1562,7 +1597,7 @@ def collective_vma_rule(prim_name, axis_name, x_aval):
         f" type, but got {x_aval.vma} for collective acting "
         f"over axis name {axis_name}. Please open an issue at "
         "https://github.com/jax-ml/jax/issues and as a temporary "
-        "workaround pass the check_rep=False argument to shard_map")
+        "workaround pass the check_vma=False argument to `jax.shard_map`")
   return x_aval.vma
 
 def _all_gather_effectful_abstract_eval(
@@ -1859,7 +1894,7 @@ def psum_scatter(x, axis_name, *, scatter_dimension=0, axis_index_groups=None,
   """
   if not isinstance(axis_name, tuple):
     axis_name = axis_name,
-  axis_size = psum(1, axis_name, axis_index_groups=axis_index_groups)
+  axis_size = _axis_size(axis_name, axis_index_groups)
   axis_index_groups = _canonicalize_axis_index_groups(axis_index_groups)
   def bind(leaf):
     leaf = insert_collective_pvary(axis_name, leaf)
@@ -1887,12 +1922,11 @@ def _build_axis_index_lowering_hlo(ctx, axis_name, axis_env):
       axis_context.manual_axes != frozenset(axis_context.mesh.axis_names)):
     if axis_env.sizes[axis_pos] == 1:
       return hlo.constant(ir.DenseElementsAttr.get(np.asarray(0, dtype=np.int32)))
-    from jax.experimental.shard_map import shard_map
     def f():
       return axis_index_p.bind(axis_name=axis_name)
     return mlir.lower_fun(
-        lambda: [shard_map(f, axis_context.mesh, check_rep=False,
-                           in_specs=(), out_specs=P())()])(ctx)[0]
+        lambda: [jax.shard_map(f, mesh=axis_context.mesh, check_vma=False,
+                               in_specs=(), out_specs=P())()])(ctx)[0]
 
   nreplicas = axis_env.nreps // math.prod(axis_env.sizes)
   div = mlir.ir_constant(
@@ -1921,8 +1955,7 @@ def _axis_index_effectful_abstract_eval(*, axis_name):
   mesh = get_abstract_mesh()
   sharding = NamedSharding(mesh, P())
   vma = ((frozenset(axis_name) if mesh._any_axis_manual else frozenset())
-         if config.varying_axes_in_types.value and config._check_rep.value
-         else frozenset())
+         if config._check_vma.value else frozenset())
   return ShapedArray((), np.int32, sharding=sharding, vma=vma), effect
 
 def _axis_index_batcher(axis_data, vals_in, dims_in, *, axis_name):

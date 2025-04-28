@@ -27,6 +27,7 @@ import unittest
 from absl.testing import absltest, parameterized
 import jax
 from jax._src import config
+from jax._src import lib as jaxlib
 from jax._src import test_util as jtu
 from jax._src.interpreters import mlir
 from jax._src.lib.mlir import ir
@@ -53,6 +54,7 @@ else:
   import jax.experimental.mosaic.gpu as mgpu
   from jax.experimental.mosaic.gpu import core
   from jax.experimental.mosaic.gpu import launch_context
+  from jax.experimental.mosaic.gpu import layouts
   from jax.experimental.mosaic.gpu import utils as utils
   from jax.experimental.mosaic.gpu import profiler
   from jax.experimental.mosaic.gpu import inference_utils
@@ -890,7 +892,7 @@ class WGMMATest(TestCase):
     ref = jax.lax.dot(
         x, (y.T if rhs_transpose else y), preferred_element_type=jnp.float32
     )
-    np.testing.assert_allclose(z, ref, rtol=5e-4, atol=0)
+    np.testing.assert_allclose(z, ref, rtol=1e-3, atol=0)
 
 
 class TCGen05Test(TestCase):
@@ -947,9 +949,8 @@ class TCGen05Test(TestCase):
       n=(64, 128, 256, 512),  # TODO(apaszke): 192, other non-power-of-2
       swizzle=(32, 64, 128,),
   )
-  def test_mma_basic(self, *args, **kwargs):
+  def test_mma_basic(self, **kwargs):
     self._basic_mma_test(
-        *args,
         **kwargs,
         k_steps=2,  # Reducing to 1 can be helpful while debugging.
         lhs_transpose_tiles=False,
@@ -967,11 +968,10 @@ class TCGen05Test(TestCase):
       lhs_transpose_tiles=(False, True),
       rhs_transpose_tiles=(False, True),
   )
-  def test_mma_transposed_tiles(self, *args, **kwargs):
+  def test_mma_transposed_tiles(self, **kwargs):
     if not kwargs["lhs_transpose_tiles"] and not kwargs["rhs_transpose_tiles"]:
       self.skipTest("This is already tested in test_mma_basic")
     self._basic_mma_test(
-        *args,
         **kwargs,
         k_steps=2,  # Reducing to 1 can be helpful while debugging.
     )
@@ -2241,19 +2241,6 @@ class ProfilerTest(TestCase):
     ))
     jax.block_until_ready(f(x))
 
-  def test_multigpu(self):
-    if len(jax.devices()) < 2:
-      self.skipTest("Need at least 2 devices")
-    def kernel(ctx, src, dst, _):
-      mgpu.FragmentedArray.load_strided(src).store_untiled(dst)
-    x = np.arange(64 * 64, dtype=jnp.float32).reshape(64, 64)
-    f = jax.jit(mgpu.as_gpu_kernel(
-        kernel, (1, 1, 1), (128, 1, 1), x, x, ()
-    ))
-    # Make sure we can invoke the same program on different devices.
-    for xd in (jax.device_put(x, d) for d in jax.devices()[:2]):
-      jax.block_until_ready(f(xd))
-
 
 class TorchTest(TestCase):
 
@@ -2552,7 +2539,7 @@ def set_in_transforms(
 
   in_transforms = []
   smem_refs = filter(inference_utils.is_transformable_smem_memref, op.operands)  # pylint: disable=undefined-variable
-  for _, result_transforms in jax.util.safe_zip(smem_refs, transforms):
+  for _, result_transforms in jax._src.util.safe_zip(smem_refs, transforms):
     in_transforms.append(
         ir.ArrayAttr.get([t.attr() for t in result_transforms])
     )
@@ -2690,7 +2677,7 @@ class MosaicGpuDialectTest(TestCase, jtu.JaxTestCase):
     ):
       del ctx
       smem_ref, tma_barrier = smem
-      dialect_barrier = tma_barrier.as_dialect_barrier_memref()
+      dialect_barrier = tma_barrier.as_barrier_memref()
 
       elt_type = ir.MemRefType(in_gmem_ref.type).element_type
       memref_bytes = utils.bytewidth(elt_type) * math.prod(
@@ -2714,7 +2701,7 @@ class MosaicGpuDialectTest(TestCase, jtu.JaxTestCase):
       )
       set_in_transforms(load_op, [test_case.transforms])
 
-      parities = memref.load(tma_barrier.phases, [])
+      parities = memref.load(tma_barrier.barrier_ref.phases, [])
       parity, _ = tma_barrier.update_parities(parities)
       mgpu_dialect.wait(dialect_barrier, parity)
 
@@ -2767,7 +2754,7 @@ class MosaicGpuDialectTest(TestCase, jtu.JaxTestCase):
     ):
       del ctx
       a_smem_ref, b_smem_ref, result_smem_ref, tma_barrier = smem
-      dialect_barrier = tma_barrier.as_dialect_barrier_memref()
+      dialect_barrier = tma_barrier.as_barrier_memref()
 
       memref_type = ir.MemRefType(a_gmem_ref.type)
       shape = memref_type.shape
@@ -2799,7 +2786,7 @@ class MosaicGpuDialectTest(TestCase, jtu.JaxTestCase):
           collective=ir.ArrayAttr.get([]),
       )
 
-      parities = memref.load(tma_barrier.phases, [])
+      parities = memref.load(tma_barrier.barrier_ref.phases, [])
       parity, _ = tma_barrier.update_parities(parities)
       mgpu_dialect.wait(dialect_barrier, parity)
 
@@ -2850,6 +2837,110 @@ class MosaicGpuDialectTest(TestCase, jtu.JaxTestCase):
 
     self.assertArraysEqual(jax.jit(kernel)(x, y), x + y + y)
 
+  @parameterized.parameters(
+      ((64,), (64, 128), [0]),
+      ((64,), (128, 64), [1]),
+  )
+  def test_broadcast_in_dim(self, input_shape, output_shape, bcast_dims):
+    # TODO(dasenov): Remove this after the minimal jaxlib version is 0.6.1.
+    if jaxlib.version < (0, 6, 1):
+      self.skipTest("Test requires jaxlib version >= 0.6.1")
+
+    element_value = 42.0
+    def body(ctx, result_gmem_ref, smem):
+      del ctx
+      result_smem_ref = smem[0]
+
+      f32 = ir.F32Type.get()
+      zero_index = arith.constant(ir.IndexType.get(), 0)
+
+      # Create input in registers
+      x_type = ir.VectorType.get(input_shape, f32)
+      c = arith.constant(f32, element_value)
+      x = vector.splat(x_type, c)
+
+      # Computation
+      out_type = ir.VectorType.get(output_shape, f32)
+      expanded = mgpu_dialect.broadcast_in_dim(out_type, x, bcast_dims)
+      cast = mgpu_dialect.layout_cast(
+          expanded, layouts.to_layout_attr(fa.WGMMA_LAYOUT)
+      )
+
+      # Registers -> SMEM
+      vector.store(cast, result_smem_ref, [zero_index] * len(output_shape))
+
+      # SMEM -> GMEM
+      zero_i32 = arith.constant(ir.IntegerType.get_signless(32), 0)
+      mgpu_dialect.async_store(
+          source=result_smem_ref,
+          destination=result_gmem_ref,
+          indices=[zero_i32] * len(output_shape),
+          slice_lengths=output_shape,
+      )
+      nvvm.cp_async_bulk_wait_group(0)
+      utils.warpgroup_barrier()
+
+    dtype = jnp.float32
+    kernel = mgpu.as_gpu_kernel(
+        body,
+        grid=(1, 1, 1),
+        block=(128, 1, 1),
+        in_shape=(),
+        out_shape=jax.ShapeDtypeStruct(output_shape, dtype),
+        smem_scratch_shape=[jax.ShapeDtypeStruct(output_shape, dtype)],
+        thread_semantics=mgpu.LoweringSemantics.Warpgroup,
+    )
+
+    x = np.full(input_shape, element_value, dtype=dtype)
+    self.assertArraysEqual(
+        jax.jit(kernel)(), jax.lax.broadcast_in_dim(x, output_shape, bcast_dims)
+    )
+
+  @parameterized.parameters(fa.WGMMA_ROW_LAYOUT, fa.WGMMA_COL_LAYOUT)
+  def test_wgmma_row_col_store(self, in_layout):
+    element_value = 42.0
+    shape = (64, )
+    def body(ctx, result_gmem_ref, smem):
+      del ctx
+      result_smem_ref = smem[0]
+
+      f32 = ir.F32Type.get()
+      zero_index = arith.constant(ir.IndexType.get(), 0)
+
+      # Create input in registers
+      x_type = ir.VectorType.get(shape, f32)
+      c = arith.constant(f32, element_value)
+      x = vector.splat(x_type, c)
+      cast = mgpu_dialect.layout_cast(x, layouts.to_layout_attr(in_layout))
+
+      # Registers -> SMEM
+      vector.store(cast, result_smem_ref, [zero_index])
+
+      # SMEM -> GMEM
+      zero_i32 = arith.constant(ir.IntegerType.get_signless(32), 0)
+      mgpu_dialect.async_store(
+          source=result_smem_ref,
+          destination=result_gmem_ref,
+          indices=[zero_i32],
+          slice_lengths=shape,
+      )
+      nvvm.cp_async_bulk_wait_group(0)
+      utils.warpgroup_barrier()
+
+    dtype = jnp.float32
+    kernel = mgpu.as_gpu_kernel(
+        body,
+        grid=(1, 1, 1),
+        block=(128, 1, 1),
+        in_shape=(),
+        out_shape=jax.ShapeDtypeStruct(shape, dtype),
+        smem_scratch_shape=[jax.ShapeDtypeStruct(shape, dtype)],
+        thread_semantics=mgpu.LoweringSemantics.Warpgroup,
+    )
+
+    x = np.full(shape, element_value, dtype=dtype)
+    self.assertArraysEqual(jax.jit(kernel)(), x)
+
 
 class MosaicGpuDialectSm90ATest(Sm90ATestCase, jtu.JaxTestCase):
 
@@ -2894,7 +2985,7 @@ class MosaicGpuDialectSm90ATest(Sm90ATestCase, jtu.JaxTestCase):
     ):
       del ctx
       lhs_smem_ref, rhs_smem_ref, result_smem_ref, tma_barrier = smem
-      dialect_barrier = tma_barrier.as_dialect_barrier_memref()
+      dialect_barrier = tma_barrier.as_barrier_memref()
 
       operand_elt_type = ir.MemRefType(lhs_gmem_ref.type).element_type
       bytes_a = utils.bytewidth(operand_elt_type) * math.prod(lhs_shape)
@@ -2924,7 +3015,7 @@ class MosaicGpuDialectSm90ATest(Sm90ATestCase, jtu.JaxTestCase):
           collective=ir.ArrayAttr.get([]),
       )
 
-      parities = memref.load(tma_barrier.phases, [])
+      parities = memref.load(tma_barrier.barrier_ref.phases, [])
       parity, _ = tma_barrier.update_parities(parities)
       mgpu_dialect.wait(dialect_barrier, parity)
 

@@ -117,6 +117,8 @@ class PallasCallStatefulTest(jtu.JaxTestCase):
 
       x = pl.pallas_call(
           functools.partial(copy_kernel, x_ref, y_ref),
+          in_specs=[pl.BlockSpec(memory_space=pltpu.ANY)],
+          out_specs=pl.BlockSpec(memory_space=pltpu.ANY),
           scratch_shapes=[pltpu.SemaphoreType.DMA],
           out_shape=jax.ShapeDtypeStruct(x_ref.shape, x_ref.dtype),
           input_output_aliases={0: 0},
@@ -228,7 +230,7 @@ class ShmallasTest(jtu.JaxTestCase):
         x_ref, y_ref = refs
         @pl.core_map(mesh)
         def _():
-          num_cores = jax.lax.psum(1, "x")
+          num_cores = jax.lax.axis_size("x")
           slc_size = 16 // num_cores
           def alloc(x_vmem_ref, y_vmem_ref, sem):
             core_index = jax.lax.axis_index("x")

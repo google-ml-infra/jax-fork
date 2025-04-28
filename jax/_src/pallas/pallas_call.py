@@ -15,12 +15,11 @@
 """Module for calling pallas functions from JAX."""
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
-import dataclasses
+from collections.abc import Callable, Mapping, Sequence
 import enum
 from functools import partial, reduce
 import types
-from typing import Any, Literal, cast
+from typing import Any, cast
 
 import jax
 from jax import lax
@@ -68,6 +67,8 @@ NoBlockSpec = pallas_core.NoBlockSpec
 no_block_spec = pallas_core.no_block_spec
 ScratchShapeTree = pallas_core.ScratchShapeTree
 CostEstimate = pallas_core.CostEstimate
+Backend = pallas_core.Backend
+CompilerParams = pallas_core.CompilerParams
 
 # See the docstring for GridMapping for the calling convention
 pallas_call_p = jax_core.Primitive('pallas_call')
@@ -121,11 +122,11 @@ def _pallas_call_jvp_rule(
     grid_mapping: GridMapping,
     mesh: pallas_core.Mesh | None,
     debug: bool,
-    interpret: bool,
+    interpret: Any,
     compiler_params: Any,
     cost_estimate: CostEstimate | None,
     out_avals: tuple[jax_core.AbstractValue, ...],
-    backend: _Backend | None,
+    backend: Backend | None,
 ):
   debug_info = jaxpr.debug_info
   if grid_mapping.num_dynamic_grid_bounds:
@@ -220,14 +221,19 @@ def _batch_block_mapping(
         block_mapping.index_map_jaxpr.consts,
         *drop_last_args,
     )
+    unflat_indices = tree_util.tree_unflatten(
+        block_mapping.index_map_out_tree, indices)
+    if not isinstance(unflat_indices, tuple):
+      unflat_indices = (unflat_indices,)
+    unflat_indices = list(unflat_indices)
     if dim is not batching.not_mapped:
       if isinstance(dim, batching.RaggedAxis):
         assert for_ragged, "Ragged axis not supported for non-ragged batching."
         stacked_axis = dim.stacked_axis
-        indices.insert(stacked_axis, new_idx)
+        unflat_indices.insert(stacked_axis, new_idx)
       else:
-        indices.insert(dim, new_idx)
-    return tuple(indices)
+        unflat_indices.insert(dim, new_idx)
+    return tuple(unflat_indices)
   idx_avals = [pallas_core.index_map_grid_aval, *block_mapping.index_map_jaxpr.in_avals]
 
   if for_ragged:
@@ -242,11 +248,15 @@ def _batch_block_mapping(
       )
       idx_avals = [*idx_avals, i32_aval_memref]
 
+  block_mapping_flat_fn, out_tree_thunk = api_util.flatten_fun_nokwargs(
+      lu.wrap_init(_block_map_function,
+                   debug_info=block_mapping.index_map_jaxpr.jaxpr.debug_info),
+      tree_util.tree_structure(idx_avals))
   with grid_mapping.trace_env():
     block_mapping_jaxpr, _, consts, () = pe.trace_to_jaxpr_dynamic(
-        lu.wrap_init(_block_map_function,
-                     debug_info=block_mapping.index_map_jaxpr.jaxpr.debug_info),
+        block_mapping_flat_fn,
         idx_avals)
+  new_index_map_out_tree = out_tree_thunk()
   shape = block_mapping.block_shape
   if dim is batching.not_mapped:
     new_block_shape = shape
@@ -257,10 +267,10 @@ def _batch_block_mapping(
       new_block_shape = shape
       stacked_axis = dim.stacked_axis
       new_block_shape = tuple_insert(
-          new_block_shape, stacked_axis, pallas_core.mapped
+          new_block_shape, stacked_axis, pallas_core.squeezed
       )
     else:
-      new_block_shape = tuple_insert(shape, dim, pallas_core.mapped)
+      new_block_shape = tuple_insert(shape, dim, pallas_core.squeezed)
 
     array_shape = block_mapping.array_shape_dtype.shape
     if isinstance(dim, batching.RaggedAxis):
@@ -277,7 +287,8 @@ def _batch_block_mapping(
   jaxpr = jax_core.ClosedJaxpr(block_mapping_jaxpr, consts)
   return block_mapping.replace(block_shape=new_block_shape,
                                array_shape_dtype=new_array_shape_dtype,
-                               index_map_jaxpr=jaxpr)
+                               index_map_jaxpr=jaxpr,
+                               index_map_out_tree=new_index_map_out_tree)
 
 
 def _broadcast_input_output_aliases(
@@ -324,11 +335,11 @@ def _batch_with_explicit_loop(
     mesh: pallas_core.Mesh | None,
     input_output_aliases: tuple[tuple[int, int], ...],
     debug: bool,
-    interpret: bool,
+    interpret: Any,
     compiler_params: Any,
     cost_estimate: CostEstimate | None,
     out_avals: tuple[jax_core.AbstractValue, ...],
-    backend: _Backend | None,
+    backend: Backend | None,
 ):
   """Batch the pallas_call by calling it in loop over the batch size.
 
@@ -422,11 +433,11 @@ def _pallas_call_batching_rule(
     mesh: pallas_core.Mesh | None,
     input_output_aliases: tuple[tuple[int, int], ...],
     debug: bool,
-    interpret: bool,
+    interpret: Any,
     compiler_params: Any,
     cost_estimate: CostEstimate | None,
     out_avals: tuple[jax_core.AbstractValue, ...],
-    backend: _Backend | None,
+    backend: Backend | None,
 ):
   if mesh is not None:
     raise NotImplementedError(
@@ -663,7 +674,7 @@ def _pallas_call_batching_rule(
     for block_mapping in batched_grid_mapping.block_mappings:
       mapped_dim_idxs = []
       for i, d in enumerate(block_mapping.block_shape):
-        if d is pallas_core.mapped:
+        if isinstance(d, pallas_core.Squeezed):
           mapped_dim_idxs.append(i)
         else:
           mapped_dim_idxs.append(None)  # type: ignore[arg-type]
@@ -754,7 +765,7 @@ def _pallas_call_batching_rule(
           continue
         arg_i_idx = (
             primitives.program_id(ragged_axis_dim)
-            * block_shapes[i][ragged_axis_dim]
+            * pallas_core._get_block_dim_size(block_shapes[i][ragged_axis_dim])
         )
         run_kernel = jnp.logical_and(run_kernel, arg_i_idx < b_len)
 
@@ -800,7 +811,8 @@ def _pallas_call_batching_rule(
         nargs = list(rest_indexer_args)
 
         if ragged_axis_dim is not None:
-          val_at_ragged_dim = batched_block_mapping.block_shape[ragged_axis_dim]
+          val_at_ragged_dim = pallas_core._get_block_dim_size(
+              batched_block_mapping.block_shape[ragged_axis_dim])
 
           # The current index into the ragged dimension.
           # Invariant: There is only one ragged dimension, enforced above.
@@ -965,13 +977,12 @@ def pallas_call_checkify_oob_grid(error: checkify.Error,
     num_iterations = 1
 
   is_indexing_dim = [
-      tuple(b is pallas_core.mapped for b in bm.block_shape)
+      tuple(isinstance(b, pallas_core.Squeezed) for b in bm.block_shape)
       for bm in grid_mapping.block_mappings
   ]
   block_shapes = [
-      None if iid is None
-      else tuple(1 if i else b for i, b in zip(iid, bm.block_shape))
-      for iid, bm in zip(is_indexing_dim, grid_mapping.block_mappings)
+      pallas_core._get_block_shape(bm.block_shape)
+      for bm in grid_mapping.block_mappings
   ]
   # The scan carry: (i, loop_idx, *consts, *ins, *outs, *scratch)
   # i:int32 is the interation index
@@ -1021,7 +1032,7 @@ def pallas_call_checkify_rule(error: checkify.Error,
                               enabled_errors,
                               *args: jax_core.Value,
                               jaxpr: jax_core.Jaxpr,
-                              interpret: bool,
+                              interpret: Any,
                               input_output_aliases: tuple[tuple[int, int], ...],
                               grid_mapping: GridMapping,
                               out_avals: tuple[jax_core.AbstractValue, ...],
@@ -1237,14 +1248,12 @@ def _unsupported_lowering_error(platform: str) -> Exception:
       " https://docs.jax.dev/en/latest/installation.html."
   )
 
-_Backend = Literal["mosaic_tpu", "triton", "mosaic_gpu"]
-
 
 def _pallas_call_lowering(
     ctx: mlir.LoweringRuleContext,
     *in_nodes,
-    interpret: bool,
-    backend: _Backend | None,
+    interpret: Any,
+    backend: Backend | None,
     **params,
 ):
   if params['jaxpr'].constvars:
@@ -1357,11 +1366,11 @@ def _pallas_call_state_discharge_rule(
     grid_mapping: GridMapping,
     mesh: pallas_core.Mesh | None,
     debug: bool,
-    interpret: bool,
+    interpret: Any,
     compiler_params: Any,
     cost_estimate: CostEstimate | None,
     out_avals: tuple[jax_core.AbstractValue, ...],
-    backend: _Backend | None = None,
+    backend: Backend | None = None,
 ):
   del avals_out
   assert all(isinstance(v.aval, state.AbstractRef) for v in jaxpr.constvars)
@@ -1479,13 +1488,15 @@ def pallas_call(
     in_specs: BlockSpecTree = no_block_spec,
     out_specs: BlockSpecTree = no_block_spec,
     scratch_shapes: ScratchShapeTree = (),
-    input_output_aliases: dict[int, int] = {},
+    input_output_aliases: Mapping[int, int] = {},
     debug: bool = False,
-    interpret: bool = False,
+    interpret: Any = False,
     name: str | None = None,
-    compiler_params: dict[str, Any] | pallas_core.CompilerParams | None = None,
+    compiler_params: (
+        Mapping[Backend, CompilerParams] | CompilerParams | None
+    ) = None,
     cost_estimate: CostEstimate | None = None,
-    backend: _Backend | None = None,
+    backend: Backend | None = None,
 ) -> Callable[..., Any]:
   """Invokes a Pallas kernel on some inputs.
 
@@ -1527,22 +1538,22 @@ def pallas_call(
       This is useful for debugging.
     name: if present, specifies the name to use for this kernel call in
       debugging and error messages. To this name we append the file and line
-      where the kernel function is defined, .e.g:
-      `{name} for kernel function {kernel_name} at {file}:{line}`.
-      If missing, then we use `{kernel_name} at {file}:{line}`.
-    compiler_params: Optional compiler parameters. If a dict is provided, it
-      should be of the form {platform: {param_name: param_value}}, where
-      platform is either 'mosaic' or 'triton'. It is also possible
-      to pass in `jax.experimental.pallas.tpu.TPUCompilerParams` for TPUs and
-      `jax.experimental.pallas.gpu.TritonCompilerParams` for Triton/GPUs.
-    backend: Optional string literal one of  "mosaic_tpu", "triton" or "mosaic_gpu"
-      determining the backend to be used. None means let pallas decide.
-
+      where the kernel function is defined, .e.g: `{name} for kernel function
+      {kernel_name} at {file}:{line}`. If missing, then we use `{kernel_name} at
+      {file}:{line}`.
+    compiler_params: Optional compiler parameters. The value should either be a
+      backend-specific dataclass
+      (:class:`jax.experimental.pallas.tpu.TPUCompilerParams`,
+      :class:`jax.experimental.pallas.triton.TritonCompilerParams`,
+      :class:`jax.experimental.pallas.mosaic_gpu.GPUCompilerParams`) or a dict
+      mapping backend name to the corresponding platform-specific dataclass.
+    backend: Optional string literal one of  ``"mosaic_tpu"``, ``"triton"`` or
+      ``"mosaic_gpu"`` determining the backend to be used. None means let Pallas
+      decide.
 
   Returns:
     A function that can be called on a number of positional array arguments to
     invoke the Pallas kernel.
-
   """
   if grid_spec is None:
     grid_spec = GridSpec(grid, in_specs, out_specs, scratch_shapes)
@@ -1578,30 +1589,46 @@ def pallas_call(
   )
 
 
+def _normalize_compiler_params(
+    compiler_params: Mapping[Backend, CompilerParams] | CompilerParams | None,
+) -> Mapping[Backend, CompilerParams]:
+  if compiler_params is None:
+    return {}
+  if isinstance(compiler_params, pallas_core.CompilerParams):
+    compiler_params = {compiler_params.BACKEND: compiler_params}
+  assert isinstance(compiler_params, Mapping)
+  for backend, params in compiler_params.items():
+    if backend not in ["mosaic_tpu", "mosaic_gpu", "triton"]:
+      raise ValueError(f"Unknown backend in compiler_params: {backend}")
+    if not isinstance(params, pallas_core.CompilerParams):
+      raise ValueError(
+          f"Unexpected compiler_params for backend {backend}: {params}"
+      )
+    if params.BACKEND != backend:
+      raise ValueError(
+          f"Inconsistent backend in compiler_params: {params.BACKEND} !="
+          f" {backend}"
+      )
+  return compiler_params
+
+
 def _pallas_call(
     kernel: Callable[..., None],
     out_shape: Any,
     *,
     grid_spec: GridSpec,
     mesh: pallas_core.Mesh | None = None,
-    input_output_aliases: dict[int, int] = {},
+    input_output_aliases: Mapping[int, int] = {},
     debug: bool = False,
-    interpret: bool = False,
+    interpret: Any = False,
     name: str | None = None,
-    compiler_params: dict[str, Any] | pallas_core.CompilerParams | None = None,
+    compiler_params: (
+        Mapping[Backend, CompilerParams] | CompilerParams | None
+    ) = None,
     cost_estimate: CostEstimate | None = None,
-    backend: _Backend | None = None,
+    backend: Backend | None = None,
 ):
-  if compiler_params is None:
-    compiler_params = {}
-  if isinstance(compiler_params, pallas_core.CompilerParams):
-    if compiler_params.PLATFORM not in ["mosaic", "mosaic_gpu", "triton"]:
-      raise ValueError(
-          f"Unknown platform in compiler params: {compiler_params.PLATFORM}"
-      )
-    compiler_params = {
-        compiler_params.PLATFORM: dataclasses.asdict(compiler_params)
-    }
+  compiler_params = _normalize_compiler_params(compiler_params)
 
   if mesh is not None:
     if tuple(mesh.shape.values()) != grid_spec.grid:
@@ -1611,7 +1638,7 @@ def _pallas_call(
       )
     if backend is not None:
       raise ValueError("If `mesh` is specified, then `backend` must be `None`.")
-    backend = cast(_Backend, mesh.backend)
+    backend = cast(Backend, mesh.backend)
 
   grid_spec, dynamic_grid_bounds = pallas_core.unzip_dynamic_grid_bounds(grid_spec)
   # TODO(necula): this canonicalization may be convenient for some usage

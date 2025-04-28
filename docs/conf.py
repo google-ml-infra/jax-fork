@@ -133,6 +133,7 @@ exclude_patterns = [
     # These are kept in sync using the jupytext pre-commit hook.
     'notebooks/*.md',
     'pallas/quickstart.md',
+    'pallas/pipelining.md',
     'pallas/tpu/pipelining.md',
     'pallas/tpu/distributed.md',
     'pallas/tpu/sparse.md',
@@ -142,6 +143,7 @@ exclude_patterns = [
     'autodidax2_part1.md',
     'sharded-computation.md',
     'ffi.ipynb',
+    'notebooks/host-offloading.ipynb',
 ]
 
 # The name of the Pygments (syntax highlighting) style to use.
@@ -228,12 +230,13 @@ nb_execution_excludepatterns = [
     'notebooks/convolutions.ipynb',
     # Requires accelerators
     'pallas/quickstart.*',
+    'pallas/pipelining.*',
     'pallas/tpu/pipelining.*',
     'pallas/tpu/distributed.*',
     'pallas/tpu/sparse.*',
     'pallas/tpu/matmul.*',
-    'sharded-computation.*',
-    'distributed_data_loading.*'
+    'distributed_data_loading.*',
+    'notebooks/host-offloading.*',
 ]
 
 # -- Options for HTMLHelp output ---------------------------------------------

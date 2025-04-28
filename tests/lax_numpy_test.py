@@ -968,6 +968,7 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
   @jtu.sample_product(
     dtype=[dt for dt in float_dtypes if dt not in [jnp.float16, jnp.bfloat16]],
     shape=[shape for shape in one_dim_array_shapes if shape != (1,)],
+    num_rhs=[1, 5],
     deg=[1, 2, 3],
     rcond=[None, -1, 10e-3, 10e-5, 10e-10],
     full=[False, True],
@@ -975,12 +976,13 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
     cov=[False, True, "unscaled"],
   )
   @jax.default_matmul_precision("float32")
-  def testPolyfit(self, shape, dtype, deg, rcond, full, w, cov):
+  def testPolyfit(self, shape, num_rhs, dtype, deg, rcond, full, w, cov):
     rng = jtu.rand_default(self.rng())
     tol_spec = {np.float32: 1e-3, np.float64: 1e-13, np.complex64: 1e-5}
     tol = jtu.tolerance(dtype, tol_spec)
     _w = lambda a: abs(a) if w else None
-    args_maker = lambda: [rng(shape, dtype), rng(shape, dtype), rng(shape, dtype)]
+    rhs_shape = shape + (num_rhs,) if num_rhs > 1 else shape
+    args_maker = lambda: [rng(shape, dtype), rng(rhs_shape, dtype), rng(shape, dtype)]
     jnp_fun = lambda x, y, a: jnp.polyfit(x, y, deg=deg, rcond=rcond, full=full, w=_w(a), cov=cov)
     np_fun = jtu.ignore_warning(
       message="Polyfit may be poorly conditioned*")(lambda x, y, a: np.polyfit(x, y, deg=deg, rcond=rcond, full=full, w=_w(a), cov=cov))
@@ -2754,6 +2756,28 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
     self._CheckAgainstNumpy(np_fun, jnp_fun, args_maker)
     self._CompileAndCheck(jnp_fun, args_maker)
 
+  @parameterized.parameters(*float_dtypes)
+  def testLdexpOverflow(self, dtype):
+    # Regression test for https://github.com/jax-ml/jax/issues/28040
+    args_maker = lambda: [np.array(0.5, dtype), 1 << (dtypes.finfo(dtype).nexp - 1)]
+    def np_ldexp(x1, x2):
+      return np.ldexp(x1, x2).astype(x1.dtype)
+    self._CheckAgainstNumpy(np_ldexp, jnp.ldexp, args_maker)
+    self._CompileAndCheck(jnp.ldexp, args_maker)
+
+  @parameterized.parameters(*float_dtypes)
+  def testLdexpExtremeValues(self, dtype):
+    # Regression test for https://github.com/jax-ml/jax/issues/28040
+    def args_maker():
+      info = dtypes.finfo(dtype)
+      span = int(np.log2(float(info.max)) - np.log2(float(info.tiny))) - 1
+      return [np.array([info.tiny, info.max], dtype=dtype),
+              np.array([span, -span])]
+    def np_ldexp(x1, x2):
+      return np.ldexp(x1, x2).astype(x1.dtype)
+    self._CheckAgainstNumpy(np_ldexp, jnp.ldexp, args_maker)
+    self._CompileAndCheck(jnp.ldexp, args_maker)
+
   @jtu.sample_product(
       rng_factory=[
           jtu.rand_some_inf_and_nan,
@@ -3660,6 +3684,53 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
     else:
       self.assertArraysEqual(x_jax, func(x_np), check_dtypes=False)
       self.assertArraysEqual(x_jax, func(x_buf), check_dtypes=False)
+
+  @jtu.sample_product(numpy_array=[True, False])
+  def testAsarrayWithCopyFalse(self, numpy_array):
+    x_jax = jnp.arange(4)
+    if numpy_array:
+      x = np.arange(4)
+    else:
+      x = make_python_array('l', [0, 1, 2, 3])
+    device_error_msg = ('jnp.asarray: cannot convert object of type .* to JAX'
+                        ' Array on platform={} with copy=False. Consider using'
+                        ' copy=None or copy=True instead.')
+
+    if jax.default_backend() != 'cpu':
+      # test accelerator devices - no support for copy=False
+      expected_platform = jax.local_devices()[0].platform
+      with self.assertRaisesRegex(
+          ValueError, device_error_msg.format(expected_platform)):
+        jnp.asarray(x, copy=False, device=jax.local_devices()[0])
+      sharding = SingleDeviceSharding(jax.local_devices()[0])
+      with self.assertRaisesRegex(
+          ValueError, device_error_msg.format(expected_platform)):
+        jnp.asarray(x, copy=False, device=sharding)
+
+      # test None defaults to default backend - no support for copy=False
+      with self.assertRaisesRegex(
+          ValueError, device_error_msg.format(expected_platform)):
+        jnp.asarray(x, copy=False, device=None)
+    else:
+      self.assertArraysEqual(jnp.asarray(x, copy=False, device=None), x_jax,
+                             check_dtypes=False)
+
+    # test explicit CPU device or default CPU device context managers overwrite the default backend
+    x = make_python_array('l', [0, 1, 2, 3])
+    for device in [jax.local_devices(backend='cpu')[0],
+                   SingleDeviceSharding(jax.local_devices(backend='cpu')[0])]:
+      self.assertArraysEqual(jnp.asarray(x, copy=False, device=device),
+                             x_jax, check_dtypes=False)
+    with jax.default_device('cpu'):
+      self.assertArraysEqual(jnp.asarray(x, copy=False), x_jax,
+                             check_dtypes=False)
+      self.assertArraysEqual(jnp.asarray(x, copy=False, device=None), x_jax,
+                             check_dtypes=False)
+    with jax.default_device(jax.local_devices(backend='cpu')[0]):
+      self.assertArraysEqual(jnp.asarray(x, copy=False), x_jax,
+                             check_dtypes=False)
+      self.assertArraysEqual(jnp.asarray(x, copy=False, device=None), x_jax,
+                             check_dtypes=False)
 
   @jtu.ignore_warning(category=UserWarning, message="Explicitly requested dtype.*")
   def testArrayDtypeInference(self):
@@ -6326,8 +6397,17 @@ class NumpyGradTests(jtu.JaxTestCase):
   )
   def testGradLdexp(self, n, dtype):
     rng = jtu.rand_default(self.rng())
-    x = rng((), dtype)
+    x = rng((10,), dtype)
     check_grads(lambda x: jnp.ldexp(x, n), (x,), 1)
+
+  @jtu.sample_product(
+    n=range(-4, 5),
+    dtype=[jnp.float32, jnp.float64],
+  )
+  def testGradFrexp(self, n, dtype):
+    rng = jtu.rand_default(self.rng())
+    x = rng((10,), dtype) * 2 ** n
+    check_grads(lambda x: jnp.frexp(x)[0], (x,), 1)
 
 
 class NumpySignaturesTest(jtu.JaxTestCase):

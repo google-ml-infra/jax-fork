@@ -22,7 +22,6 @@ import math
 import operator
 from typing import Any, Sequence, Type, cast
 
-from jax._src import lib as jaxlib
 from jax._src.interpreters import mlir as mlir_interpreter
 from jax._src.lib import mosaic_gpu_dialect as mgpu
 from jax._src.lib.mlir import ir
@@ -189,10 +188,18 @@ def _initialize_barrier_op_lowering_rule(
 
   for i in range(num_barriers):
     nvvm.mbarrier_init_shared(
-        llvm.getelementptr(ptr_ty, initialize_barrier_op.base_pointer, [], [i],
-                           lowered_barrier_type),
-        utils.c(initialize_barrier_op.arrival_count.value, i32),
-        predicate=ctx.single_thread_per_block_predicate
+        llvm.getelementptr(
+            ptr_ty,
+            initialize_barrier_op.base_pointer,
+            [],
+            [i],
+            lowered_barrier_type,
+        ),
+        utils.c(
+            initialize_barrier_op.arrival_count.value * utils.WARPGROUP_SIZE,
+            i32,
+        ),
+        predicate=ctx.single_thread_per_block_predicate,
     )
 
   gpu.barrier()
@@ -400,7 +407,9 @@ def _vector_store_op_lowering_rule(
     fragmented_array.store_tiled(
         reinterpret_smem_ref(vector_store_op.base, transforms), swizzle
     )
-  elif (isinstance(fragmented_array.layout, fa.WGStridedFragLayout) or
+  elif (fragmented_array.layout == fa.WGMMA_ROW_LAYOUT or
+        fragmented_array.layout == fa.WGMMA_COL_LAYOUT or
+        isinstance(fragmented_array.layout, fa.WGStridedFragLayout) or
         isinstance(fragmented_array.layout, fa.WGSplatFragLayout)):
     fragmented_array.store_untiled(vector_store_op.base)
   else:
@@ -470,13 +479,41 @@ def _vector_reduction_op_lowering_rule(
   return [_fragmented_array_to_ir(result, op.result.type)]
 
 
-# TODO(dasenov): Remove this after the minimal jaxlib version is 0.5.4.
-if jaxlib.version >= (0, 5, 4):
-  @_register_lowering(mgpu.LayoutCastOp)
-  def _mgpu_layout_cast_op_lowering_rule(
-      _: LoweringContext, layout_cast_op: mgpu.LayoutCastOp
+@_register_lowering(mgpu.LayoutCastOp)
+def _mgpu_layout_cast_op_lowering_rule(
+    _: LoweringContext, layout_cast_op: mgpu.LayoutCastOp
+) -> Sequence[ir.Value]:
+  return [layout_cast_op.x]
+
+
+# TODO(dasenov): Remove this after the minimal jaxlib version is 0.6.1.
+if hasattr(mgpu, "BroadcastInDimOp"):
+  @_register_lowering(mgpu.BroadcastInDimOp)
+  def _mgpu_broadcast_in_dim_op_lowering_rule(
+      _: LoweringContext, op: mgpu.BroadcastInDimOp
   ) -> Sequence[ir.Value]:
-    return [layout_cast_op.x]
+    in_ty = ir.VectorType(op.operand.type)
+    out_ty = ir.VectorType(op.result.type)
+    if len(in_ty.shape) != 1 or len(out_ty.shape) != 2:
+      raise NotImplementedError(
+          "Broadcast in dim with non-trivial broadcast dimensions is not"
+          f" supported: {op}"
+      )
+
+    broadcast_dims = list(op.broadcast_dimensions)
+    in_layout = inference_utils.in_layouts(op)[0]
+    operand_fa = _fragmented_array_from_ir(op.operand, in_layout)
+
+    if (operand_fa.layout == fa.WGMMA_ROW_LAYOUT and broadcast_dims == [0]):
+      out = operand_fa.broadcast_minor(out_ty.shape[1])
+    elif (operand_fa.layout == fa.WGMMA_COL_LAYOUT and broadcast_dims == [1]):
+      out = operand_fa.broadcast_major(out_ty.shape[0])
+    else:
+      raise NotImplementedError(
+          "Broadcast in dim with non-trivial broadcast dimensions is not"
+          f" supported: {op}"
+      )
+    return [_fragmented_array_to_ir(out, out_ty)]
 
 
 def swizzle_and_transforms_from_transforms_attr(
@@ -599,7 +636,7 @@ def _mgpu_async_load_op_lowering_rule(
     ctx: LoweringContext, load_op: mgpu.AsyncLoadOp
 ) -> Sequence[ir.Value]:
   assert ctx.launch_context is not None
-  barrier = utils.BarrierRef.from_dialect_barrier_memref(load_op.barrier)
+  barrier = utils.DialectBarrierRef.from_barrier_memref(load_op.barrier)
 
   if inference_utils.has_in_transforms_set(load_op):
     [transforms] = inference_utils.in_transforms(load_op)
@@ -627,7 +664,7 @@ def _mgpu_async_load_op_lowering_rule(
       src_ref=load_op.source,
       dst_ref=reinterpret_smem_ref(load_op.destination, transforms),
       gmem_slice=tuple(gmem_slice),
-      barrier=barrier,
+      barrier=barrier.barrier_ref,
       arrive=False,
       uniform=True,
       swizzle=swizzle,
@@ -927,14 +964,25 @@ def _mgpu_wgmma_op_lowering_rule(
 
 @_register_lowering(mgpu.ArriveExpectTxOp)
 def _mgpu_arrive_expect_tx_op_lowering_rule(
-    ctx: LoweringContext, arrive_expect_tx_op: mgpu.ArriveExpectTxOp
+    _: LoweringContext, arrive_expect_tx_op: mgpu.ArriveExpectTxOp
 ) -> Sequence[ir.Value]:
+  bytes = arrive_expect_tx_op.expect_tx.value
+  if bytes % utils.WARPGROUP_SIZE:
+    raise NotImplementedError(
+        "Only copies of a multiple of 128 bytes are supported"
+    )
+  # We arrive uniformly from each thread in the WG, so we need to divide the
+  # number of bytes by the number of threads in the WG.
+  # TODO: dasenov - Relax this. We can just select the WG leader and have it
+  # arrive with the whole transfer size, while everyone else arrives with 0.
+  # But we should continue using this scheme as it's likely to be faster.
+  bytes //= utils.WARPGROUP_SIZE
+  bytes = utils.c(bytes, ir.IntegerType.get_signless(32))
 
-  barrier = utils.BarrierRef.from_dialect_barrier_memref(arrive_expect_tx_op.barrier)
-  barrier.arrive_expect_tx(
-      arrive_expect_tx_op.expect_tx.value,
-      ctx.single_thread_per_warpgroup_predicate,
+  barrier = utils.DialectBarrierRef.from_barrier_memref(
+      arrive_expect_tx_op.barrier
   )
+  nvvm.mbarrier_arrive_expect_tx_shared(barrier.get_ptr(), bytes)
 
   return []
 
@@ -944,7 +992,7 @@ def _mgpu_wait_op_lowering_rule(
     _: LoweringContext, wait_op: mgpu.WaitOp
 ) -> Sequence[ir.Value]:
 
-  barrier = utils.BarrierRef.from_dialect_barrier_memref(wait_op.barrier)
+  barrier = utils.DialectBarrierRef.from_barrier_memref(wait_op.barrier)
   barrier.wait_parity(wait_op.parity)
 
   return []

@@ -63,7 +63,7 @@ from jax._src.interpreters import ad as ad_internal
 from jax._src.interpreters import mlir
 from jax._src.interpreters import partial_eval as pe
 from jax._src.compilation_cache import is_persistent_cache_enabled
-from jax._src.lib import xla_extension
+from jax._src.lib import _jax
 import jax._src.util as jax_util
 from jax.ad_checkpoint import checkpoint_name, checkpoint as new_checkpoint
 import jax.custom_batching
@@ -1362,7 +1362,7 @@ class JitTest(jtu.BufferDonationTestCase):
             "exec_time_optimization_effort": 0.0,
         })(1.0)  # doesn't crash.
 
-    with self.assertRaisesRegex(xla_extension.XlaRuntimeError, "No such"):
+    with self.assertRaisesRegex(_jax.XlaRuntimeError, "No such"):
       f_jit = jit(
           f,
           compiler_options={
@@ -1403,12 +1403,12 @@ class JitTest(jtu.BufferDonationTestCase):
     lowered = f_jit.lower(1.)
 
     self.assertRaisesRegex(
-        xla_extension.XlaRuntimeError, "No such compile option: 'invalid_key'",
+        _jax.XlaRuntimeError, "No such compile option: 'invalid_key'",
         lambda: lowered.compile(
             compiler_options={"invalid_key": "invalid_value"}))
 
     self.assertRaisesRegex(
-        xla_extension.XlaRuntimeError, "is not a valid bool value.",
+        _jax.XlaRuntimeError, "is not a valid bool value.",
         lambda: lowered.compile(
             compiler_options={"xla_embed_ir_in_executable": "invalid_value"}))
 
@@ -1423,7 +1423,7 @@ class JitTest(jtu.BufferDonationTestCase):
 
     # We should still error on invalid options after some valid compiles
     with self.assertRaisesRegex(
-        xla_extension.XlaRuntimeError, "No such compile option: 'invalid_key'"):
+        _jax.XlaRuntimeError, "No such compile option: 'invalid_key'"):
       jit(f, compiler_options={"invalid_key": "invalid_value"})(1.)
 
   def test_lower_compile_with_compiler_options_multiple(self):
@@ -1448,7 +1448,7 @@ class JitTest(jtu.BufferDonationTestCase):
 
     # We should still error on invalid options after some valid compiles
     self.assertRaisesRegex(
-        xla_extension.XlaRuntimeError, "No such compile option: 'invalid_key'",
+        _jax.XlaRuntimeError, "No such compile option: 'invalid_key'",
         lambda: lowered.compile(
             compiler_options={"invalid_key": "invalid_value"}))
 
@@ -1483,7 +1483,7 @@ class JitTest(jtu.BufferDonationTestCase):
 
   def test_caches_depend_on_axis_env(self):
     # https://github.com/jax-ml/jax/issues/9187
-    f = lambda: lax.psum(1, "i")
+    f = lambda: lax.axis_size("i")
     g = jax.jit(f)
     expected = jax.vmap(f, axis_name="i", axis_size=2, out_axes=None)()
     ans = jax.vmap(g, axis_name="i", axis_size=2, out_axes=None)()
@@ -1626,6 +1626,27 @@ class APITest(jtu.JaxTestCase):
     assert len(side) == 1
     assert g(2.0) == 4.0
     assert len(side) == 1
+
+  @jtu.thread_unsafe_test()  # Concurrent ache eviction means we may retrace.
+  def test_fwd_and_bwd(self):
+    def f(x, W):
+        return x @ W
+
+    x = W = cot_out = jnp.ones((4,4))
+    expected_y, f_vjp = api.vjp(f, x, W)
+    expected_cot_x, expected_cot_W = f_vjp(cot_out)
+
+    fwd, bwd = api.fwd_and_bwd(f)
+    y, residuals = fwd(x, W)
+    cot_x, cot_W = bwd(residuals, cot_out)
+
+    self.assertArraysAllClose(y, expected_y)
+    self.assertArraysAllClose(cot_x, expected_cot_x)
+    self.assertArraysAllClose(cot_W, expected_cot_W)
+
+    with jax.no_tracing():
+      y, residuals = fwd(x, W)
+      cot_x, cot_W = bwd(residuals, cot_out)  # no recompilation
 
   @parameterized.named_parameters(
       {"testcase_name": f"_{transform.__name__}", "transform": transform}
@@ -4313,6 +4334,21 @@ class APITest(jtu.JaxTestCase):
     for i in range(3):  # Loop verifies we exercise both Python and C++ dispatch
       self.assertEqual(2 * i, g(2, i), msg=i)
 
+  def test_make_jaxpr_static_argnums_order(self):
+    # https://github.com/jax-ml/jax/issues/28065
+    def f(a, b, c):
+      x = a + c
+      y = b * c
+      z = x - y
+      return z
+
+    for static_argnums in [(1, 0), (0, 1)]:
+      val = jax.jit(f, static_argnums=static_argnums)(1, 2, 3)
+      self.assertEqual(val, -2)
+      jaxpr = jax.make_jaxpr(f, static_argnums=static_argnums)(1, 2, 3)
+      self.assertEqual(jaxpr.eqns[0].invars[0].val, 1)
+      self.assertEqual(jaxpr.eqns[1].invars[0].val, 2)
+
   def test_fastpath_cache_confusion(self):
     # https://github.com/jax-ml/jax/issues/12542
     @jax.jit
@@ -4918,6 +4954,11 @@ class APITest(jtu.JaxTestCase):
 
     with config.use_direct_linearize(True):
       jax.grad(my_sin_p.bind)(1.0)  # doesn't crash
+
+  def test_ensure_compile_time_eval_no_leaks(self):
+    # https://github.com/jax-ml/jax/issues/25847
+    with jax.ensure_compile_time_eval():
+      jnp.linalg.solve(jnp.eye(3), jnp.ones(3))  # doesn't crash
 
 
 class RematTest(jtu.JaxTestCase):
@@ -6812,13 +6853,13 @@ class DCETest(jtu.JaxTestCase):
     self.assert_dce_result(
         jaxpr,   used_outputs=used_outputs,
         expected_used_inputs=expected_used_inputs,
-        expected_num_eqns=1)  # 1 b/c scan doesn't have fwding rule
+        expected_num_eqns=0)
     used_outputs[7] = expected_used_inputs[7] = True
     used_outputs[6] = expected_used_inputs[6] = True
     self.assert_dce_result(
         jaxpr,   used_outputs=used_outputs,
         expected_used_inputs=expected_used_inputs,
-        expected_num_eqns=1)
+        expected_num_eqns=0)
 
     # If we use the value at index 3 only, some of the hidden sequence must be
     # kept but the rest pruned.
@@ -8338,6 +8379,22 @@ class CustomJVPTest(jtu.JaxTestCase):
       return f(x, f(x, 1.))
 
     jax.jvp(jax.vmap(g), (jnp.ones(3),), (jnp.ones(3),))  # don't crash
+
+  def test_symbolic_zero_under_vmap_of_jit(self):
+    # https://github.com/jax-ml/jax/issues/28144
+    @jax.custom_jvp
+    def f(x):
+        return x + 1
+
+    @f.defjvp
+    def f_jvp(x, t):
+        (x,) = x
+        (t,) = t
+        z = custom_derivatives_public.zero_from_primal(x, symbolic_zeros=True)
+        return f(x), z
+
+    x = jnp.arange(3.0)
+    jax.jvp(jax.vmap(jax.jit(f)), (x,), (x,))  # doesn't crash
 
 
 class CustomVJPTest(jtu.JaxTestCase):

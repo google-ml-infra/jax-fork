@@ -40,6 +40,20 @@ import jax.numpy as jnp
 map = util.safe_map
 zip = util.safe_zip
 
+def _get_block_size(
+    bd: pl.Blocked | pl.Element | pl.Squeezed | pl.BoundedSlice | int | None,
+) -> int:
+  match bd:
+    case int():
+      return bd
+    case pl.Blocked(block_size):
+      return block_size
+    case _:
+      raise NotImplementedError(f"Unsupported block size type: {type(bd)}")
+
+def _get_block_shape(spec: pallas_core.BlockSpec):
+  assert spec.block_shape is not None
+  return tuple(_get_block_size(bd) for bd in spec.block_shape)
 
 @jax.tree_util.register_dataclass
 @dataclasses.dataclass(frozen=True)
@@ -64,10 +78,11 @@ class BufferedRef:
     # We don't allow Python scalars here, because they are interpreted
     # differently depending on the x32/x64 mode.
     assert all(i.dtype == jnp.dtype(jnp.int32) for i in grid_indices)
+    sizes = _get_block_shape(self.spec)
     return tuple(
         pl.Slice(idx * size, size)  # type: ignore[arg-type]
         for idx, size in zip(
-            index_map(*grid_indices), self.spec.block_shape  # type: ignore[arg-type]
+            index_map(*grid_indices), sizes  # type: ignore[arg-type]
         )
     )
 
@@ -201,7 +216,7 @@ def emit_pipeline(
     in_smem_refs, out_smem_refs = util.split_list(
         [
             gpu_core.SMEM(
-                (max_concurrent_steps, *spec.block_shape),  # type: ignore
+                (max_concurrent_steps, *_get_block_shape(spec)),  # type: ignore
                 ref.dtype,
                 transforms=tuple(
                     t.batch(1) for t in getattr(spec, "transforms", ())
@@ -213,6 +228,7 @@ def emit_pipeline(
         ],
         [len(in_specs)],
     )
+    arrival_count = sum(map(_in_smem, in_specs))
     return pl.run_scoped(
         functools.partial(
             scoped_pipeline,
@@ -221,9 +237,11 @@ def emit_pipeline(
         ),
         in_smem_refs=in_smem_refs,
         out_smem_refs=out_smem_refs,
-        barrier_ref=gpu_core.Barrier(
+        barrier_ref=None
+        if arrival_count == 0
+        else gpu_core.Barrier(
             # TODO(slebedev): Change this to arrive only once.
-            sum(map(_in_smem, in_specs)),
+            arrival_count,
             num_barriers=max_concurrent_steps,
         ),
     )
@@ -260,8 +278,8 @@ def emit_pipeline(
       slot = lax.rem(step, max_concurrent_steps)
       indices, fetch_indices, last_store_slices = carry
 
-      if in_specs:
-        # Wait for the current GMEM->SMEM copy to complete.
+      if barrier_ref is not None:
+        # Wait for the current GMEM->SMEM copy to complete, if any.
         gpu_primitives.barrier_wait(barrier_ref.at[slot])
       # Wait for the previous output SMEM->GMEM copy to complete.
       if copies_out_in_loop:

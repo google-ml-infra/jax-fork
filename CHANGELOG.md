@@ -16,6 +16,12 @@ When releasing, please add the new-release-boilerplate to docs/pallas/CHANGELOG.
 
 ## Unreleased
 
+* New features:
+  * Added {func}`jax.lax.axis_size` which returns the size of the mapped axis
+    given its name.
+
+## JAX 0.6.0 (April 16, 2025)
+
 * Breaking changes
 
   * {func}`jax.numpy.array` no longer accepts `None`. This behavior was
@@ -59,6 +65,14 @@ When releasing, please add the new-release-boilerplate to docs/pallas/CHANGELOG.
   * The deprecated use of {func}`jax.ffi.ffi_call` with inline arguments is no
     longer supported. {func}`~jax.ffi.ffi_call` now unconditionally returns a
     callable.
+  * The following exports in `jax.lib.xla_client` are deprecated:
+    `get_topology_for_devices`, `heap_profile`, `mlir_api_version`, `Client`,
+    `CompileOptions`, `DeviceAssignment`, `Frame`, `HloSharding`, `OpSharding`,
+    `Traceback`.
+  * The following internal APIs in `jax.util` are deprecated:
+    `HashableFunction`, `as_hashable_function`, `cache`, `safe_map`, `safe_zip`,
+    `split_dict`, `split_list`, `split_list_checked`, `split_merge`, `subvals`,
+    `toposort`, `unzip2`, `wrap_name`, and `wraps`.
   * `jax.dlpack.to_dlpack` has been deprecated. You can usually pass a JAX
     `Array` directly to the `from_dlpack` function of another framework. If you
     need the functionality of `to_dlpack`, use the `__dlpack__` attribute of an
@@ -105,6 +119,30 @@ Patch release of 0.5.1
   * Fixes TPU metric logging and `tpu-info`, which was broken in 0.5.1
 
 ## jax 0.5.1 (Feb 24, 2025)
+
+* Breaking changes
+  * The jit tracing cache now keys on input NamedShardings. Previously, the
+    tracing cache did not include sharding information at all
+    (although subsequent jit caches did like lowering and compilation caches),
+    so two equivalent shardings of different types would not retrace,
+    but now they do. For example:
+    ```python
+    @jax.jit
+    def f(x):
+      return x
+
+    # inp1.sharding is of type SingleDeviceSharding
+    inp1 = jnp.arange(8)
+    f(inp1)
+
+    mesh = jax.make_mesh((1,), ('x',))
+    # inp2.sharding is of type NamedSharding
+    inp2 = jax.device_put(jnp.arange(8), NamedSharding(mesh, P('x')))
+    f(inp2)  # tracing cache miss
+    ```
+    In the above example, calling `f(inp1)` and then `f(inp2)` will lead to a
+    tracing cache miss because the shardings have changed on the abstract values
+    while tracing.
 
 * New Features
   * Added an experimental {func}`jax.experimental.custom_dce.custom_dce`
