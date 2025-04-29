@@ -109,7 +109,6 @@ jobs:
 
     env:
       JAXCI_HERMETIC_PYTHON_VERSION: "${{ inputs.python }}"
-      JAXCI_CLONE_MAIN_XLA: "${{ inputs.clone_main_xla }}"
 
     name: Build ${{ inputs.artifact }} (${{ inputs.runner }}, Python ${{ inputs.python }}, clone main XLA=${{ inputs.clone_main_xla }})
 
@@ -118,7 +117,14 @@ jobs:
       gcs_upload_uri: ${{ steps.store-gcs-upload-uri.outputs.gcs_upload_uri }}
 
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Checkout JAX repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2      
+      - name: Checkout XLA repository
+        if: contains("${{ inputs.clone_main_xla }}", '1')
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: openxla/xla
+          path: jax/xla
       - name: Enable RBE if building on Linux x86 or Windows x86
         if: contains(inputs.runner, 'linux-x86') || contains(inputs.runner, 'windows-x86')
         run: echo "JAXCI_BUILD_ARTIFACT_WITH_RBE=1" >> $GITHUB_ENV
