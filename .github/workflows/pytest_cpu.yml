@@ -128,7 +128,6 @@ jobs:
       - name: Install Python dependencies
         run: |
           $JAXCI_PYTHON -m pip install uv~=0.5.30
-          $JAXCI_PYTHON -m uv pip install -r build/test-requirements.txt
 
           # For py 3.14.0a7, some pre-built dependency wheels aren't available,
           # so we need to download their deps or build them from source.
@@ -144,6 +143,8 @@ jobs:
 
           echo "Check glibc version"
           ldd --version
+
+          $JAXCI_PYTHON -m uv pip install -r build/test-requirements.txt
 
           # CPU Pytests crash with NumPy 2.2+ on Linux Aarch64; b/399168632
           if [[ $OS == "linux" && $ARCH == "aarch64" && $JAXCI_PYTHON != "python3.14" ]]; then
