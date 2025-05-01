@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python3
 #
 # Copyright 2018 The JAX Authors.
 #
@@ -424,6 +424,7 @@ async def main():
   else:
     bazel_command_base.append("build")
 
+  freethreaded = False
   if args.python_version:
     # Do not add --repo_env=HERMETIC_PYTHON_VERSION with default args.python_version
     # if bazel_options override it
@@ -439,6 +440,7 @@ async def main():
     )
     # Let's interpret X.YY-ft version as free-threading python and set rules_python config flag:
     if args.python_version.endswith("-ft"):
+      freethreaded = True
       bazel_command_base.append(
         "--@rules_python//python/config_settings:py_freethreaded='yes'"
       )
@@ -456,14 +458,15 @@ async def main():
       for option in args.bazel_options:
         requirements_command.append(option)
 
+    ft_suffix = "_ft" if freethreaded else ""
     if args.nightly_update:
       logging.info(
           "--nightly_update is set. Bazel will run"
           " //build:requirements_nightly.update"
       )
-      requirements_command.append("//build:requirements_nightly.update")
+      requirements_command.append(f"//build:requirements{ft_suffix}_nightly.update")
     else:
-      requirements_command.append("//build:requirements.update")
+      requirements_command.append(f"//build:requirements{ft_suffix}.update")
 
     result = await executor.run(requirements_command.get_command_as_string(), args.dry_run, args.detailed_timestamped_log)
     if result.return_code != 0:
@@ -570,7 +573,6 @@ async def main():
 
   if "cuda" in args.wheels:
     wheel_build_command_base.append("--config=cuda")
-    wheel_build_command_base.append("--config=cuda_libraries_from_stubs")
     if args.use_clang:
       wheel_build_command_base.append(
           f"--action_env=CLANG_CUDA_COMPILER_PATH=\"{clang_path}\""
@@ -637,9 +639,6 @@ async def main():
       if "ML_WHEEL_GIT_HASH" in option:
         wheel_git_hash = option.split("=")[-1][:9]
 
-    if "cuda" in args.wheels:
-      wheel_build_command_base.append("--config=cuda_libraries_from_stubs")
-
   with open(".jax_configure.bazelrc", "w") as f:
     jax_configure_options = utils.get_jax_configure_bazel_options(wheel_build_command_base.get_command_as_list(), args.use_new_wheel_build_rule)
     if not jax_configure_options:
@@ -674,7 +673,9 @@ async def main():
         )
         sys.exit(1)
 
-      wheel_build_command = copy.deepcopy(wheel_build_command_base)
+      wheel_build_command = copy.deepcopy(bazel_command_base)
+      if "cuda" in args.wheels:
+        wheel_build_command.append("--config=cuda_libraries_from_stubs")
       print("\n")
       logger.info(
         "Building %s for %s %s...",

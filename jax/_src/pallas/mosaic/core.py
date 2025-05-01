@@ -59,30 +59,35 @@ _ENABLE_RUNTIME_ASSERT = config.bool_state(
 )
 
 
+class KernelType(enum.Enum):
+  TC = 0
+  SC_SCALAR_SUBCORE = 1
+  SC_VECTOR_SUBCORE = 2
+
+
 @dataclasses.dataclass(frozen=True)
 class TPUCompilerParams(pallas_core.CompilerParams):
   """Mosaic TPU compiler parameters.
 
   Attributes:
-    dimension_semantics: A list of dimension semantics for each grid
-      dimension of the kernel. Either "parallel" for dimensions that can
-      execute in any order, or "arbitrary" for dimensions that must be
-      executed sequentially.
+    dimension_semantics: A list of dimension semantics for each grid dimension
+      of the kernel. Either "parallel" for dimensions that can execute in any
+      order, or "arbitrary" for dimensions that must be executed sequentially.
     allow_input_fusion: A list of booleans indicating whether input fusion is
       allowed for each argument.
-    vmem_limit_bytes: Overrides the default VMEM limit for a kernel. Note
-      that this must be used in conjunction with the
+    vmem_limit_bytes: Overrides the default VMEM limit for a kernel. Note that
+      this must be used in conjunction with the
       --xla_tpu_scoped_vmem_limit_kib=N flag with N*1kib > vmem_limit_bytes.
-    collective_id: Indicates which barrier semaphore to use for the kernel.
-      Note that using the same collective_id does not guarantee that
-      the same barrier semaphore will be allocated between kernels.
+    collective_id: Indicates which barrier semaphore to use for the kernel. Note
+      that using the same collective_id does not guarantee that the same barrier
+      semaphore will be allocated between kernels.
     internal_scratch_in_bytes: The size of the internal scratch space used by
       Mosaic.
     flags: A dictionary of command line flags for the kernel.
     serialization_format: The serialization format for the kernel body.
-    device_type: The device type to compile for.
+    disable_bounds_checks: Disable bounds checks in the kernel.
   """
-  PLATFORM: ClassVar[str] = "mosaic"
+  BACKEND: ClassVar[pallas_core.Backend] = "mosaic_tpu"
   dimension_semantics: (
       Sequence[Literal["parallel", "arbitrary"] | GridDimensionSemantics] | None
   ) = None
@@ -93,8 +98,10 @@ class TPUCompilerParams(pallas_core.CompilerParams):
   flags: dict[str, Any] | None = None
   internal_scratch_in_bytes: int | None = None
   serialization_format: int = 1
-  device_type: str | None = None
+  kernel_type: KernelType = KernelType.TC
+  disable_bounds_checks: bool = False
 
+  # Replace is a method, not a field.
   replace = dataclasses.replace
 
 class TPUMemorySpace(enum.Enum):
@@ -189,12 +196,16 @@ class TensorCoreMesh:
 
 
 def create_tensorcore_mesh(
-    axis_name: str, devices: Sequence[jax.Device] | None = None
+    axis_name: str,
+    devices: Sequence[jax.Device] | None = None,
+    num_cores: int | None = None,
 ) -> TensorCoreMesh:
-  # TODO(b/355036384): emit a better error if we don't have tensorcores.
-  if devices is None:
-    devices = jax.devices()
-  num_cores = devices[0].num_cores
+  if devices is not None and num_cores is not None:
+    raise ValueError('cannot specify both devices and num_cores')
+  if num_cores is None:
+    if devices is None:
+      devices = jax.devices()
+    num_cores = devices[0].num_cores
   return TensorCoreMesh(
       np.array([TensorCore(i) for i in range(num_cores)]),
       [axis_name],
@@ -213,7 +224,7 @@ def _tensorcore_mesh_discharge_rule(
     mesh,
     jaxpr,
     compiler_params: Any | None,
-    interpret: bool,
+    interpret: Any,
     debug: bool,
     cost_estimate: pallas_core.CostEstimate | None,
     name: str,

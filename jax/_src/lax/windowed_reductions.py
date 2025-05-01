@@ -97,7 +97,7 @@ def _reduce_window(
       raise ValueError(
         'reduce_window output must have the same tree structure as the operands'
         f' {operand_tree} vs. {out_tree}')
-    flat_operands = core.standard_insert_pbroadcast(*flat_operands)
+    flat_operands = core.standard_insert_pvary(*flat_operands)
     out_flat = reduce_window_p.bind(
         *flat_operands,
         *flat_init_values,
@@ -251,7 +251,7 @@ def _select_and_scatter(operand: Array, select: Callable,
     select, core.get_aval(init_value))
   scatter_jaxpr, scatter_consts = lax._reduction_jaxpr(
     scatter, core.get_aval(init_value))
-  operand, source, init_value = core.standard_insert_pbroadcast(
+  operand, source, init_value = core.standard_insert_pvary(
       operand, source, init_value)
   return select_and_scatter_p.bind(
       operand, source, init_value, select_jaxpr=select_jaxpr,
@@ -264,7 +264,7 @@ def _select_and_scatter_add(source: Array, operand: Array,
                             window_dimensions: core.Shape,
                             window_strides: Sequence[int],
                             padding: Sequence[tuple[int, int]]) -> Array:
-  source, operand = core.standard_insert_pbroadcast(source, operand)
+  source, operand = core.standard_insert_pvary(source, operand)
   return select_and_scatter_add_p.bind(
       source, operand, select_prim=select_prim,
       window_dimensions=tuple(window_dimensions),
@@ -300,7 +300,7 @@ def _select_and_gather_add(tangents: Array, operand: Array,
     An array containing the elements in `tangents` corresponding to the output
     of the reduction of `operand` fin each window.
   """
-  tangents, operand = core.standard_insert_pbroadcast(tangents, operand)
+  tangents, operand = core.standard_insert_pvary(tangents, operand)
   return select_and_gather_add_p.bind(
       tangents, operand, select_prim=select_prim,
       window_dimensions=tuple(window_dimensions),
@@ -520,21 +520,11 @@ def _reduce_window_batch_rule(reduce_window, batched_args, bdims, *,
 
 def reduce_window_sharding_rule(operand, window_dimensions, window_strides,
                                 padding, base_dilation, window_dilation):
-  if base_dilation is None:
-    base_dilation = [1] * operand.ndim
-  if window_dilation is None:
-    window_dilation = [1] * operand.ndim
-
-  for spec, wdim, ws, pd, bd, wdil in zip(
-      operand.sharding.spec, window_dimensions, window_strides, padding,
-      base_dilation, window_dilation):
-    if spec is None:
-      continue
-    if not (wdim == 1 and ws == 1 and pd == 1 and bd == 1 and wdil == 1):
-      raise core.ShardingTypeError(
-          "Only trivial windowing is supported along non-replicated"
-          f" dimensions. Got {operand.sharding.spec=}")
-  return operand.sharding
+  out_shape = reduce_window_shape_tuple(
+      operand.shape, window_dimensions, window_strides, padding, base_dilation,
+      window_dilation)
+  return lax.slicing._get_sharding_for_varying_out_shape(
+      out_shape, operand, 'reduce_window')
 
 reduce_window_sum_p = lax.standard_primitive(
     _reduce_window_sum_shape_rule, lax._input_dtype, 'reduce_window_sum',
@@ -639,7 +629,8 @@ def _reduce_window_lower(
 ):
 
   operand_aval, = ctx.avals_in
-  scalar_aval = operand_aval.update(shape=())
+  scalar_aval = operand_aval.update(
+      shape=(), sharding=operand_aval.sharding.with_spec(()))
 
   return mlir.reduce_window(
       ctx,
@@ -679,8 +670,14 @@ def _select_and_scatter_shape_rule(
     raise TypeError(msg.format(window_strides, window_dimensions))
   return operand.shape
 
+def _select_and_scatter_sharding_rule(
+    operand, source, init_value, *, select_jaxpr, select_consts, scatter_jaxpr,
+    scatter_consts, window_dimensions, window_strides, padding):
+  return operand.sharding
+
 select_and_scatter_p = lax.standard_primitive(
     _select_and_scatter_shape_rule, lax._input_dtype, 'select_and_scatter',
+    sharding_rule=_select_and_scatter_sharding_rule,
     vma_rule=partial(core.standard_vma_rule, 'select_and_scatter'))
 
 def _select_and_scatter_lower(
@@ -689,7 +686,8 @@ def _select_and_scatter_lower(
     window_strides, padding):
   operand_aval, source_aval, init_value_aval = ctx.avals_in
   aval_out, = ctx.avals_out
-  scalar_aval = operand_aval.update(shape=())
+  scalar_aval = operand_aval.update(
+      shape=(), sharding=operand_aval.sharding.with_spec(()))
   scalar_type = mlir.aval_to_ir_type(scalar_aval)
   op = hlo.SelectAndScatterOp(
       mlir.aval_to_ir_type(aval_out),
@@ -720,7 +718,8 @@ def _select_and_scatter_lower(
                                       *scatter.arguments,
                                       dim_var_values=ctx.dim_var_values)
     hlo.return_(mlir.flatten_ir_values(out_nodes))
-  return op.results
+  return [mlir.lower_with_sharding_in_types(ctx, r, aval)
+          for r, aval in zip(op.results, ctx.avals_out)]
 
 mlir.register_lowering(select_and_scatter_p, _select_and_scatter_lower)
 
@@ -728,6 +727,11 @@ def _select_and_scatter_add_shape_rule(
     source, operand, *, select_prim, window_dimensions, window_strides,
     padding):
   return operand.shape
+
+def _select_and_scatter_add_sharding_rule(
+    source, operand, *, select_prim, window_dimensions, window_strides,
+    padding):
+  return operand.sharding
 
 def _select_and_scatter_add_jvp(
     primals, tangents, *, select_prim, window_dimensions, window_strides,
@@ -777,6 +781,7 @@ def _select_and_scatter_add_batch_rule(
 select_and_scatter_add_p = lax.standard_primitive(
     _select_and_scatter_add_shape_rule, lax._input_dtype,
     'select_and_scatter_add',
+    sharding_rule=_select_and_scatter_add_sharding_rule,
     vma_rule=partial(core.standard_vma_rule, 'select_and_scatter_add'))
 
 ad.primitive_transposes[select_and_scatter_add_p] = \

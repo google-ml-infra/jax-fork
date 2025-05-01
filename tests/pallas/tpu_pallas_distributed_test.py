@@ -22,7 +22,7 @@ from jax import lax
 from jax._src import test_util as jtu
 from jax.experimental import mesh_utils
 from jax.experimental import pallas as pl
-from jax.experimental import shard_map
+from jax._src import shard_map
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
 import numpy as np
@@ -44,8 +44,8 @@ class PallasCallRemoteDMATest(parameterized.TestCase):
       self.skipTest('Only works with TPU v5e.')
 
   @parameterized.named_parameters(
-      ('vmem', pltpu.TPUMemorySpace.VMEM),
-      ('hbm', pltpu.TPUMemorySpace.ANY),
+      ('vmem', pltpu.VMEM),
+      ('hbm', pltpu.ANY),
   )
   def test_basic_remote_vmem_dma(self, mem):
     # Implements very simple collective permute
@@ -83,7 +83,7 @@ class PallasCallRemoteDMATest(parameterized.TestCase):
     mesh = jax.sharding.Mesh(devices, ['x'])
     y = jax.jit(
         shard_map.shard_map(
-            body, mesh, in_specs=P('x'), out_specs=P('x'), check_rep=False
+            body, mesh=mesh, in_specs=P('x'), out_specs=P('x'), check_vma=False
         )
     )(x)
     expected = jnp.concatenate([x[8:], x[:8]])
@@ -98,7 +98,7 @@ class PallasCallRemoteDMATest(parameterized.TestCase):
     def kernel(x_ref, y_ref):
       def body(ready_sem, send_sem, recv_sem):
         my_id = lax.axis_index('x')
-        num_devices = lax.psum(1, 'x')
+        num_devices = lax.axis_size('x')
         if direction == 'right':
           neighbor = lax.rem(my_id + 1, num_devices)
         else:
@@ -126,8 +126,8 @@ class PallasCallRemoteDMATest(parameterized.TestCase):
     def body(x):
       return pl.pallas_call(
           kernel,
-          in_specs=[pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.VMEM)],
-          out_specs=pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.VMEM),
+          in_specs=[pl.BlockSpec(memory_space=pltpu.VMEM)],
+          out_specs=pl.BlockSpec(memory_space=pltpu.VMEM),
           out_shape=x,
       )(x)
 
@@ -136,7 +136,7 @@ class PallasCallRemoteDMATest(parameterized.TestCase):
     mesh = jax.sharding.Mesh(device_mesh, ['x'])
     y = jax.jit(
         shard_map.shard_map(
-            body, mesh, in_specs=P('x'), out_specs=P('x'), check_rep=False
+            body, mesh=mesh, in_specs=P('x'), out_specs=P('x'), check_vma=False
         )
     )(x)
     if direction == 'right':
@@ -152,7 +152,7 @@ class PallasCallRemoteDMATest(parameterized.TestCase):
       def body(ready_sem, send_sem, recv_sem):
         my_id = lax.axis_index('x')
         my_other_id = lax.axis_index('y')
-        axis_size = lax.psum(1, 'x')
+        axis_size = lax.axis_size('x')
         if direction == 'right':
           neighbor = lax.rem(my_id + 1, axis_size)
         else:
@@ -180,8 +180,8 @@ class PallasCallRemoteDMATest(parameterized.TestCase):
     def body(x):
       return pl.pallas_call(
           kernel,
-          in_specs=[pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.VMEM)],
-          out_specs=pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.VMEM),
+          in_specs=[pl.BlockSpec(memory_space=pltpu.VMEM)],
+          out_specs=pl.BlockSpec(memory_space=pltpu.VMEM),
           out_shape=x,
       )(x)
 
@@ -192,10 +192,10 @@ class PallasCallRemoteDMATest(parameterized.TestCase):
     y = jax.jit(
         shard_map.shard_map(
             body,
-            mesh,
+            mesh=mesh,
             in_specs=P('x', None),
             out_specs=P('x', None),
-            check_rep=False,
+            check_vma=False,
         )
     )(x)
     if direction == 'right':
@@ -208,7 +208,7 @@ class PallasCallRemoteDMATest(parameterized.TestCase):
     def kernel(x_ref, y_ref):
       def body(ready_sem, send_sem, recv_sem):
         my_id = lax.axis_index('x')
-        num_devices = lax.psum(1, 'x')
+        num_devices = lax.axis_size('x')
         neighbor = lax.rem(my_id + 1, num_devices)
         barrier_sem = pltpu.get_barrier_semaphore()
         pltpu.semaphore_signal(barrier_sem, device_id=neighbor)
@@ -232,10 +232,10 @@ class PallasCallRemoteDMATest(parameterized.TestCase):
     def body(x):
       return pl.pallas_call(
           kernel,
-          in_specs=[pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.VMEM)],
-          out_specs=pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.VMEM),
+          in_specs=[pl.BlockSpec(memory_space=pltpu.VMEM)],
+          out_specs=pl.BlockSpec(memory_space=pltpu.VMEM),
           out_shape=x,
-          compiler_params=dict(mosaic=dict(collective_id=0)),
+          compiler_params=pltpu.TPUCompilerParams(collective_id=0),
       )(x)
 
     device_mesh = mesh_utils.create_device_mesh(
@@ -243,7 +243,7 @@ class PallasCallRemoteDMATest(parameterized.TestCase):
     mesh = jax.sharding.Mesh(device_mesh, ['x'])
     y = jax.jit(
         shard_map.shard_map(
-            body, mesh, in_specs=P('x'), out_specs=P('x'), check_rep=False
+            body, mesh=mesh, in_specs=P('x'), out_specs=P('x'), check_vma=False
         )
     )(x)
     expected = jnp.concatenate([x[-8:], x[:-8]])
@@ -291,7 +291,7 @@ class PallasCallRemoteDMAInterpretTest(parameterized.TestCase):
     grid_spec = pltpu.PrefetchScalarGridSpec(
             num_scalar_prefetch=0,
             in_specs=[
-                pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.ANY),
+                pl.BlockSpec(memory_space=pltpu.ANY),
             ],
             scratch_shapes=(
                 [pltpu.SemaphoreType.DMA] * 2
@@ -316,7 +316,7 @@ class PallasCallRemoteDMAInterpretTest(parameterized.TestCase):
       mesh=mesh,
       in_specs=P(None, 'x'),
       out_specs=P(None, 'x'),
-      check_rep=False))
+      check_vma=False))
     result = compiled_func(sharded_arr)
 
     perm = tuple((src, permute_fn(src)) for src in range(num_devices))
@@ -375,9 +375,9 @@ class PallasCallRemoteDMAInterpretTest(parameterized.TestCase):
     grid_spec = pltpu.PrefetchScalarGridSpec(
             num_scalar_prefetch=0,
             in_specs=[
-                pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.VMEM),
+                pl.BlockSpec(memory_space=pltpu.VMEM),
             ],
-            out_specs=pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.VMEM),
+            out_specs=pl.BlockSpec(memory_space=pltpu.VMEM),
             scratch_shapes=(
                 [pltpu.SemaphoreType.DMA] * 2
             )
@@ -402,7 +402,7 @@ class PallasCallRemoteDMAInterpretTest(parameterized.TestCase):
       mesh=mesh,
       in_specs=P(None, 'x'),
       out_specs=P(None, 'x'),
-      check_rep=False))
+      check_vma=False))
     result_interpret = compiled_func(sharded_arr)
 
     kernel = pl.pallas_call(
@@ -415,7 +415,7 @@ class PallasCallRemoteDMAInterpretTest(parameterized.TestCase):
       mesh=mesh,
       in_specs=P(None, 'x'),
       out_specs=P(None, 'x'),
-      check_rep=False))
+      check_vma=False))
     result_noninterpret = compiled_func(sharded_arr)
     np.testing.assert_allclose(result_interpret,
                                result_noninterpret,
@@ -467,11 +467,11 @@ class PallasCallRemoteDMAInterpretTest(parameterized.TestCase):
     grid_spec = pltpu.PrefetchScalarGridSpec(
             num_scalar_prefetch=0,
             in_specs=[
-                pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.VMEM),
+                pl.BlockSpec(memory_space=pltpu.VMEM),
             ],
             out_specs=[
-                pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.VMEM),
-                pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.VMEM),
+                pl.BlockSpec(memory_space=pltpu.VMEM),
+                pl.BlockSpec(memory_space=pltpu.VMEM),
             ],
             scratch_shapes=(
                 [pltpu.SemaphoreType.DMA] * 2
@@ -497,7 +497,7 @@ class PallasCallRemoteDMAInterpretTest(parameterized.TestCase):
       mesh=mesh,
       in_specs=P(None, 'x'),
       out_specs=P(None, 'x'),
-      check_rep=False))
+      check_vma=False))
     result_interpret = compiled_func(sharded_arr)
 
     kernel = pl.pallas_call(
@@ -510,7 +510,7 @@ class PallasCallRemoteDMAInterpretTest(parameterized.TestCase):
       mesh=mesh,
       in_specs=P(None, 'x'),
       out_specs=P(None, 'x'),
-      check_rep=False))
+      check_vma=False))
     result_noninterpret = compiled_func(sharded_arr)
     np.testing.assert_allclose(result_interpret,
                                result_noninterpret,
@@ -568,7 +568,7 @@ class VerificationTest(jtu.JaxTestCase):
       previous_config = jax.config.read('jax_pallas_dump_promela_to')
       jax.config.update('jax_pallas_dump_promela_to', tmpdir)
       shard_map.shard_map(
-          kernel, mesh=mesh, in_specs=P('x'), out_specs=P(None), check_rep=False
+          kernel, mesh=mesh, in_specs=P('x'), out_specs=P(None), check_vma=False
       )(jnp.ones((8, 128, 128), jnp.float32))
       jax.config.update('jax_pallas_dump_promela_to', previous_config)
       self.assertNotEmpty(os.listdir(tmpdir))

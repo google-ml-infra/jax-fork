@@ -162,7 +162,7 @@ class LoweringContext:
   grid_names: tuple[Hashable, ...] | None
   mapped_dims: tuple[int, ...]  # Indices of vmapped grid dimensions.
   user_grid_indices: Sequence[ir.Value] | None
-  block_shapes: list[tuple[int | pallas_core.Mapped, ...]]
+  block_shapes: list[tuple[int | pallas_core.Squeezed, ...]]
   name_stack: source_info_util.NameStack
   mesh_context: MeshContext | None
   replace = dataclasses.replace
@@ -197,7 +197,7 @@ class LoweringRuleContext:
   lowering_context: LoweringContext
   avals_in: Sequence[jax_core.AbstractValue]
   avals_out: Sequence[jax_core.AbstractValue]
-  block_shapes: Sequence[tuple[int | pallas_core.Mapped, ...] | None]
+  block_shapes: Sequence[tuple[int | pallas_core.Squeezed, ...] | None]
   replace = dataclasses.replace
 
   @property
@@ -354,7 +354,13 @@ def _get_arg_type(
         ),
         aval.shape,
     )
-  shape = tuple(1 if b is pallas_core.mapped else b for b in block_mapping.block_shape)
+  shape = pallas_core._get_block_shape(block_mapping.block_shape)
+  # Keep around squeezed as a sentinel for the lowering rules
+  block_shape = tuple(
+      pallas_core.squeezed if isinstance(b, pallas_core.Squeezed)
+      else pallas_core._get_block_dim_size(b)
+      for b in block_mapping.block_shape
+  )
   return (
       aval_to_ir_type(
           dynamic_shape_replacement_fn,
@@ -362,7 +368,7 @@ def _get_arg_type(
           shape=shape,
           memory_space=memory_space,
       ),
-      block_mapping.block_shape,
+      block_shape,
   )
 
 
@@ -395,7 +401,9 @@ class MosaicGridMapping:
       self,
       jaxpr: jax_core.Jaxpr,
       grid_mapping: pallas_core.GridMapping,
-      dimension_semantics: tuple[str | tpu_core.GridDimensionSemantics, ...] | None,
+      dimension_semantics: (
+          Sequence[str | tpu_core.GridDimensionSemantics, ...] | None
+      ),
       mesh: mesh_lib.Mesh | None,
       dynamic_shape_replacement_fn: Callable[
           [tuple[jax.DimSize, ...]], tuple[int, ...]
@@ -589,8 +597,7 @@ def _check_block_mappings(
           "only blocks having the same block shape as the array shape "
           "and a trivial index_map (returning all 0s)." + err_details())
 
-    unmapped_bs = [
-        1 if bs is pallas_core.mapped else bs for bs in bm.block_shape]
+    unmapped_bs = pallas_core._get_block_shape(bm.block_shape)
     bs0, as0 = unmapped_bs[-1], bm.array_shape_dtype.shape[-1]
     if rank >= 2:
       bs1, as1 = unmapped_bs[-2], bm.array_shape_dtype.shape[-2]
@@ -649,7 +656,7 @@ def lower_jaxpr_to_module(
     jaxpr: jax_core.Jaxpr,
     *,
     dimension_semantics: (
-        tuple[str | tpu_core.GridDimensionSemantics, None, ...] | None
+        Sequence[str | tpu_core.GridDimensionSemantics, None, ...] | None
     ),
     mesh: mesh_lib.Mesh | None = None,
     for_verification: bool = False,
@@ -710,6 +717,12 @@ def lower_jaxpr_to_module(
   window_params = []
   static_grid = None
   grid = mosaic_grid_mapping.grid
+  if not grid and any(
+      not bm.has_trivial_window() for bm in grid_mapping.block_mappings
+  ):
+    raise NotImplementedError(
+        "Non-trivial windowing is not supported for grid-free pallas_call."
+    )
   if grid:
     for i, bm in enumerate(grid_mapping.block_mappings):
       func_name = f"transform_{i}"
@@ -735,9 +748,7 @@ def lower_jaxpr_to_module(
           dynamic_shape_replacement_fn=dynamic_shape_replacement_fn,
       )
       assert mlir_func.verify(), mlir_func
-      block_shape = [
-          1 if b is pallas_core.mapped else b for b in bm.block_shape
-      ]
+      block_shape = list(pallas_core._get_block_shape(bm.block_shape))
 
       # Force single-buffering pipelining for trivial windowing in VMEM.
       pipeline_mode = bm.pipeline_mode
@@ -756,11 +767,31 @@ def lower_jaxpr_to_module(
           window_bounds=window_shape,
           transform_indices=ir.FlatSymbolRefAttr.get(func_name),
       )
-      if isinstance(bm.indexing_mode, pallas_core.Unblocked):
-        if bm.indexing_mode.padding is None:
-          pad_low = pad_high = [0] * len(bm.block_shape)
-        else:
-          pad_low, pad_high = map(list, zip(*bm.indexing_mode.padding))
+      for bd in bm.block_shape:
+        if not isinstance(
+            bd, (pallas_core.Element, pallas_core.Squeezed, pallas_core.Blocked)
+        ):
+          raise NotImplementedError(
+              "Unsupported block dimension type: "
+              f"{type(bd)} for block shape: {bm.block_shape}"
+          )
+      is_element_block = [isinstance(bd, pallas_core.Element)
+                          for bd in bm.block_shape]
+      if any(is_element_block):
+        is_element_or_squeezed_block = [
+            isinstance(bd, (pallas_core.Element, pallas_core.Squeezed))
+            for bd in bm.block_shape
+        ]
+        if not all(is_element_or_squeezed_block):
+          raise NotImplementedError(
+              "All block dimensions must be Elements or none of them can be"
+              " Elements."
+          )
+        padding = [
+            bd.padding if isinstance(bd, pallas_core.Element) else (0, 0)
+            for bd in bm.block_shape
+        ]
+        pad_low, pad_high = map(list, zip(*padding))
         block_params["window_kind"] = ir.Attribute.parse(
             f"#tpu.element_window<{pad_low},{pad_high}>"
         )
@@ -1240,7 +1271,7 @@ def _index_to_start_size_stride(
 
 def _indexer_to_start_size_stride(
     indexer: NDIndexer,
-    ref_block_shape: tuple[int | pallas_core.Mapped, ...],
+    ref_block_shape: tuple[int | pallas_core.Squeezed, ...],
     *,
     cast_to_index: bool,
 ) -> tuple[
@@ -1248,21 +1279,21 @@ def _indexer_to_start_size_stride(
     tuple[int | ir.Value, ...],
     tuple[int, ...],
     tuple[bool, ...],
-    tuple[int | pallas_core.Mapped, ...],
+    tuple[int | pallas_core.Squeezed, ...],
 ]:
   indices_iter = iter(indexer.indices)
   starts, sizes, strides, squeeze_dims = [], [], [], []
   for s in ref_block_shape:
-    start, size, stride, squeeze_dim = (
-        (
-            _maybe_cast_to_index(cast_to_index, 0),
-            1,
-            1,
-            True,
+    match s:
+      case pallas_core.Squeezed():
+        start = _maybe_cast_to_index(cast_to_index, 0)
+        size = 1
+        stride = 1
+        squeeze_dim = True
+      case _:
+        start, size, stride, squeeze_dim = _index_to_start_size_stride(
+            next(indices_iter), cast_to_index
         )
-        if s is pallas_core.mapped
-        else _index_to_start_size_stride(next(indices_iter), cast_to_index)
-    )
     starts.append(start)
     sizes.append(size)
     strides.append(stride)
@@ -1284,8 +1315,8 @@ def _slice_memref(
     ref: ir.Value,
     indexer: NDIndexer,
     ref_dtype: DTypeLike,
-    ref_block_shape: tuple[int | pallas_core.Mapped, ...],
-) -> tuple[ir.Value, tuple[int | pallas_core.Mapped, ...]]:
+    ref_block_shape: tuple[int | pallas_core.Squeezed, ...],
+) -> tuple[ir.Value, tuple[int | pallas_core.Squeezed, ...]]:
   assert ref_block_shape is not None
   target_shape = indexer.get_indexer_shape()
   starts, sizes, strides, squeeze_dims, ref_block_shape = (
@@ -1324,8 +1355,8 @@ def _bitcast_memref(
     ref: ir.Value,
     bitcaster: RefBitcaster,
     ref_dtype: DTypeLike,
-    ref_block_shape: tuple[int | pallas_core.Mapped, ...],
-) -> tuple[ir.Value, DTypeLike, tuple[int | pallas_core.Mapped, ...]]:
+    ref_block_shape: tuple[int | pallas_core.Squeezed, ...],
+) -> tuple[ir.Value, DTypeLike, tuple[int | pallas_core.Squeezed, ...]]:
   src_bitwidth = dtype_bitwidth(ref_dtype)
   dst_bitwidth = dtype_bitwidth(bitcaster.dtype)
   if src_bitwidth != dst_bitwidth:
@@ -1333,7 +1364,7 @@ def _bitcast_memref(
       raise NotImplementedError(
           "Bitcast 1D ref with bitwidth change is not supported."
       )
-    if ref_block_shape[-2] is pallas_core.mapped:
+    if ref_block_shape[-2] is pallas_core.squeezed:
       raise NotImplementedError(
           "Bitcast a ref whose 2nd minormost dimension is squeezed when"
           " bitwidth changes."
@@ -1347,7 +1378,7 @@ def _bitcast_memref(
   new_ref_block_shape = list(ref_block_shape)
   if (
       len(new_ref_block_shape) >= 2
-      and new_ref_block_shape[-2] is not pallas_core.mapped
+      and new_ref_block_shape[-2] is not pallas_core.squeezed
   ):
     new_ref_block_shape[-2] = (
         new_ref_block_shape[-2] * src_bitwidth // dst_bitwidth
@@ -1363,8 +1394,8 @@ def _reshape_memref(
     ref: ir.Value,
     reshaper: RefReshaper,
     ref_dtype: DTypeLike,
-    ref_block_shape: tuple[int | pallas_core.Mapped, ...],
-) -> tuple[ir.Value, DTypeLike, tuple[int | pallas_core.Mapped, ...]]:
+    ref_block_shape: tuple[int | pallas_core.Squeezed, ...],
+) -> tuple[ir.Value, DTypeLike, tuple[int | pallas_core.Squeezed, ...]]:
   if ref_dtype != reshaper.dtype:
     raise ValueError(
         f"Reshape a ref with dtype change: {reshaper.dtype} vs {ref_dtype}"
@@ -1372,8 +1403,8 @@ def _reshape_memref(
   if len(ref_block_shape) < 2:
     raise NotImplementedError("Reshape 1D ref is not supported.")
   if (
-      ref_block_shape[-2] is pallas_core.mapped
-      or ref_block_shape[-1] is pallas_core.mapped
+      ref_block_shape[-2] is pallas_core.squeezed
+      or ref_block_shape[-1] is pallas_core.squeezed
   ):
     raise NotImplementedError(
         "Reshape a ref with squeezed dimension on last two dimensions."
@@ -1527,13 +1558,12 @@ def _prng_key_load_lowering_rule(ctx: LoweringRuleContext, *args_flat, args_tree
   ref_block_shape = aval_out.dtype._impl.key_shape
 
   if len(ref_block_shape) != 2:
-    raise NotImplementedError("Seed key_data must be 2D.")
-  if tuple(ref_block_shape) != (1, 1):
-    raise NotImplementedError(
-      f"Seed key_data of shape != (1, 1) not supported. Got: {ref_block_shape}")
+    raise NotImplementedError("Seed key_data must be 1D.")
+  if ref_block_shape[0] != 1:
+    raise NotImplementedError("Leading dimension of seed key_data must be 1.")
 
   load_ops = []
-  for i in range(ref_block_shape[0]):
+  for i in range(ref_block_shape[1]):
     idx = NDIndexer(indices=(0, i), shape=ref_block_shape,
                     int_indexer_shape=tuple())
     starts, _, _, _, _ = _indexer_to_start_size_stride(
@@ -1677,7 +1707,7 @@ def _masked_swap_lowering_rule(
       mem_slice_shape.insert(i, 1)
   mem_slice_shape_iter = iter(mem_slice_shape)
   mem_slice_shape = [
-      1 if b is pallas_core.mapped else next(mem_slice_shape_iter)
+      1 if b is pallas_core.squeezed else next(mem_slice_shape_iter)
       for b in ref_block_shape
   ]
   mem_aval = aval_out.update(
@@ -3687,8 +3717,8 @@ def _debug_print_rule(
 
   # Scalar case.
   if is_all_scalars:
-    primitives.check_debug_print_format(fmt, *args)
     if has_placeholders:
+      primitives.check_debug_print_format(fmt, *args)
       if not all(
           isinstance(arg.type, ir.IntegerType) and arg.type.width == 32
           for arg in args
@@ -3811,18 +3841,10 @@ def random_unwrap_lowering(ctx, key):
   impl = keys_aval.dtype._impl
   if not pl_random.is_pallas_impl(impl):
     return key
-  assert isinstance(key, KeyScalarBundle)
-  # Convert to a vector.
-  if tuple(key.key_shape) != (1, 1):
-    raise NotImplementedError(
-      "Seed key_data of shape != (1, 1) not supported. "
-      f"Got: {key.key_shape}")
-  scalar = key.scalars[0]
-  out_type = ir.VectorType.get(
-      key.key_shape, _dtype_to_ir_type(jnp.dtype('int32'))
+  raise ValueError(
+      "key_data not support for Pallas PRNG keys. Use"
+      " split_pallas_seed instead."
   )
-  val = vector.broadcast(out_type, scalar)
-  return val
 lowering_rules[prng.random_unwrap_p] = random_unwrap_lowering
 
 
@@ -3830,26 +3852,31 @@ def random_wrap_lowering(ctx, key_data, *, impl):
   del ctx
   if not pl_random.is_pallas_impl(impl):
     return key_data
-  if isinstance(key_data.type, ir.VectorType):
-    # If the key data lives in vregs, need to unpack it to sregs.
-    key_data_list = []
-    key_data_shape = key_data.type.shape
-    if len(key_data_shape) != 2:
-      raise NotImplementedError("Seed key_data must be 2D.")
-    if tuple(key_data_shape) != (1, 1):
-      raise NotImplementedError(
-        "Seed key_data of shape != (1, 1) not supported. "
-        f"Got: {key_data_shape}")
-    for i in range(key_data_shape[1]):
-      key_data_list.append(vector.ExtractOp(key_data, [], [0, i]))
-    return KeyScalarBundle(
-        scalars=key_data_list, key_shape=tuple(key_data_shape))
-  if isinstance(key_data, KeyScalarBundle):
-    return key_data
-  else:
-    raise NotImplementedError(f"key_data wrap {type(key_data)}")
+  raise ValueError(
+      "wrap_key_data not support for Pallas PRNG keys. Use"
+      " wrap_pallas_seed instead."
+  )
 
 lowering_rules[prng.random_wrap_p] = random_wrap_lowering
+
+
+def _split_key_lowering_rule(
+    ctx: LoweringRuleContext, key_data: KeyScalarBundle
+):
+  return key_data.scalars
+
+
+lowering_rules[tpu_primitives.split_key_p] = _split_key_lowering_rule
+
+
+def _join_key_lowering_rule(ctx: LoweringRuleContext, *scalars, impl):
+  if not pl_random.is_pallas_impl(impl):
+    return ValueError(f"Can only join Pallas keys. Got impl={impl}")
+  return KeyScalarBundle(scalars=scalars, key_shape=impl.key_shape)
+
+
+lowering_rules[tpu_primitives.join_key_p] = _join_key_lowering_rule
+
 
 def _checkify_lowering_rule(
     ctx: LoweringRuleContext, *err_args, err_tree, debug):

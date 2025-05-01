@@ -35,7 +35,7 @@ from jax._src.layout import DeviceLocalLayout
 from jax._src.lib import lapack
 from jax._src.lib.mlir.dialects import hlo
 from jax._src.lax import linalg as lax_linalg_internal
-from jax.experimental.shard_map import shard_map
+from jax._src.shard_map import shard_map
 
 jax.config.parse_flags_with_absl()
 jtu.request_cpu_devices(8)
@@ -286,6 +286,11 @@ class FfiTest(jtu.JaxTestCase):
   def test_extend_import_shim(self):
     ffi_call_geqrf(jnp.ones((4, 5), dtype=np.float32), _use_extend=True)
 
+  def test_extended_dtype_lowering(self):
+    def f(x):
+      return jax.ffi.ffi_call("edtype", (), has_side_effect=True)(x)
+    jax.jit(f).lower(jax.random.key(0))   # doesn't crash
+
 
 def ffi_call_geqrf(x, _use_extend=False, **kwargs):
   if jtu.test_device_matches(["cpu"]):
@@ -334,7 +339,7 @@ class BatchPartitioningTest(jtu.JaxTestCase):
     x = self.rng().randn(8, 4, 5).astype(np.float32)
 
     @partial(shard_map, mesh=mesh, in_specs=P("i"), out_specs=P("i"),
-             check_rep=False)
+             check_vma=False)
     def f(x):
       return batch_partitionable_ffi_call(x)
 

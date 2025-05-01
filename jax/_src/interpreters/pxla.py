@@ -57,7 +57,6 @@ from jax._src.interpreters import batching
 from jax._src.interpreters import partial_eval as pe
 from jax._src.interpreters import mlir
 from jax._src.interpreters import xla
-from jax._src.lib import jaxlib_extension_version
 from jax._src.layout import DeviceLocalLayout, AutoLayout, Layout
 from jax._src.lib import xla_client as xc
 from jax._src.lib.mlir import ir
@@ -69,7 +68,8 @@ from jax._src.mesh import (AbstractMesh, Mesh, get_abstract_mesh,
 from jax._src.sharding_impls import (
     ArrayMapping, ArrayMappingOrAutoOrUnspecified, AUTO, UnspecifiedValue,
     get_array_mapping as _get_array_mapping, array_mapping_to_axis_resources,
-    SingleDeviceSharding, GSPMDSharding, NamedSharding, PositionalSharding)
+    SingleDeviceSharding, GSPMDSharding, NamedSharding, PositionalSharding,
+    PartitionSpec as P)
 from jax._src.util import (safe_map, safe_zip, partition_list, wrap_name,
                            tuple_update, tuple_delete, distributed_debug_log,
                            unzip2, HashableFunction, weakref_lru_cache)
@@ -1064,6 +1064,7 @@ class UnloadedPmapExecutable:
         num_partitions=num_partitions,
         device_assignment=device_assignment,
         use_spmd_partitioning=False,
+        use_shardy_partitioner=config.use_shardy_partitioner.value,
         env_options_overrides=compiler_options,
         detailed_logging=compiler.use_detailed_logging(hlo),
         backend=pci.backend,
@@ -1098,9 +1099,14 @@ class UnloadedPmapExecutable:
     with dispatch.log_elapsed_time(
         "Finished XLA compilation of {fun_name} in {elapsed_time:.9f} sec",
         fun_name=pci.name, event=dispatch.BACKEND_COMPILE_EVENT):
+      # `executable_devices` contains devices for output shardings of a pmapped
+      # function. It contains only local devices for correspondence with
+      # `PmapSharding`s, which also contain only local devices.
+      executable_devices = _create_da_object(
+          tuple(local_device_assignment.flat))
       compiled = compiler.compile_or_get_cached(
           pci.backend, hlo, device_assignment, compile_options,
-          host_callbacks)
+          host_callbacks, executable_devices)
 
     return UnloadedPmapExecutable(
         compiled=compiled,
@@ -1268,7 +1274,7 @@ class ExecuteReplicated:
         for token in token_buf:
           assert isinstance(token.sharding, sharding_impls.SingleDeviceSharding)
           token_devices.append(token.sharding._device_assignment[0])
-        s = PositionalSharding(token_devices)
+        s = NamedSharding(Mesh(token_devices, 'x'), P('x'))
         global_token_array = jax.make_array_from_single_device_arrays(
             (0,), s, token_buf
         )
@@ -1315,10 +1321,7 @@ class ExecuteReplicated:
       out_ = []
       for i, o in zip(self.mut.out_mut, out):
         if i is not None:
-          if jaxlib_extension_version < 330:
-            args[i]._buf = o
-          else:
-            args[i]._buf._replace_with(o)
+          args[i]._buf._replace_with(o)
         else:
           out_.append(o)
       return out_
@@ -1880,7 +1883,7 @@ def _raise_warnings_or_errors_for_jit_of_pmap(
          "input and output arrays onto a single device. "
          "Consider removing the outer jit unless you know what you're doing. "
          "See https://github.com/jax-ml/jax/issues/2926. Or "
-         "use jax.experimental.shard_map instead of pmap under jit compilation.")
+         "use jax.shard_map instead of pmap under jit compilation.")
 
   if nreps > xb.device_count(backend):
     raise ValueError(
@@ -2794,7 +2797,7 @@ def _cached_compilation(computation, name, mesh, spmd_lowering,
       fun_name=name, event=dispatch.BACKEND_COMPILE_EVENT):
     xla_executable = compiler.compile_or_get_cached(
         backend, computation, dev, compile_options, host_callbacks,
-        pgle_profiler)
+        da, pgle_profiler)
   return xla_executable
 
 
@@ -3006,8 +3009,6 @@ class UnloadedMeshExecutable:
         tuple_args, auto_spmd_lowering, allow_prop_to_inputs,
         allow_prop_to_outputs, tuple(host_callbacks), backend, da, pmap_nreps,
         compiler_options_kvs, pgle_profiler)
-
-    orig_out_shardings = out_shardings
 
     if auto_spmd_lowering:
       assert mesh is not None

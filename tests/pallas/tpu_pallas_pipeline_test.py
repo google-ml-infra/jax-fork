@@ -17,34 +17,29 @@
 import functools
 from absl.testing import absltest
 from absl.testing import parameterized
+import hypothesis as hp
+import hypothesis.strategies as hps
 import jax
 from jax import lax
 from jax._src import test_util as jtu
 from jax.experimental import mesh_utils
 from jax.experimental import pallas as pl
-from jax.experimental import shard_map
+from jax._src import shard_map
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
 import numpy as np
-try:
-  import hypothesis as hp
-  import hypothesis.strategies as hps
-  CAN_USE_HYPOTHESIS = True
-except (ModuleNotFoundError, ImportError):
-  CAN_USE_HYPOTHESIS = False
 
 
-if CAN_USE_HYPOTHESIS:
-  hp.settings.register_profile(
-      'deterministic',
-      database=None,
-      derandomize=True,
-      deadline=None,
-      max_examples=200,
-      print_blob=True,
-      verbosity=hp.Verbosity.verbose,
-  )
-  hp.settings.load_profile('deterministic')
+hp.settings.register_profile(
+    'deterministic',
+    database=None,
+    derandomize=True,
+    deadline=None,
+    max_examples=200,
+    print_blob=True,
+    verbosity=hp.Verbosity.verbose,
+)
+hp.settings.load_profile('deterministic')
 
 
 jax.config.parse_flags_with_absl()
@@ -135,8 +130,8 @@ class PallasCallPipelineTest(parameterized.TestCase):
     super().setUp()
 
   @parameterized.named_parameters(
-      ('vmem', pltpu.TPUMemorySpace.VMEM),
-      ('hbm', pltpu.TPUMemorySpace.ANY),
+      ('vmem', pltpu.VMEM),
+      ('hbm', pltpu.ANY),
   )
   def test_pipeline_matmul(self, memory_space):
     # TODO(b/358121809): Re-enable this test once the bug is fixed.
@@ -182,8 +177,8 @@ class PallasCallPipelineTest(parameterized.TestCase):
     np.testing.assert_allclose(out, expected_out)
 
   @parameterized.named_parameters(
-      ('vmem', pltpu.TPUMemorySpace.VMEM),
-      ('hbm', pltpu.TPUMemorySpace.ANY),
+      ('vmem', pltpu.VMEM),
+      ('hbm', pltpu.ANY),
   )
   def test_double_pipeline_matmul(self, memory_space):
     # TODO(b/358121809): Re-enable this test once the bug is fixed.
@@ -240,11 +235,11 @@ class PallasCallCollectivePipelineTest(parameterized.TestCase):
     super().setUp()
 
   @parameterized.named_parameters(
-      ('vmem', pltpu.TPUMemorySpace.VMEM, jnp.bfloat16, 2, 2, 2),
-      ('hbm', pltpu.TPUMemorySpace.ANY, jnp.bfloat16, 2, 2, 2),
-      ('hbm_float32', pltpu.TPUMemorySpace.ANY, jnp.float32, 2, 2, 2),
-      ('hbm_float32_112', pltpu.TPUMemorySpace.ANY, jnp.float32, 1, 1, 2),
-      ('hbm_float32_111', pltpu.TPUMemorySpace.ANY, jnp.float32, 1, 1, 1),
+      ('vmem', pltpu.VMEM, jnp.bfloat16, 2, 2, 2),
+      ('hbm', pltpu.ANY, jnp.bfloat16, 2, 2, 2),
+      ('hbm_float32', pltpu.ANY, jnp.float32, 2, 2, 2),
+      ('hbm_float32_112', pltpu.ANY, jnp.float32, 1, 1, 2),
+      ('hbm_float32_111', pltpu.ANY, jnp.float32, 1, 1, 1),
   )
   def test_pipeline_latency_optimized_allgather_matmul(
       self, memory_space, out_dtype, n_tiles, m_tiles, k_tiles):
@@ -502,7 +497,7 @@ class PallasCallCollectivePipelineTest(parameterized.TestCase):
         ),
         in_specs=(P(None, 'x'), P(None, None)),
         out_specs=P(None, None),
-        check_rep=False,
+        check_vma=False,
     )
 
     test = jax.jit(shard(kernel))
@@ -530,11 +525,11 @@ class PallasCallCollectivePipelineTest(parameterized.TestCase):
     )
 
   @parameterized.named_parameters(
-      ('vmem', pltpu.TPUMemorySpace.VMEM, jnp.bfloat16, 2, 2, 2),
-      ('hbm', pltpu.TPUMemorySpace.ANY, jnp.bfloat16, 2, 2, 2),
-      ('hbm_float32', pltpu.TPUMemorySpace.ANY, jnp.float32, 2, 2, 2),
-      ('hbm_float32_122', pltpu.TPUMemorySpace.ANY, jnp.float32, 1, 2, 2),
-      ('hbm_float32_121', pltpu.TPUMemorySpace.ANY, jnp.float32, 1, 2, 1),
+      ('vmem', pltpu.VMEM, jnp.bfloat16, 2, 2, 2),
+      ('hbm', pltpu.ANY, jnp.bfloat16, 2, 2, 2),
+      ('hbm_float32', pltpu.ANY, jnp.float32, 2, 2, 2),
+      ('hbm_float32_122', pltpu.ANY, jnp.float32, 1, 2, 2),
+      ('hbm_float32_121', pltpu.ANY, jnp.float32, 1, 2, 1),
   )
   def test_pipeline_throughput_optimized_allgather_matmul(
       self, memory_space, out_dtype, n_tiles, m_tiles, k_tiles):
@@ -720,20 +715,20 @@ class PallasCallCollectivePipelineTest(parameterized.TestCase):
                 pl.BlockSpec(memory_space=memory_space),
                 pl.BlockSpec(memory_space=memory_space),
             ],
-            out_specs=[pl.BlockSpec(memory_space=memory_space),
-                       pl.BlockSpec(memory_space=memory_space)],
+            out_specs=[
+                pl.BlockSpec(memory_space=memory_space),
+                pl.BlockSpec(memory_space=memory_space),
+            ],
             grid=(outer_steps, 2),
-            scratch_shapes=[
-                pltpu.VMEM((tm, tn), jnp.float32)]
+            scratch_shapes=[pltpu.VMEM((tm, tn), jnp.float32)]
             + [pltpu.SemaphoreType.DMA] * 4
-            + inner_allocs
+            + inner_allocs,
         ),
-        compiler_params=dict(
-            mosaic=dict(collective_id=0,
-                        # must set scoped vmem flag *larger* than below! e.g.:
-                        # flags.FLAGS.xla_tpu_scoped_vmem_limit_kib = 131072
-                        vmem_limit_bytes=int(134217728 * 0.9)  # 0.9 * 128MiB
-                       )
+        compiler_params=pltpu.TPUCompilerParams(
+            collective_id=0,
+            # must set scoped vmem flag *larger* than below! e.g.:
+            # flags.FLAGS.xla_tpu_scoped_vmem_limit_kib = 131072
+            vmem_limit_bytes=int(134217728 * 0.9),  # 0.9 * 128MiB
         ),
     )
 
@@ -745,7 +740,7 @@ class PallasCallCollectivePipelineTest(parameterized.TestCase):
         ),
         in_specs=(P(None, 'x'), P(None, None)),
         out_specs=P(None, None),
-        check_rep=False,
+        check_vma=False,
     )
 
     test = jax.jit(shard(kernel))
@@ -773,11 +768,11 @@ class PallasCallCollectivePipelineTest(parameterized.TestCase):
     )
 
   @parameterized.named_parameters(
-      ('vmem', pltpu.TPUMemorySpace.VMEM, jnp.bfloat16, 2, 2, 2),
-      ('hbm', pltpu.TPUMemorySpace.ANY, jnp.bfloat16, 2, 2, 2),
-      ('hbm_float32', pltpu.TPUMemorySpace.ANY, jnp.float32, 2, 4, 2),
-      ('hbm_float32_112', pltpu.TPUMemorySpace.ANY, jnp.float32, 1, 1, 2),
-      ('hbm_float32_111', pltpu.TPUMemorySpace.ANY, jnp.float32, 1, 1, 1),
+      ('vmem', pltpu.VMEM, jnp.bfloat16, 2, 2, 2),
+      ('hbm', pltpu.ANY, jnp.bfloat16, 2, 2, 2),
+      ('hbm_float32', pltpu.ANY, jnp.float32, 2, 4, 2),
+      ('hbm_float32_112', pltpu.ANY, jnp.float32, 1, 1, 2),
+      ('hbm_float32_111', pltpu.ANY, jnp.float32, 1, 1, 1),
   )
   def test_pipeline_latency_optimized_matmul_reducescatter(
       self, memory_space, out_dtype, n_tiles, m_tiles, k_tiles):
@@ -1010,15 +1005,13 @@ class PallasCallCollectivePipelineTest(parameterized.TestCase):
             grid=(outer_steps, 2),
             scratch_shapes=[pltpu.VMEM((tm, tn), jnp.float32)]
             + [pltpu.SemaphoreType.DMA] * 4
-            +  inner_allocs
+            + inner_allocs,
         ),
-        compiler_params=dict(
-            mosaic=dict(
-                collective_id=0,
-                # must set scoped vmem flag *larger* than below!
-                # e.g. flags.FLAGS.xla_tpu_scoped_vmem_limit_kib = 131072
-                vmem_limit_bytes=int(134217728 * 0.9)  # 0.9 * 128MiB
-            )
+        compiler_params=pltpu.TPUCompilerParams(
+            collective_id=0,
+            # must set scoped vmem flag *larger* than below!
+            # e.g. flags.FLAGS.xla_tpu_scoped_vmem_limit_kib = 131072
+            vmem_limit_bytes=int(134217728 * 0.9),  # 0.9 * 128MiB
         ),
     )
 
@@ -1031,7 +1024,7 @@ class PallasCallCollectivePipelineTest(parameterized.TestCase):
         ),
         in_specs=(P(None, 'x'), P('x', None)),
         out_specs=P('x', None),
-        check_rep=False,
+        check_vma=False,
     )
 
     test = jax.jit(shard(lambda x, y: kernel(x, y)[0, 0]))
@@ -1062,11 +1055,11 @@ class PallasCallCollectivePipelineTest(parameterized.TestCase):
     np.mean(np.abs(out - expected_out))
 
   @parameterized.named_parameters(
-      ('vmem', pltpu.TPUMemorySpace.VMEM, jnp.bfloat16, 2, 2, 2),
-      ('hbm', pltpu.TPUMemorySpace.ANY, jnp.bfloat16, 2, 2, 2),
-      ('hbm_float32', pltpu.TPUMemorySpace.ANY, jnp.float32, 2, 4, 2),
-      ('hbm_float32_112', pltpu.TPUMemorySpace.ANY, jnp.float32, 1, 2, 2),
-      ('hbm_float32_111', pltpu.TPUMemorySpace.ANY, jnp.float32, 1, 2, 1),
+      ('vmem', pltpu.VMEM, jnp.bfloat16, 2, 2, 2),
+      ('hbm', pltpu.ANY, jnp.bfloat16, 2, 2, 2),
+      ('hbm_float32', pltpu.ANY, jnp.float32, 2, 4, 2),
+      ('hbm_float32_112', pltpu.ANY, jnp.float32, 1, 2, 2),
+      ('hbm_float32_111', pltpu.ANY, jnp.float32, 1, 2, 1),
   )
   def test_pipeline_throughput_optimized_matmul_reducescatter(
       self, memory_space, out_dtype, n_tiles, m_tiles, k_tiles):
@@ -1273,15 +1266,13 @@ class PallasCallCollectivePipelineTest(parameterized.TestCase):
             grid=(outer_steps, 2),
             scratch_shapes=[pltpu.VMEM((tm, tn), jnp.float32)]
             + [pltpu.SemaphoreType.DMA] * 4
-            +  inner_allocs
+            + inner_allocs,
         ),
-        compiler_params=dict(
-            mosaic=dict(
-                collective_id=0,
-                # must set scoped vmem flag *larger* than below!
-                # e.g. flags.FLAGS.xla_tpu_scoped_vmem_limit_kib = 131072
-                vmem_limit_bytes=int(134217728 * 0.9)  # 0.9 * 128MiB
-                )
+        compiler_params=pltpu.TPUCompilerParams(
+            collective_id=0,
+            # must set scoped vmem flag *larger* than below!
+            # e.g. flags.FLAGS.xla_tpu_scoped_vmem_limit_kib = 131072
+            vmem_limit_bytes=int(134217728 * 0.9),  # 0.9 * 128MiB
         ),
     )
 
@@ -1294,7 +1285,7 @@ class PallasCallCollectivePipelineTest(parameterized.TestCase):
         ),
         in_specs=(P(None, 'x'), P('x', None)),
         out_specs=P('x', None),
-        check_rep=False,
+        check_vma=False,
     )
 
     test = jax.jit(shard(lambda x, y: kernel(x, y)[1]))
@@ -1362,7 +1353,9 @@ class PallasCallMegacoreTest(parameterized.TestCase):
             out_specs=pl.BlockSpec(memory_space=pltpu.ANY),
             grid=(num_cores,),
         ),
-        compiler_params=dict(mosaic=dict(dimension_semantics=('parallel',))),
+        compiler_params=pltpu.TPUCompilerParams(
+            dimension_semantics=('parallel',)
+        ),
     )
     x = jax.random.uniform(jax.random.key(0), (640, 640))
     np.testing.assert_allclose(func(jnp.array([5]), x), x * 2)
@@ -1396,7 +1389,9 @@ class PallasCallMegacoreTest(parameterized.TestCase):
         ],
         out_specs=pl.BlockSpec(memory_space=pltpu.ANY),
         grid=(num_cores,),
-        compiler_params=dict(mosaic=dict(dimension_semantics=('parallel',))),
+        compiler_params=pltpu.TPUCompilerParams(
+            dimension_semantics=('parallel',)
+        ),
     )
     np.testing.assert_allclose(func(x), x * 2)
 
@@ -1445,110 +1440,238 @@ class PallasCallMegacoreTest(parameterized.TestCase):
         ],
         out_specs=pl.BlockSpec(memory_space=pltpu.ANY),
         grid=(num_cores,),
-        compiler_params=dict(mosaic=dict(dimension_semantics=('parallel',))),
+        compiler_params=pltpu.TPUCompilerParams(
+            dimension_semantics=('parallel',)
+        ),
     )
     np.testing.assert_allclose(func(x, y), x @ y, atol=7e-5)
 
 
-if CAN_USE_HYPOTHESIS:
+@partial(jax.jit, static_argnames=['bm', 'bk', 'bn'])
+def matmul(x: jax.Array, y: jax.Array, *, bm: int, bk: int, bn: int):
 
-  @partial(jax.jit, static_argnames=['bm', 'bk', 'bn'])
-  def matmul(x: jax.Array, y: jax.Array, *, bm: int, bk: int, bn: int):
+  m, k = x.shape
+  _, n = y.shape
 
-    m, k = x.shape
-    _, n = y.shape
+  def kernel(x_hbm_ref, y_hbm_ref, o_hbm_ref):
 
-    def kernel(x_hbm_ref, y_hbm_ref, o_hbm_ref):
+    grid = (pl.cdiv(m, bm), pl.cdiv(n, bn), pl.cdiv(k, bk))
 
-      grid = (pl.cdiv(m, bm), pl.cdiv(n, bn), pl.cdiv(k, bk))
+    def run(acc_scratch_ref):
+      pltpu.emit_pipeline(
+          partial(basic_matmul_kernel, acc_scratch_ref=acc_scratch_ref, k=k),
+          in_specs=[
+              pl.BlockSpec((bm, bk), lambda i, j, k: (i, k)),
+              pl.BlockSpec((bk, bn), lambda i, j, k: (k, j)),
+          ],
+          out_specs=pl.BlockSpec((bm, bn), lambda i, j, k: (i, j)),
+          grid=grid,
+          core_axis=0,
+          dimension_semantics=(
+              pltpu.PARALLEL,
+              pltpu.PARALLEL,
+              pltpu.ARBITRARY,
+          ),
+      )(x_hbm_ref, y_hbm_ref, o_hbm_ref)
 
-      def run(acc_scratch_ref):
+    accum_dtype = (
+        jnp.float32 if jnp.issubdtype(x.dtype, jnp.floating) else jnp.int32
+    )
+    pl.run_scoped(run, pltpu.VMEM((bm, bn), accum_dtype))
+
+  num_cores = jax.devices()[0].num_cores
+  return pl.pallas_call(
+      kernel,
+      out_shape=jax.ShapeDtypeStruct((m, n), x.dtype),
+      in_specs=[
+          pl.BlockSpec(memory_space=pltpu.ANY),
+          pl.BlockSpec(memory_space=pltpu.ANY),
+      ],
+      out_specs=pl.BlockSpec(memory_space=pltpu.ANY),
+      grid=(num_cores,),
+  )(x, y)
+
+@jtu.thread_unsafe_test_class()  # hypothesis is not thread safe
+class PaddedPipelineEmitterTest(parameterized.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    if not jtu.is_device_tpu_at_least(4):
+      self.skipTest('Only TPU v4+ allowed.')
+
+  @parameterized.named_parameters(
+      ('float32', 'float32'), ('bfloat16', 'bfloat16'), ('int8', 'int8')
+  )
+  @hp.given(
+      hps.integers(1, 1024),
+      hps.integers(1, 1024),
+      hps.integers(1, 1024),
+      hps.sampled_from([8, 16, 32, 128, 256, 512]),
+      hps.sampled_from([128, 256, 512]),
+      hps.sampled_from([128, 256, 512]),
+      hps.integers(0, 4),
+  )
+  def test_padded_matmul(self, dtype, m, k, n, bm, bk, bn, seed):
+    if dtype == 'int8' and jtu.is_device_tpu_at_least(6):
+      self.skipTest('Not implemented for TPU v6.')
+
+    hp.assume(bm <= m)
+    hp.assume(bn <= n)
+    hp.assume(bk <= k)
+    if dtype == 'bfloat16':
+      hp.assume(bm >= 16)
+    if dtype == 'int8':
+      if not jtu.is_device_tpu_at_least(5):
+        self.skipTest('Only TPU v5+ allowed for int8.')
+      hp.assume(bm >= 32)
+    k1, k2 = jax.random.split(jax.random.key(seed))
+    x = jax.random.normal(k1, (m, k), jnp.float32).astype(dtype)
+    y = jax.random.normal(k2, (k, n), jnp.float32).astype(dtype)
+
+    out = matmul(x, y, bm=bm, bk=bk, bn=bn)
+    expected = x @ y
+    atol = rtol = 2.3e-5
+    if dtype == 'bfloat16':
+      out = out.astype('float32')
+      expected = expected.astype('float32')
+      atol = rtol = 1e-2
+    np.testing.assert_allclose(out, expected, atol=atol, rtol=rtol)
+
+
+class PallasCallBoundedSliceIndexingTest(parameterized.TestCase):
+
+  def test_block_spec_bounded_slice_invalid_index(self):
+    if not jtu.is_device_tpu():
+      self.skipTest('Only works on TPU.')
+    shape = (16, 8, 128)
+
+    def kernel(x_ref, o_ref):
+      o_ref[...] = x_ref[...]
+
+    def main(refs):
+      x_ref, y_ref = refs
+
+      @pl.core_map(pltpu.create_tensorcore_mesh('core'))
+      def _():
         pltpu.emit_pipeline(
-            partial(basic_matmul_kernel, acc_scratch_ref=acc_scratch_ref, k=k),
-            in_specs=[
-                pl.BlockSpec((bm, bk), lambda i, j, k: (i, k)),
-                pl.BlockSpec((bk, bn), lambda i, j, k: (k, j)),
-            ],
-            out_specs=pl.BlockSpec((bm, bn), lambda i, j, k: (i, j)),
-            grid=grid,
-            core_axis=0,
-            dimension_semantics=(
-                pltpu.PARALLEL,
-                pltpu.PARALLEL,
-                pltpu.ARBITRARY,
+            kernel,
+            grid=(1,),
+            in_specs=(
+                pl.BlockSpec(
+                    (pl.BoundedSlice(8), 8, 128),
+                    lambda i: (0, 0, 0),  # first index needs to be a pl.ds
+                ),
             ),
-        )(x_hbm_ref, y_hbm_ref, o_hbm_ref)
+            out_specs=pl.BlockSpec(
+                (8, 8, 128),
+                lambda i: (0, 0, 0),
+            ),
+        )(x_ref, y_ref)
 
-      accum_dtype = (
-          jnp.float32 if jnp.issubdtype(x.dtype, jnp.floating) else jnp.int32
-      )
-      pl.run_scoped(run, pltpu.VMEM((bm, bn), accum_dtype))
+    @jax.jit
+    def f(x):
+      y = jnp.ones((8, 8, 128), dtype=jnp.int32)
+      _, y = pl.run_state(main)((x, y))
+      return y
+    with self.assertRaisesRegex(
+        ValueError,
+        'Must return a pl.ds from the index_map for a BoundedSlice dimension.'
+    ):
+      f.trace(jax.ShapeDtypeStruct(shape, jnp.int32))
 
-    num_cores = jax.devices()[0].num_cores
-    return pl.pallas_call(
-        kernel,
-        out_shape=jax.ShapeDtypeStruct((m, n), x.dtype),
-        in_specs=[
-            pl.BlockSpec(memory_space=pltpu.ANY),
-            pl.BlockSpec(memory_space=pltpu.ANY),
-        ],
-        out_specs=pl.BlockSpec(memory_space=pltpu.ANY),
-        grid=(num_cores,),
-    )(x, y)
+  def test_block_spec_bounded_slice_static(self):
+    if not jtu.is_device_tpu():
+      self.skipTest('Only works on TPU.')
+    if not jtu.is_device_tpu_at_least(4):
+      self.skipTest('Only works on TPU v4+')
+    shape = (16, 8, 128)
 
-  @jtu.thread_unsafe_test_class()  # hypothesis is not thread safe
-  class PaddedPipelineEmitterTest(parameterized.TestCase):
+    def kernel(x_ref, o_ref):
+      o_ref[...] = x_ref[...]
 
-    def setUp(self):
-      super().setUp()
-      if not jtu.is_device_tpu_at_least(4):
-        self.skipTest('Only TPU v4+ allowed.')
+    def main(refs):
+      x_ref, y_ref = refs
 
-    @parameterized.named_parameters(
-        ('float32', 'float32'), ('bfloat16', 'bfloat16'), ('int8', 'int8')
-    )
-    @hp.given(
-        hps.integers(1, 1024),
-        hps.integers(1, 1024),
-        hps.integers(1, 1024),
-        hps.sampled_from([8, 16, 32, 128, 256, 512]),
-        hps.sampled_from([128, 256, 512]),
-        hps.sampled_from([128, 256, 512]),
-        hps.integers(0, 4),
-    )
-    def test_padded_matmul(self, dtype, m, k, n, bm, bk, bn, seed):
-      if dtype == 'int8' and jtu.is_device_tpu_at_least(6):
-        self.skipTest('Not implemented for TPU v6.')
+      @pl.core_map(pltpu.create_tensorcore_mesh('core'))
+      def _():
+        pltpu.emit_pipeline(
+            kernel,
+            grid=(1,),
+            in_specs=(
+                pl.BlockSpec(
+                    (pl.BoundedSlice(8), 8, 128),
+                    lambda i: (pl.ds(4, 8), 0, 0),
+                ),
+            ),
+            out_specs=pl.BlockSpec(
+                (8, 8, 128),
+                lambda i: (0, 0, 0),
+            ),
+        )(x_ref, y_ref)
 
-      def align_up_to(x, y):
-        return (x + y - 1) // y * y
+    x = jnp.arange(np.prod(shape), dtype=np.int32).reshape(shape)
 
-      hp.assume(bm <= m)
-      hp.assume(bn <= n)
-      hp.assume(bk <= k)
-      if dtype == 'bfloat16':
-        hp.assume(bm >= 16)
-      if dtype == 'int8':
-        if not jtu.is_device_tpu_at_least(5):
-          self.skipTest('Only TPU v5+ allowed for int8.')
-        hp.assume(bm >= 32)
-      # TODO(apaszke): Relax DMA restrictions and remove this.
-      packing = 4 // jnp.dtype(dtype).itemsize
-      if packing != 1:
-        m = align_up_to(m, 8 * packing)
-        k = align_up_to(k, 8 * packing)
-      k1, k2 = jax.random.split(jax.random.key(seed))
-      x = jax.random.normal(k1, (m, k), jnp.float32).astype(dtype)
-      y = jax.random.normal(k2, (k, n), jnp.float32).astype(dtype)
+    @jax.jit
+    def f(x):
+      y = jnp.ones((8, 8, 128), dtype=jnp.int32)
+      _, y = pl.run_state(main)((x, y))
+      return y
 
-      out = matmul(x, y, bm=bm, bk=bk, bn=bn)
-      expected = x @ y
-      atol = rtol = 2.3e-5
-      if dtype == 'bfloat16':
-        out = out.astype('float32')
-        expected = expected.astype('float32')
-        atol = rtol = 1e-2
-      np.testing.assert_allclose(out, expected, atol=atol, rtol=rtol)
+    out = f(x)
+    np.testing.assert_allclose(out, x[4:12])
+
+  def test_block_spec_bounded_slice_dynamic(self):
+    if not jtu.is_device_tpu():
+      self.skipTest('Only works on TPU.')
+    if not jtu.is_device_tpu_at_least(4):
+      self.skipTest('Only works on TPU v4+')
+    shape = (16, 8, 128)
+
+    slices = jnp.array([[0, 3], [3, 8], [8, 11], [11, 16]], dtype=jnp.int32)[
+        ::-1
+    ]
+
+    def kernel(x_ref, o_ref):
+      o_ref[...] = x_ref[...]
+
+    def main(refs):
+      x_ref, y_ref, slices_ref = refs
+
+      @pl.core_map(pltpu.create_tensorcore_mesh('core'))
+      def _():
+
+        @functools.partial(
+            pl.run_scoped, slices_smem=pltpu.SMEM(slices.shape, slices.dtype)
+        )
+        def _(slices_smem):
+          pltpu.sync_copy(slices_ref, slices_smem)
+          def index_map(i):
+            return (
+                pl.ds(slices_smem[i, 0], slices_smem[i, 1] - slices_smem[i, 0]),
+                0,
+                0,
+            )
+          block_spec = pl.BlockSpec(
+              (pl.BoundedSlice(16), 8, 128),
+              index_map,
+          )
+          pltpu.emit_pipeline(
+              kernel,
+              grid=(slices.shape[0],),
+              in_specs=(block_spec,),
+              out_specs=block_spec,
+          )(x_ref, y_ref)
+
+    x = jnp.arange(np.prod(shape), dtype=np.int32).reshape(shape)
+
+    @jax.jit
+    def f(x, slices):
+      y = pl.empty_like(x)
+      _, y, _ = pl.run_state(main)((x, y, slices))
+      return y
+
+    out = f(x, slices)
+    np.testing.assert_allclose(out, x)
 
 
 if __name__ == '__main__':

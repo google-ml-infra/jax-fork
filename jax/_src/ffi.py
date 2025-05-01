@@ -135,7 +135,7 @@ def include_dir() -> str:
 
 
 def _aval_shape(aval: core.AbstractValue) -> Shape:
-  return () if aval is core.abstract_token else aval.shape  # pytype: disable=attribute-error
+  return () if aval is core.abstract_token else core.physical_aval(aval).shape  # pytype: disable=attribute-error
 
 
 def _convert_layout_for_lowering(
@@ -499,7 +499,7 @@ def ffi_call(
               "and an output with a different layout "
               f"{static_output_layouts[o_idx]}.")
         static_input_output_aliases += ((i_idx, o_idx),)
-    args = core.standard_insert_pbroadcast(*args)
+    args = core.standard_insert_pvary(*args)
     results = ffi_call_p.bind(
         *args,
         result_avals=result_avals,

@@ -302,8 +302,8 @@ jax_multiplatform_test(
         "gpu_h100x2",
     ],
     shard_count = {
-        "cpu": 3,
-        "tpu": 4,
+        "cpu": 5,
+        "tpu": 5,
     },
     tags = ["multiaccelerator"],
     deps = [
@@ -378,6 +378,7 @@ jax_multiplatform_test(
     enable_backends = ["gpu"],
     enable_configs = [
         "gpu_h100",
+        "gpu_h100_shardy",
     ],
     tags = [
         "config-cuda-only",
@@ -1323,7 +1324,7 @@ jax_multiplatform_test(
         "tpu_v2",
         "tpu_v3_x4",
         "tpu_v4_x4",
-        "gpu_a100_shardy",
+        "gpu_h100_shardy",
         "tpu_v3_x4_shardy",
     ],
 )

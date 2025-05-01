@@ -24,7 +24,7 @@ import enum
 import functools
 import itertools
 import threading
-from typing import Any, ClassVar, Hashable, Protocol, Union, runtime_checkable
+from typing import Any, ClassVar, Hashable, Literal, Protocol, TypeAlias, Union, runtime_checkable
 
 import jax
 from jax._src import api_util
@@ -39,6 +39,7 @@ from jax._src.export._export import export
 from jax._src.interpreters import mlir
 from jax._src.interpreters import partial_eval as pe
 from jax._src.state import discharge as state_discharge
+from jax._src.state import indexing
 from jax._src.state import types as state_types
 from jax._src.state.types import TransformedRef
 import jax.numpy as jnp
@@ -117,10 +118,12 @@ class BarrierSemaphore(AbstractSemaphoreTy):
   name = "barrier_semaphore"
   type = barrier_semaphore
 
+Backend = Literal["mosaic_tpu", "triton", "mosaic_gpu"]
+
 @runtime_checkable
 class CompilerParams(Protocol):
   """Base class for compiler parameters."""
-  PLATFORM: ClassVar[str]
+  BACKEND: ClassVar[Backend]
 
   # Subclasses must be dataclasses.
   __dataclass_fields__: ClassVar[dict[str, dataclasses.Field[Any]]]
@@ -197,7 +200,7 @@ mlir.ir_type_handlers[ShapedArrayWithMemorySpace] = mlir._array_ir_types
 class MemoryRef:
   """Like jax.ShapeDtypeStruct but with memory spaces."""
   shape: tuple[int, ...]
-  dtype: jnp.dtype
+  dtype: jnp.dtype | dtypes.ExtendedDType
   # TODO(b/368122763): Unify memory space types across backends
   memory_space: Any
 
@@ -332,48 +335,157 @@ def current_grid_env() -> GridEnv | None:
   return _pallas_tracing_env.grid_env_stack[-1]
 
 
-class Mapped:
-  """Used as a block shape dimension to denote a mapped dimension.
-  A mapped dimension behaves like `1` except it is squeezed from the block.
-  See :ref:`pallas_blockspec` for more details.
-  """
-  def __repr__(self):
-    return "Mapped"
-mapped = Mapped()
+@dataclasses.dataclass(frozen=True)
+class Element:
+  """Use to index an array using an elementwise start index."""
+  block_size: int
+  padding: tuple[int, int] = (0, 0)
 
+  def __str__(self):
+    if self.padding == (0, 0):
+      return f"Element({self.block_size})"
+    return f"Element({self.block_size}, padding={self.padding})"
 
 @dataclasses.dataclass(frozen=True)
-class Unblocked:
-  padding: tuple[tuple[int, int], ...] | None = None
+class Squeezed:
+  """Represents a one-sized block dimension that is squeezed out in the kernel."""
 
-  def __repr__(self):
-    return f"Unblocked(padding={self.padding})"
-unblocked = Unblocked()
+squeezed = Squeezed()
 
-
+@dataclasses.dataclass(frozen=True)
 class Blocked:
+  """The default BlockShape type."""
+  block_size: int
+
+  def __str__(self):
+    return f"Blocked({self.block_size})"
+
+@dataclasses.dataclass(frozen=True)
+class BoundedSlice:
+  """Allows to specify a bounded slice of a dimension.
+
+  Specifically, the index_map need to return a `pl.Slice/pl.ds` for this
+  dimension. The start and size may be dynamic, as long as the size <=
+  block_size.
+  """
+  block_size: int
+
   def __repr__(self):
-    return "Blocked"
-blocked = Blocked()
+    return f"BoundedSlice({self.block_size})"
 
+BlockDim: TypeAlias = Element | Squeezed | Blocked | BoundedSlice
 
-IndexingMode = Union[Blocked, Unblocked]
 
 def default_index_map(ndim: int) -> Callable:
   return lambda *args: (0,) * ndim
+
+
+def _canonicalize_block_dim(dim: BlockDim | int | None) -> BlockDim:
+  match dim:
+    case None:
+      return squeezed
+    case int():
+      return Blocked(int(dim))
+    case Squeezed() | Blocked() | Element() | BoundedSlice():
+      return dim
+    case _:
+      # Handle case where the dim is a symbolic dimension so we assume it is
+      # Blocked.
+      if jax_core.is_symbolic_dim(dim):
+        return Blocked(dim)
+      try:
+        return Blocked(int(dim))
+      except Exception as e:
+        raise ValueError(
+            f"Unsupported block dimension type: {type(dim)}. Allowed types:"
+            " `pl.Squeezed`, `pl.Blocked`, `pl.Element`, `int`, `None`."
+        ) from e
+
+def _canonicalize_block_shape(block_shape: Sequence[BlockDim | int | None]
+                              ) -> tuple[BlockDim, ...]:
+  return tuple(_canonicalize_block_dim(dim) for dim in block_shape)
+
+
+def _get_block_dim_size(dim: BlockDim) -> int:
+  match dim:
+    case Squeezed():
+      return 1
+    case Blocked(block_size):
+      return block_size
+    case Element():
+      return dim.block_size
+    case BoundedSlice(block_size):
+      return block_size
+    case _:
+      raise ValueError(f"Unsupported block shape type: {type(dim)}")
+
+
+def _get_block_shape(block_shape: tuple[BlockDim, ...]) -> tuple[int, ...]:
+  return tuple(_get_block_dim_size(dim) for dim in block_shape)
+
+def _get_ref_block_shape(block_shape: tuple[BlockDim, ...]) -> tuple[int, ...]:
+  # Special handling for squeezed here (don't include Squeezed dims in the Ref
+  # shape).
+  return tuple(
+      _get_block_dim_size(dim)
+      for dim in block_shape
+      if not isinstance(dim, Squeezed)
+  )
+
+
+class _IndexMapFunc:
+  """Helper class that checks for index_map equality."""
+
+  def __init__(self, index_map):
+    self.index_map = index_map
+    functools.update_wrapper(self, self.index_map)
+
+  def __eq__(self, other: object):
+    if not isinstance(other, _IndexMapFunc):
+      return NotImplemented
+    return self.index_map == other.index_map
+
+  def __call__(self, *args, **kwargs):
+    out_indices = self.index_map(*args, **kwargs)
+    if isinstance(out_indices, list):
+      out_indices = tuple(out_indices)
+    if not isinstance(out_indices, tuple):
+      out_indices = (out_indices,)
+    return out_indices
+
 
 @dataclasses.dataclass
 class BlockSpec:
   """Specifies how an array should be sliced for each invocation of a kernel.
 
-  See :ref:`pallas_blockspec` for more details.
+  The `block_shape` is a sequence of `int | None`s, or `BlockDim` types (e.g.
+  `pl.Element`, `pl.Squeezed`, `pl.Blocked`, `pl.BoundedSlice`). Each of these
+  types specify the size of the block dimension. `None` is used to specify a
+  dimension that is squeezed out of the kernel. The `BlockDim` types allow for
+  more fine-grained control over the indexing of the dimension. The `index_map`
+  needs to return a tuple of the same length as `block_shape`, which each entry
+  depending on the type of `BlockDim`.
+
+  See :ref:`pallas_blockspec` and the individual `BlockDim` type docstrings for
+  more details.
   """
   # An internal canonicalized version is in BlockMapping.
-  block_shape: Sequence[int | None] | None = None
+  block_shape: Sequence[BlockDim | int | None] | None = None
   index_map: Callable[..., Any] | None = None
   memory_space: Any | None = dataclasses.field(kw_only=True, default=None)
-  indexing_mode: IndexingMode = dataclasses.field(kw_only=True, default=blocked)
+  indexing_mode: Any | None = None
   pipeline_mode: Buffered | None = None
+
+  def __post_init__(self):
+    # TODO(sharadmv): Remove this check.
+    if self.indexing_mode is not None:
+      raise ValueError(
+          "indexing_mode has been removed. Please pass in `pl.Element` for each"
+          " block dimension in `block_shape` instead to enable 'Unblocked'"
+          " indexing."
+      )
+    if self.index_map is not None:
+      self.index_map = _IndexMapFunc(self.index_map)
 
   def to_block_mapping(
       self,
@@ -392,9 +504,9 @@ class BlockSpec:
     else:
       index_map_func = self.index_map
     if self.block_shape is None:
-      block_shape = array_aval.shape
+      block_shape = _canonicalize_block_shape(array_aval.shape)
     else:
-      block_shape = self.block_shape  # type: ignore
+      block_shape = _canonicalize_block_shape(self.block_shape)
       if len(array_aval.shape) != len(block_shape):
         raise ValueError(
             f"Block shape for {origin} (= {block_shape}) "
@@ -402,8 +514,8 @@ class BlockSpec:
             f"array shape {array_aval.shape}."
         )
 
-    unmapped_block_shape = tuple(s for s in block_shape if s is not None)
-    block_array_aval = array_aval.update(shape=unmapped_block_shape)
+    ref_block_shape = _get_ref_block_shape(block_shape)
+    block_array_aval = array_aval.update(shape=ref_block_shape)
     if isinstance(array_aval, jax_core.DShapedArray):
       # Get the "max" shape for the ragged array.
       block_array_aval = jax_core.ShapedArray(
@@ -434,15 +546,36 @@ class BlockSpec:
       jaxpr, out_avals, consts, () = pe.trace_to_jaxpr_dynamic(
           flat_index_map_fun, index_map_avals
       )
+    index_map_out_tree = index_map_out_tree_thunk()
+    unflat_avals = tree_util.tree_unflatten(index_map_out_tree, out_avals)
 
-    mapped_block_shape = tuple(mapped if s is None else s for s in block_shape)
-    if len(out_avals) != len(block_shape):
+    if len(unflat_avals) != len(block_shape):
       raise ValueError(
           f"Index map function {debug.func_src_info} for "
           f"{origin} must return "
           f"{len(block_shape)} values to match {block_shape=}. "
-          f"Currently returning {len(out_avals)} values."
+          f"Currently returning {len(unflat_avals)} values:"
       )
+    # Verify types match
+    for i, (idx_aval, bd) in enumerate(zip(unflat_avals, block_shape)):
+      match bd:
+        case BoundedSlice():
+          if not isinstance(idx_aval, indexing.Slice):
+            raise ValueError(
+                "index_map returned a value of type"
+                f" {type(idx_aval)} at position {i} with block dimension"
+                f" {bd} when it should be pl.Slice"
+            )
+        case Blocked() | Element() | Squeezed() | int():
+          if (
+              not isinstance(idx_aval, jax_core.ShapedArray)
+              and not idx_aval.shape
+          ):
+            raise ValueError(
+                "index_map returned a value of type"
+                f" {type(idx_aval)} at position {i} with block dimension"
+                f" {bd} when it should be a scalar"
+            )
     for i, ov in enumerate(out_avals):
       if ov.shape or ov.dtype not in [jnp.int32, jnp.int64]:
         raise ValueError(
@@ -460,10 +593,10 @@ class BlockSpec:
     array_aval_shape = _max_shape_from_aval(array_aval)
 
     mapping = BlockMapping(
-        block_shape=mapped_block_shape,
+        block_shape=block_shape,
         transformed_block_aval=block_aval,  # There are no transforms by default
         index_map_jaxpr=jax_core.ClosedJaxpr(jaxpr, consts),
-        indexing_mode=self.indexing_mode,
+        index_map_out_tree=index_map_out_tree,
         array_shape_dtype=jax.ShapeDtypeStruct(
             array_aval_shape, array_aval.dtype
         ),
@@ -502,10 +635,10 @@ class BlockMapping:
   """
   # TODO(apaszke,sharadmv): Replace mapped dims in block_shape with a transform.
   # After all, it's just indexing out singleton dimensions.
-  block_shape: tuple[Mapped | int, ...]
+  block_shape: tuple[BlockDim, ...]
   transformed_block_aval: AbstractMemoryRef
   index_map_jaxpr: jax_core.ClosedJaxpr
-  indexing_mode: IndexingMode
+  index_map_out_tree: tree_util.PyTreeDef
   array_shape_dtype: jax.ShapeDtypeStruct  # The whole array
   origin: OriginStr
   transforms: Sequence[MemoryRefTransform] = ()
@@ -514,18 +647,14 @@ class BlockMapping:
   def check_invariants(self) -> None:
     if not config.enable_checks.value: return
 
-    unmapped_block_shape = tuple(s for s in self.block_shape if s is not mapped)
-    assert unmapped_block_shape == self.ref_aval.shape, (
+    ref_block_shape = _get_ref_block_shape(self.block_shape)
+    assert ref_block_shape == self.ref_aval.shape, (
         self.block_shape, self.ref_aval.shape)
     assert len(self.block_shape) == len(self.array_shape_dtype.shape), (
         self.block_shape, self.array_shape_dtype
     )
 
     assert not self.index_map_jaxpr.consts
-    assert len(self.block_shape) == len(self.index_map_jaxpr.out_avals), (
-        self.block_shape,
-        self.index_map_jaxpr.out_avals,
-    )
     assert all(ov.shape == () and
                (ov.dtype == jnp.int32 or ov.dtype == jnp.int64)
                for ov in self.index_map_jaxpr.out_avals), (
@@ -563,18 +692,22 @@ class BlockMapping:
     # updated values since we only care about the return values.
     block_indices, _ = split_list(block_indices_and_rest,
                                   [len(self.block_shape)])
-    if isinstance(self.indexing_mode, Blocked):
-      return tuple(i if b is mapped else b * i
-                  for b, i in zip(self.block_shape, block_indices))
-    elif isinstance(self.indexing_mode, Unblocked):
-      return block_indices
-    else:
-      raise RuntimeError(f"Unknown indexing mode: {self.indexing_mode}")
+    def _get_start_index(i, b):
+      match b:
+        case Squeezed() | Element():
+          return i
+        case Blocked(block_size):
+          return block_size * i
+        case _:
+          raise ValueError(f"Unsupported block dim type: {type(b)}")
+    return tuple(
+        _get_start_index(i, b) for i, b in zip(block_indices, self.block_shape)
+    )
 
   def has_trivial_window(self):
     """If block shape is same as the array shape and index_map returns 0s."""
     for b, s in zip(self.block_shape, self.array_shape_dtype.shape):
-      if b != s and not (b is mapped and s == 1):
+      if _get_block_dim_size(b) != s:
         return False
     for atom in self.index_map_jaxpr.jaxpr.outvars:
       if not (isinstance(atom, jax_core.Literal) and atom.val == 0):
@@ -1106,11 +1239,19 @@ def core_map(
 
 
 @core_map_p.def_effectful_abstract_eval
-def _core_map_abstract_eval(*args, jaxpr, mesh, **_):
+def _core_map_abstract_eval(*args, jaxpr, mesh, **kwargs):
   del args
   if jaxpr.outvars:
     raise ValueError("core_map must not return any outputs.")
+  interpret = kwargs.get('interpret', False)
   effs = set()
+  if interpret:
+    try:
+      from jax._src.pallas.mosaic import interpret as mosaic_tpu_interpret  # Avoid circular dependency.
+      if isinstance(interpret, mosaic_tpu_interpret.TPUInterpretParams):
+        effs = mosaic_tpu_interpret.get_interpret_effects()
+    except ImportError:
+      pass
   for eff in jaxpr.effects:
     if mesh.discharges_effect(eff):
       continue
@@ -1202,10 +1343,18 @@ def _core_map_discharge_rule(in_avals, out_avals, *args_flat, jaxpr, mesh, **kwa
 
 
 def _core_map_typecheck_rule(_, *in_atoms, jaxpr, mesh, **kwargs):
-  del in_atoms, kwargs
+  del in_atoms
   with jax_core.extend_axis_env_nd(tuple(mesh.shape.items())):
     jax_core.check_jaxpr(jaxpr)
+  interpret = kwargs.get('interpret', False)
   effs = set()
+  if interpret:
+    try:
+      from jax._src.pallas.mosaic import interpret as mosaic_tpu_interpret  # Avoid circular dependency.
+      if isinstance(interpret, mosaic_tpu_interpret.TPUInterpretParams):
+        effs = mosaic_tpu_interpret.get_interpret_effects()
+    except ImportError:
+      pass
   for eff in jaxpr.effects:
     if mesh.discharges_effect(eff):
       continue

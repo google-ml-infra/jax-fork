@@ -26,7 +26,7 @@ from jax import lax
 from jax._src import test_util as jtu
 import jax._src.pallas.mosaic.interpret as mosaic_interpret
 from jax.experimental import pallas as pl
-from jax.experimental import shard_map
+from jax._src import shard_map
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
 
@@ -91,9 +91,9 @@ class InterpretDistributedTest(jtu.JaxTestCase):
         num_scalar_prefetch=0,
         # TPUMemorySpace.ANY will (usually) place the tensor in HBM.
         in_specs=[
-            pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.ANY),
+            pl.BlockSpec(memory_space=pltpu.ANY),
         ],
-        out_specs=pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.ANY),
+        out_specs=pl.BlockSpec(memory_space=pltpu.ANY),
         scratch_shapes=(
             # We allocate DMA semaphores in scratch memory.
             [pltpu.SemaphoreType.DMA] * 2
@@ -114,7 +114,7 @@ class InterpretDistributedTest(jtu.JaxTestCase):
             mesh=mesh,
             in_specs=partition,
             out_specs=partition,
-            check_rep=False,
+            check_vma=False,
         )
     )(input_arr)
 
@@ -204,9 +204,9 @@ class InterpretDistributedTest(jtu.JaxTestCase):
       num_scalar_prefetch=0,
       in_specs=[
         # TPUMemorySpace.ANY will (usually) place the tensor in HBM.
-        pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.ANY),
+        pl.BlockSpec(memory_space=pltpu.ANY),
       ],
-      out_specs=pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.ANY),
+      out_specs=pl.BlockSpec(memory_space=pltpu.ANY),
       scratch_shapes=(
         # DMA semaphores are allocated in scratch memory.
         # We allocated one semaphore for a local HBM-VMEM copy,
@@ -237,7 +237,7 @@ class InterpretDistributedTest(jtu.JaxTestCase):
         mesh=mesh,
         in_specs=partition,
         out_specs=partition,
-        check_rep=False
+        check_vma=False
       )
     )(input_arr)
 
@@ -365,13 +365,13 @@ class InterpretDistributedTest(jtu.JaxTestCase):
       num_scalar_prefetch=0,
       in_specs=[
         # Our input lives in VMEM
-        pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.VMEM),
+        pl.BlockSpec(memory_space=pltpu.VMEM),
       ],
       out_specs=[
         # Our output lives in VMEM
-        pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.VMEM),
+        pl.BlockSpec(memory_space=pltpu.VMEM),
         # Our double-buffer lives in HBM
-        pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.ANY),
+        pl.BlockSpec(memory_space=pltpu.ANY),
       ],
       grid=(num_devices,),
       scratch_shapes=(
@@ -396,7 +396,7 @@ class InterpretDistributedTest(jtu.JaxTestCase):
         mesh=mesh,
         in_specs=partition,
         out_specs=partition,
-        check_rep=False,
+        check_vma=False,
       )
     )(input_arr)
     pallas_result = jax.block_until_ready(pallas_result)[0]
@@ -647,11 +647,11 @@ class InterpretDistributedTest(jtu.JaxTestCase):
     grid_spec = pltpu.PrefetchScalarGridSpec(
       num_scalar_prefetch=0,
       in_specs=[
-        pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.VMEM),
+        pl.BlockSpec(memory_space=pltpu.VMEM),
       ],
       out_specs=[
-        pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.VMEM),
-        pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.ANY),
+        pl.BlockSpec(memory_space=pltpu.VMEM),
+        pl.BlockSpec(memory_space=pltpu.ANY),
       ],
       grid=(num_devices, 2),
       scratch_shapes=(
@@ -680,7 +680,7 @@ class InterpretDistributedTest(jtu.JaxTestCase):
         mesh=mesh,
         in_specs=P(None, 'x'),
         out_specs=P('x', None),
-        check_rep=False,
+        check_vma=False,
       )
     )(input_arr)
     pallas_result = jax.block_until_ready(pallas_result)
@@ -740,7 +740,7 @@ class InterpretDistributedTest(jtu.JaxTestCase):
     inner_block_spec = pl.BlockSpec(
       index_map=lambda i, j: (i, j),
       block_shape=inner_block_size,
-      memory_space=pltpu.TPUMemorySpace.ANY,
+      memory_space=pltpu.ANY,
     )
 
     LEFT = 0
@@ -952,11 +952,11 @@ class InterpretDistributedTest(jtu.JaxTestCase):
     grid_spec = pltpu.PrefetchScalarGridSpec(
       num_scalar_prefetch=0,
       in_specs=[
-        pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.ANY),
+        pl.BlockSpec(memory_space=pltpu.ANY),
       ],
       out_specs=[
-        pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.ANY),
-        pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.ANY),
+        pl.BlockSpec(memory_space=pltpu.ANY),
+        pl.BlockSpec(memory_space=pltpu.ANY),
       ],
       grid=(num_devices, 2),
       scratch_shapes=(
@@ -984,7 +984,7 @@ class InterpretDistributedTest(jtu.JaxTestCase):
         mesh=mesh,
         in_specs=P(None, 'x'),
         out_specs=P('x', None),
-        check_rep=False,
+        check_vma=False,
       )
     )(input_arr)
     pallas_result = jax.block_until_ready(pallas_result)
@@ -1056,10 +1056,10 @@ class InterpretDistributedTest(jtu.JaxTestCase):
               kernel,
               out_shape=jax.ShapeDtypeStruct((8, 128), input_arr.dtype),
               in_specs=[
-                  pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.SMEM),
-                  pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.ANY),
+                  pl.BlockSpec(memory_space=pltpu.SMEM),
+                  pl.BlockSpec(memory_space=pltpu.ANY),
               ],
-              out_specs=pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.ANY),
+              out_specs=pl.BlockSpec(memory_space=pltpu.ANY),
               scratch_shapes=[pltpu.SemaphoreType.DMA, pltpu.SemaphoreType.DMA],
               interpret=mosaic_interpret.TPUInterpretParams(
                   dma_execution_mode='eager',
@@ -1069,7 +1069,7 @@ class InterpretDistributedTest(jtu.JaxTestCase):
           mesh=mesh,
           in_specs=(P(None), P('x', None)),
           out_specs=P('x', None),
-          check_rep=False,
+          check_vma=False,
       )(src_dst_ids, input_arr)
 
     run(jnp.array([[0, 1], [1, 2], [2, 3]], jnp.int32)).block_until_ready()
