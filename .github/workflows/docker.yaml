@@ -11,7 +11,7 @@ on:
 
 jobs:
   run_tests:
-    runs-on: "linux-x86-n2-32-dev2"
+    runs-on: "linux-x86-n2-32-dev"
     container: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest"
     name: "Test build container"
 # End Presubmit Naming Check github-cpu-presubmits
