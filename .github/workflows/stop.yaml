@@ -7,7 +7,7 @@ on:
 
 jobs:
   jax-build-and-test:
-    runs-on: linux-x86-n2-32-dev
+    runs-on: linux-x86-n2-32-dev1
     container:
       image: us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/quoct-test-ml-build:latest
 
