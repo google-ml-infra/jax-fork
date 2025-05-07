@@ -29,4 +29,4 @@ jobs:
         with:
           context: ./test_docker
           push: true
-          tags: us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/quoct-test-docker
+          tags: us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/quoct-test-build:latest
