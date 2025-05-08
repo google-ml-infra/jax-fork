@@ -17,22 +17,8 @@ jobs:
 # End Presubmit Naming Check github-cpu-presubmits
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - name: ls
+        run: ls /tmp/quoct-tf-test
       - name: Sleep
-        working-directory: jax-fork
         run: |
           while true; do echo "sleeping"; sleep 40; done
-      - name: Configure Docker
-        run: gcloud auth configure-docker us-central1-docker.pkg.dev
-      -
-        name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-        with:
-          driver: remote
-          endpoint: unix:///mnt/buildkit/buildkitd.sock
-      -
-        name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: ./test_docker
-          push: true
-          tags: us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/quoct-test-build:latest
