@@ -12,7 +12,7 @@ on:
 jobs:
   run_tests:
     runs-on: "linux-x86-g2-48-l4-4gpu"
-    container: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest"
+    container: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build-cuda12.8-cudnn9.8:latest"
     name: "Test build container"
 # End Presubmit Naming Check github-cpu-presubmits
     steps:
