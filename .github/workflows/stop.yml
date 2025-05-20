@@ -35,7 +35,6 @@ concurrency:
   cancel-in-progress: true
 jobs:
   connect_runner:
-    if: github.event.repository.fork == false
     runs-on: "linux-x86-g2-48-l4-4gpu" # ${{ inputs.runner-type }}
     container: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest" # ${{ inputs.container }}
     steps:
