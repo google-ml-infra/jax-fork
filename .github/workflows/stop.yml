@@ -36,7 +36,7 @@ concurrency:
 jobs:
   connect_runner:
     runs-on: "linux-x86-g2-48-l4-4gpu" # ${{ inputs.runner-type }}
-    container: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest" # ${{ inputs.container }}
+    container: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build-cuda12.8-cudnn9.8:latest" # ${{ inputs.container }}
     steps:
         - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         - name: Wait For Connection
