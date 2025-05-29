@@ -24,6 +24,8 @@ jobs:
           version: v0.23.0
           driver: remote
           endpoint: unix:///mnt/buildkit/buildkitd.sock
+      - name: Sleep
+        run: sleep 1000
       - name: Configure Docker
         run: gcloud auth configure-docker us-central1-docker.pkg.dev
       -
