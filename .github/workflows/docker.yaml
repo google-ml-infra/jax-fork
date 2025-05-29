@@ -17,6 +17,8 @@ jobs:
 # End Presubmit Naming Check github-cpu-presubmits
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - name: Sleep
+        run: sleep 1000
       -
         name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -24,8 +26,6 @@ jobs:
           version: v0.23.0
           driver: remote
           endpoint: unix:///mnt/buildkit/buildkitd.sock
-      - name: Sleep
-        run: sleep 1000
       - name: Configure Docker
         run: gcloud auth configure-docker us-central1-docker.pkg.dev
       -
