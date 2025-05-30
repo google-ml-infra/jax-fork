@@ -12,7 +12,7 @@ on:
 jobs:
   run_tests:
     runs-on: "linux-x86-n2-16-quoct"
-    container: "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build-cuda12.8-cudnn9.8:latest"
+    container: "google/cloud-sdk:524.0.0"
     name: "Test build container"
 # End Presubmit Naming Check github-cpu-presubmits
     steps:
