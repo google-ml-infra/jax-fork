@@ -17,8 +17,12 @@ jobs:
 # End Presubmit Naming Check github-cpu-presubmits
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
-      - name: Sleep
-        run: sleep 100000
+      - name: Sleep One
+        run: sleep 100
+      - name: lsing
+        run: ls
+      - name: Sleep Two
+        run: sleep 10000
       - name: Configure Docker
         run: gcloud auth configure-docker us-central1-docker.pkg.dev
       -
