@@ -22,7 +22,7 @@ jobs:
       - name: lsing
         run: ls
       - name: Sleep Two
-        run: sleep 10000
+        run: sleep 100000
       - name: Configure Docker
         run: gcloud auth configure-docker us-central1-docker.pkg.dev
       -
