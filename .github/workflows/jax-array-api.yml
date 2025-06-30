@@ -15,7 +15,7 @@ concurrency:
 jobs:
   build:
 
-    runs-on: linux-x86-n2-32
+    runs-on: linux-x86-ct4p-240-4tpu
     container: us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/ml-build:latest
     strategy:
       matrix:
