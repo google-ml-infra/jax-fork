@@ -28,7 +28,7 @@ jobs:
         python-version: ${{ matrix.python-version }}
     - name: Install JAX
       run: |
-        pip install -U jax
+        pip install -U jax[k8s]
     - name: Run multi-device
       run: |
         python -c "import jax; jax.distributed.initialize(); print(jax.devices()); print(jax.local_devices())"
