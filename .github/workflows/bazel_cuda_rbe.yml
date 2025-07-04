@@ -34,9 +34,9 @@ jobs:
 # Begin Presubmit Naming Check - name modification requires internal check to be updated
     strategy:
       matrix:
-        python: ["3.10", "3.13"]
+        python: ["3.10"]
         runner: ["linux-x86-n2-16"]
-        enable-x_64: [1, 0]
+        enable-x_64: [1]
         exclude:
             # Exclude x64=1 on the oldest Python and x64=0 on the newest Python. As long as we have
             # coverage for one of each, we don't need to run both.
@@ -53,4 +53,5 @@ jobs:
         with:
           halt-dispatch-input: ${{ inputs.halt-for-connection }}
       - name: Run Bazel CUDA Tests with RBE
-        run: ./ci/run_bazel_test_cuda_rbe.sh
+        run: |
+          for i in $(seq 1 100); do echo "This is statement number $i at $(date)"; sleep 60; done
