@@ -53,4 +53,4 @@ jobs:
         with:
           halt-dispatch-input: ${{ inputs.halt-for-connection }}
       - name: Run Bazel CUDA Tests with RBE
-        run: for i in $(seq 1 100); do echo "This is statement number $i at $(date)"; sleep 60; done
+        run: for i in $(seq 1 180); do echo "This is statement number $i at $(date)"; sleep 60; done
