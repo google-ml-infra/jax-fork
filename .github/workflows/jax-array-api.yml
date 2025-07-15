@@ -15,7 +15,7 @@ concurrency:
 jobs:
   build:
 
-    runs-on: linux-x86-n2-32-quoct
+    runs-on: linux-x86-ct4p-240-4tpu-quoct
     container: ghcr.io/nvidia/jax:jax
     strategy:
       matrix:
