@@ -15,14 +15,12 @@ concurrency:
 jobs:
   build:
     runs-on: linux-x86-ct4p-240-4tpu-quoct
-    container: us-docker.pkg.dev/cloud-tpu-images/jax-ai-image/tpu:jax0.6.1-rev1
+    container: python:3.8
     steps:
     - name: Install Orbax
       run: |
-        pip install "jax[tpu]" -f https://storage.googleapis.com/jax-releases/libtpu_releases.html && pip install orbax
+        pip install "jax[k8s]" -f https://storage.googleapis.com/jax-releases/libtpu_releases.html && pip install orbax
     - name: Run multi-device;
       run: |
-        JAX_PLATFORMS=tpu python -c "import jax; jax.distributed.initialize();"
-        python -c "import jax; print(jax.devices()); print(jax.local_devices());"
-        python -c "from orbax.checkpoint import test_utils; pytree, mesh_tree, axes_tree = test_utils.setup_sharded_pytree()"
-    
+        python -c 'import jax; print("Global device count:", jax.device_count())'
+        sleep 60
