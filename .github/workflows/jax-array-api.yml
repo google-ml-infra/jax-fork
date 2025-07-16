@@ -15,7 +15,7 @@ concurrency:
 jobs:
   build:
     runs-on: linux-x86-ct4p-240-4tpu-quoct
-    container: python:3.8
+    container: python:3.11
     steps:
     - name: Install Orbax
       run: |
