@@ -19,7 +19,7 @@ jobs:
     steps:
     - name: Install Orbax
       run: |
-        pip install orbax
+        pip install jax[k8s] && pip install orbax
     - name: Run multi-device;
       run: |
         python -c "import jax; jax.distributed.initialize(); print(jax.devices()); print(jax.local_devices()); from orbax.checkpoint import test_utils; pytree, mesh_tree, axes_tree = test_utils.setup_sharded_pytree()"
