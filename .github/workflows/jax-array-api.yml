@@ -15,11 +15,11 @@ concurrency:
 jobs:
   build:
     runs-on: linux-x86-ct4p-240-4tpu-quoct
-    container: python:3.11
+    container: us-docker.pkg.dev/cloud-tpu-images/jax-ai-image/tpu:jax0.6.1-rev1
     steps:
-    - name: Install JAX
+    - name: Install Orbax
       run: |
-        pip install "jax[tpu,k8s]" -f https://storage.googleapis.com/jax-releases/libtpu_releases.html && pip install orbax
+        pip install orbax
     - name: Run multi-device;
       run: |
         python -c "import jax; jax.distributed.initialize(); print(jax.devices()); print(jax.local_devices()); from orbax.checkpoint import test_utils; pytree, mesh_tree, axes_tree = test_utils.setup_sharded_pytree()"
