@@ -14,18 +14,9 @@ concurrency:
 
 jobs:
   build:
-
     runs-on: linux-x86-ct4p-240-4tpu-quoct
-    container: ghcr.io/nvidia/jax:jax
-    strategy:
-      matrix:
-        python-version: [3.11]
-
+    container: python:3.11
     steps:
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
-      with:
-        python-version: ${{ matrix.python-version }}
     - name: Install JAX
       run: |
         pip install "jax[tpu]" -f https://storage.googleapis.com/jax-releases/libtpu_releases.html && pip install orbax
