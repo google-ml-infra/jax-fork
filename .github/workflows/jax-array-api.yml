@@ -19,7 +19,7 @@ jobs:
     steps:
     - name: Install Orbax
       run: |
-        pip install "jax[k8s]" -f https://storage.googleapis.com/jax-releases/libtpu_releases.html && pip install orbax
+        pip install "jax[tpu]" -f https://storage.googleapis.com/jax-releases/libtpu_releases.html && pip install orbax
     - name: Run multi-device;
       run: |
         python -c 'import jax; print("Global device count:", jax.device_count())'
