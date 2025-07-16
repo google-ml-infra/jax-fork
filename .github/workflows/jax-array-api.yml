@@ -22,5 +22,5 @@ jobs:
         pip install "jax[tpu]" -f https://storage.googleapis.com/jax-releases/libtpu_releases.html && pip install orbax
     - name: Run multi-device;
       run: |
-        python -c 'import jax; jax.distributed.initialize(coordinator_address=$MEGASCALE_COORDINATOR_ADDRESS, num_processes=2, process_id=$JOB_COMPLETION_INDEX); print("Global device count:", jax.device_count())'
+        python -c 'import jax; import os; jax.distributed.initialize(coordinator_address=os.getenv(MEGASCALE_COORDINATOR_ADDRESS), num_processes=2, process_id=os.getenv(JOB_COMPLETION_INDEX), cluster_detection_method="deactivate"); print("Global device count:", jax.device_count())'
         sleep 60
