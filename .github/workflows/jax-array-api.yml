@@ -22,5 +22,5 @@ jobs:
         pip install "jax[tpu]" -f https://storage.googleapis.com/jax-releases/libtpu_releases.html && pip install orbax
     - name: Run multi-device;
       run: |
-        python -c "import jax; jax.distributed.initialize(); print(jax.devices()); print(jax.local_devices()); from orbax.checkpoint import test_utils; pytree, mesh_tree, axes_tree = test_utils.setup_sharded_pytree()"
+        JAX_PLATFORMS=tpu python -c "import jax; jax.distributed.initialize(); print(jax.devices()); print(jax.local_devices()); from orbax.checkpoint import test_utils; pytree, mesh_tree, axes_tree = test_utils.setup_sharded_pytree()"
     
