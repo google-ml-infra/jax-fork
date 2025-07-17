@@ -19,9 +19,7 @@ jobs:
     steps:
     - name: Install Orbax
       run: |
-        pip install "jax[k8s]" && pip install orbax
-        printenv
+        pip install "jax[k8s, cuda]" && pip install orbax
     - name: Run multi-device;
       run: |
         python -c 'import jax; import os; jax.distributed.initialize(); print("Global device count:", jax.device_count()); print(jax.local_devices())'
-        sleep 60
