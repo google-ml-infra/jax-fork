@@ -58,5 +58,7 @@ jobs:
           halt-dispatch-input: ${{ inputs.halt-for-connection }}
       # Since we do not have a Linux Arm64 RBE pool, we do not run the tests on Arm64. Instead, we
       # cross-compile the tests on the Linux x86 RBE pool.
+      - name: sleep
+        run: sleep 10000
       - name: ${{ (contains(matrix.runner, 'linux-arm64') && 'Build' || 'Run') }} Bazel CPU Tests with RBE
         run: ./ci/run_bazel_test_cpu_rbe.sh
