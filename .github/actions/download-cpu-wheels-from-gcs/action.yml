@@ -3,6 +3,10 @@
 name: Download CPU wheels from GCS
 
 inputs:
+  runner:
+    description: "Which runner should the workflow run on?"
+    type: string
+    default: "linux-x86-n2-16"
   python:
     description: "Which python version should the artifact be built for?"
     type: string
@@ -22,6 +26,7 @@ runs:
   steps:
     # Note that certain envs such as JAXCI_HERMETIC_PYTHON_VERSION are set by the calling workflow.
     - name: Set env vars for use in artifact download URL
+      shell: bash
       run: |
         os=$(uname -s | awk '{print tolower($0)}')
         arch=$(uname -m)
@@ -49,7 +54,8 @@ runs:
       # fails. Instead, we verify the outcome in the step below so that we can print a more
       # informative error message.
       continue-on-error: true
-      if: ${{ !contains($OS, 'win') }}
+      if: ${{ !contains(inputs.runner, 'windows-x86') }}
+      shell: bash
       run: |
         mkdir -p $(pwd)/dist
         gcloud storage cp -r "${{ inputs.gcs_download_uri }}"/jax*py3*none*any.whl $(pwd)/dist/
@@ -65,7 +71,7 @@ runs:
       # fails. Instead, we verify the outcome in step below so that we can print a more
       # informative error message.
       continue-on-error: true
-      if: ${{ contains($OS, 'win') }}
+      if: ${{ contains(inputs.runner, 'windows-x86') }}
       shell: cmd
       run: |
         mkdir dist
@@ -80,6 +86,7 @@ runs:
         )
     - name: Skip the test run if the wheel artifacts were not downloaded successfully
       if: steps.download-wheel-artifacts-nw.outcome == 'failure' || steps.download-wheel-artifacts-w.outcome == 'failure'
+      shell: bash
       run: |
         echo "Failed to download wheel artifacts from GCS. Please check if the wheels were"
         echo "built successfully by the artifact build jobs and are available in the GCS bucket."
