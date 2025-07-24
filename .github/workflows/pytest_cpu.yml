@@ -63,11 +63,6 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      # Halt for testing
-      - name: Wait For Connection
-        uses: google-ml-infra/actions/ci_connection@7f5ca0c263a81ed09ea276524c1b9192f1304e3c
-        with:
-          halt-dispatch-input: ${{ inputs.halt-for-connection }}
       - name: Download wheels from GCS
         uses: ./.github/actions/download-cpu-wheels-from-gcs
         with:
@@ -99,6 +94,11 @@ jobs:
           if [[ $OS == "linux" && $ARCH == "aarch64" && $JAXCI_HERMETIC_PYTHON_VERSION != "3.14" ]]; then
             $JAXCI_PYTHON -m uv pip install numpy~=2.1.0
           fi
+      # Halt for testing
+      - name: Wait For Connection
+        uses: google-ml-infra/actions/ci_connection@7f5ca0c263a81ed09ea276524c1b9192f1304e3c
+        with:
+          halt-dispatch-input: ${{ inputs.halt-for-connection }}
       - name: Run Pytest CPU tests
         timeout-minutes: 60
         run: ./ci/run_pytest_cpu.sh
