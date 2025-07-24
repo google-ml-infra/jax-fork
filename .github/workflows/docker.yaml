@@ -11,7 +11,7 @@ on:
 
 jobs:
   run_tests:
-    runs-on: "linux-x86-n2-32-quoct"
+    runs-on: "linux-x86-n2-32"
     container: "google/cloud-sdk:524.0.0"
     name: "Test build container"
 # End Presubmit Naming Check github-cpu-presubmits
@@ -19,12 +19,6 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
       - name: Wait For Connection
         uses: google-ml-infra/actions/ci_connection@7f5ca0c263a81ed09ea276524c1b9192f1304e3c
-      - name: lsing
-        run: ls
-      - name: Sleep One
-        run: sleep 1000
-      - name: Sleep Two
-        run: sleep 100000
       - name: Configure Docker
         run: gcloud auth configure-docker us-central1-docker.pkg.dev
       -
