@@ -14,12 +14,12 @@ concurrency:
 
 jobs:
   build:
-    runs-on: linux-x86-g2-16-l4-1gpu-quoct
-    container: python:3.11
+    runs-on: linux-arm64-t2a-16
+    container: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build-arm64:latest
     steps:
     - name: Install Orbax
       run: |
-        pip install "jax[k8s, cuda]" && pip install orbax
+        pip install "jax" && pip install orbax
     - name: Run multi-device;
       run: |
         python -c 'import jax; from orbax.checkpoint import test_utils; jax.distributed.initialize(); print("Global device count:", jax.device_count()); print(jax.local_devices()); pytree, mesh_tree, axes_tree = test_utils.setup_sharded_pytree(); print("pytree ", pytree); doubled_pytree = test_utils.apply_function(pytree, lambda x: x * 2); print("doubled py tree ", doubled_pytree);'
