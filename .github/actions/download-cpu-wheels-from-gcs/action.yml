@@ -10,7 +10,7 @@ inputs:
   python:
     description: "Which python version should the artifact be built for?"
     type: string
-    default: "3.12"
+    required: true
   download-jax-only-from-gcs:
     description: "Whether to download only the jax wheel from GCS (e.g for testing a jax only release)"
     default: '0'
