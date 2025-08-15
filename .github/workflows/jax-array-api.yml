@@ -17,7 +17,6 @@ jobs:
     runs-on: linux-x86-g2-16-l4-1gpu-quoct
     container: python:3.11
     steps:
-    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
     - name: Install Orbax
       run: |
         pip install "jax[k8s, cuda]" && pip install orbax
