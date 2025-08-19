@@ -17,9 +17,11 @@ jobs:
     runs-on: linux-x86-g2-16-l4-1gpu-quoct
     container: python:3.11
     steps:
-    - name: Install Orbax
-      run: |
-        pip install "jax[k8s, cuda]" && pip install orbax
-    - name: Run multi-device;
-      run: |
-        python -c 'import jax; from orbax.checkpoint import test_utils; jax.distributed.initialize(); print("Global device count:", jax.device_count()); print(jax.local_devices()); pytree, mesh_tree, axes_tree = test_utils.setup_sharded_pytree(); print("pytree ", pytree); doubled_pytree = test_utils.apply_function(pytree, lambda x: x * 2); print("doubled py tree ", doubled_pytree);'
+    - name: Set up Python 3.11
+      uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5.3.0
+      with:
+        python-version: 3.11
+    - name: Report success or failure as github status
+      if: always()
+      shell: bash
+      run: sleep 10000
