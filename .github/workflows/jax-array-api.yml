@@ -21,7 +21,6 @@ jobs:
       id: step_one
       run: |
         echo "action_state=yellow" >> "$GITHUB_ENV"
-        sleep 10000
     - name: Use the value
       id: step_two
       run: |
