@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: linux-x86-n2-16
+    runs-on: linux-x86-g2-16-l4-1gpu-quoct
     container: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build:infrastructure-public-image-2d2a7b1e6e2e
     steps:
     - name: Set the value
