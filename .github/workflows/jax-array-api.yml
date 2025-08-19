@@ -15,7 +15,7 @@ concurrency:
 jobs:
   build:
     runs-on: linux-x86-g2-16-l4-1gpu-quoct
-    container: python:3.11
+    container: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build:infrastructure-public-image-2d2a7b1e6e2e
     steps:
     - name: Set up Python 3.11
       uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5.3.0
