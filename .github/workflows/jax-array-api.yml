@@ -25,7 +25,3 @@ jobs:
       id: step_two
       run: |
         printf '%s\n' "$action_state" # This will output 'yellow'
-    - name: Report success or failure as github status
-      if: always()
-      shell: bash
-      run: sleep 10000
