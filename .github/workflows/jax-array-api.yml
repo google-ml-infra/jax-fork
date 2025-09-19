@@ -25,4 +25,4 @@ jobs:
       id: step_two
       run: |
         pip install "jax[tpu]" -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
-        python -c 'import jax; print("Global device count:", jax.device_count())'
+        python -c 'import jax; print("Global device count:", jax.device_count()); print("local devices =", jax.local_devices())'
