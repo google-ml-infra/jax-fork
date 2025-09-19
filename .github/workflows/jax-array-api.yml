@@ -14,15 +14,15 @@ concurrency:
 
 jobs:
   build:
-    runs-on: linux-x86-n2-16
+    runs-on: linux-x86-ct5lp-x4
     container: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build:infrastructure-public-image-2d2a7b1e6e2e
     steps:
     - name: Set up Python 3.11
       uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5.3.0
       with:
-        python-version: 3.111234
+        python-version: 3.11
     - name: Use the value
       id: step_two
       run: |
-        echo "Error: No argument provided." >&2 # Output error to stderr
-        exit 1
+        pip install "jax[tpu]" -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+        python -c 'import jax; print("Global device count:", jax.device_count())'
