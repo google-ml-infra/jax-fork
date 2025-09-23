@@ -22,7 +22,7 @@ jobs:
     # Service containers to run with `container-job`
     services:
       # Label used to access the service container
-      redis:
+      abc:
         # Docker Hub image
         image: redis
         # Set health checks to wait until redis has started
@@ -49,7 +49,7 @@ jobs:
         # Environment variable used by the `client.js` script to create a new Redis client.
         env:
           # The hostname used to communicate with the Redis service container
-          REDIS_HOST: redis
+          REDIS_HOST: abc
           # The default Redis port
           REDIS_PORT: 6379
           
