@@ -17,7 +17,7 @@ jobs:
     # Containers must run in Linux based operating systems
     runs-on: linux-x86-n2-32
     # Docker Hub image that `container-job` executes in
-    container: ubuntu-latest
+    container: ubuntu:latest
 
     steps:
       # Downloads a copy of the code in your repository before running CI tests
