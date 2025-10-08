@@ -57,15 +57,14 @@ JAX: High performance array computing
       :link-type: ref
       :class-card: getting-started
 
-    .. grid-item-card:: :material-regular:`library_books;2em` User guides
+    .. grid-item-card:: :material-regular:`library_books;2em` JAX 101
       :columns: 12 6 6 4
-      :link: user-guides
+      :link: jax-101
       :link-type: ref
-      :class-card: user-guides
+      :class-card: jax-101
 
-If you're looking to use JAX to train neural networks, start with the
-`JAX AI Stack Tutorials`_, and then check out the `JAX AI Stack Examples`_
-to see how JAX models can be implemented using the Flax_ framework.
+If you're looking to use JAX to train neural networks, check out the `JAX AI
+Stack`_!
 
 Ecosystem
 ---------
@@ -108,7 +107,7 @@ numerical computing tools; the following is just a small sample of what is out t
 
     .. grid-item:: :material-regular:`bar_chart;2em` **Probabilistic modeling**
 
-       - `TensorFlow Probabilty`_
+       - `TensorFlow Probability`_
        - Distrax_
 
     .. grid-item:: :material-outlined:`animation;2em` **Physics & simulation**
@@ -122,6 +121,7 @@ numerical computing tools; the following is just a small sample of what is out t
        - AXLearn_
        - Levanter_
        - EasyLM_
+       - Marin_
 
 
 Many more JAX-based libraries have been developed; the community-run `Awesome JAX`_ page
@@ -133,25 +133,22 @@ maintains an up-to-date list.
    :caption: Getting started
 
    installation
-   quickstart
+   notebooks/thinking_in_jax
 
 .. toctree::
    :hidden:
    :maxdepth: 1
 
-   tutorials
-
    notebooks/Common_Gotchas_in_JAX
-
-   faq
+   jax-101
 
 .. toctree::
    :hidden:
    :maxdepth: 2
-   :caption: More guides/resources
+   :caption: Resources, guides, and references
 
-   user_guides
-   advanced_guide
+   key-concepts
+   advanced_guides
    contributor_guide
    extensions
    notes
@@ -163,10 +160,12 @@ maintains an up-to-date list.
    :hidden:
    :maxdepth: 1
 
+   faq
    changelog
    glossary
 
 .. toctree::
+   :hidden:
    :maxdepth: 2
 
    config_options
@@ -184,10 +183,10 @@ maintains an up-to-date list.
 .. _Grain: https://github.com/google/grain
 .. _Hugging Face Datasets: https://huggingface.co/docs/datasets/
 .. _JAX MD: https://jax-md.readthedocs.io/
-.. _JAX AI Stack Tutorials: https://docs.jaxstack.ai/en/latest/tutorials.html
-.. _JAX AI Stack Examples: https://docs.jaxstack.ai/en/latest/examples.html
+.. _JAX AI Stack: https://docs.jaxstack.ai/en/latest/getting_started.html
 .. _Keras: https://keras.io/
 .. _Levanter: https://github.com/stanford-crfm/levanter
+.. _Marin: https://github.com/marin-community/marin
 .. _Lineax: https://github.com/patrick-kidger/lineax
 .. _MaxText: https://github.com/google/maxtext/
 .. _Numpyro: https://num.pyro.ai/en/latest/index.html
@@ -196,4 +195,4 @@ maintains an up-to-date list.
 .. _Orbax: https://orbax.readthedocs.io/
 .. _PyMC: https://www.pymc.io/
 .. _TensorFlow Datasets: https://www.tensorflow.org/datasets
-.. _TensorFlow Probabilty: https://www.tensorflow.org/probability
+.. _TensorFlow Probability: https://www.tensorflow.org/probability

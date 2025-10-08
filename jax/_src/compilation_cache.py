@@ -23,15 +23,24 @@ import numpy as np
 
 # If zstandard is installed, we use zstd compression, otherwise we use zlib.
 try:
-  import zstandard
+  # compression.zstd should be present in Python 3.14+
+  from compression import zstd  # pytype: disable=import-error
 except ImportError:
+  zstd = None
+
+if zstd is None:
+  # TODO(phawkins): remove this case when we drop support for Python 3.13.
+  try:
+    import zstandard  # pytype: disable=import-error
+  except ImportError:
+    zstandard = None
+else:
   zstandard = None
 
 from jax._src import cache_key
 from jax._src import config
 from jax._src import monitoring
 from jax._src.compilation_cache_interface import CacheInterface
-from jax._src.lib import jaxlib_extension_version
 from jax._src.lib import xla_client
 from jax._src.lib.mlir import ir
 from jax._src.lru_cache import LRUCache
@@ -112,8 +121,6 @@ def initialize_cache(path) -> None:
   Set the path. To take effect, should be called prior to any calls to
   get_executable_and_time() and put_executable_and_time().
   """
-  warnings.warn("initialize_cache is deprecated; use set_cache_dir instead",
-                DeprecationWarning, stacklevel=2)
   config.config.update("jax_compilation_cache_dir", path)
 
 
@@ -182,14 +189,18 @@ def _get_cache(backend) -> CacheInterface | None:
 
 
 def compress_executable(executable: bytes) -> bytes:
-  if zstandard:
+  if zstd:
+    return zstd.compress(executable)
+  elif zstandard:
     compressor = zstandard.ZstdCompressor()
     return compressor.compress(executable)
   else:
     return zlib.compress(executable)
 
 def decompress_executable(executable: bytes) -> bytes:
-  if zstandard:
+  if zstd:
+    return zstd.decompress(executable)
+  elif zstandard:
     decompressor = zstandard.ZstdDecompressor()
     return decompressor.decompress(executable)
   else:
@@ -224,12 +235,8 @@ def get_executable_and_time(
   executable_and_time = decompress_executable(executable_and_time)
   serialized_executable, compile_time = extract_executable_and_time(
       executable_and_time)
-  if jaxlib_extension_version < 332:
-    xla_executable_deserialized = backend.deserialize_executable(
-        serialized_executable, compile_options)
-  else:
-    xla_executable_deserialized = backend.deserialize_executable(
-        serialized_executable, executable_devices, compile_options)
+  xla_executable_deserialized = backend.deserialize_executable(
+      serialized_executable, executable_devices, compile_options)
   return xla_executable_deserialized, compile_time
 
 
@@ -311,8 +318,6 @@ def is_initialized() -> bool:
   initialized status is not checked. The name is retained for backwards
   compatibility.
   """
-  warnings.warn("is_initialized is deprecated; do not use",
-                DeprecationWarning, stacklevel=2)
   return _is_cache_enabled()
 
 
@@ -346,7 +351,7 @@ def combine_executable_and_time(
 
 
 def extract_executable_and_time(
-    exectuable_and_time: bytes
+    executable_and_time: bytes
 ) -> tuple[bytes, int]:
   """Given the cache entry in the format shown below, extract the serialized
   executable and the compilation time.
@@ -356,5 +361,5 @@ def extract_executable_and_time(
   Content:  compilation time    serialized executable
             (big-endian int)
   """
-  return exectuable_and_time[4:], int.from_bytes(
-      exectuable_and_time[:4], byteorder='big')
+  return executable_and_time[4:], int.from_bytes(
+      executable_and_time[:4], byteorder='big')

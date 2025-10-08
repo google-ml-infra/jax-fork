@@ -13,34 +13,23 @@
 # limitations under the License.
 # ==============================================================================
 
-from typing import Any
 from collections.abc import Callable, Sequence
+from typing import Any
 
-import numpy as np
 from jaxlib import _jax
+import numpy as np
 
 from . import pytree
 
 Client = _jax.Client
 Device = _jax.Device
 
-
-class JitState:
-  disable_jit: bool | None
-  enable_x64: bool | None
-  default_device: Any | None
-  extra_jit_context: Any | None
-  post_hook: Callable[..., Any] | None
-
-def global_state() -> JitState: ...
-def thread_local_state() -> JitState: ...
-
-def get_enable_x64() -> bool: ...
+def set_disable_jit_state(config: _jax.config.Config) -> None: ...
+def set_enable_x64_state(config: _jax.config.Config) -> None: ...
+def set_post_hook_state(config: _jax.config.Config) -> None: ...
 def set_thread_local_state_initialization_callback(
-    function: Callable[[], None]): ...
-
-def swap_thread_local_state_disable_jit(
-    value: bool | None) -> bool | None: ...
+    function: Callable[[], None],
+): ...
 
 class ArgSignature:
   dtype: np.dtype
@@ -48,11 +37,8 @@ class ArgSignature:
   weak_type: bool
 
 def _ArgSignatureOfValue(
-    __arg: Any,
-    __jax_enable_x64: bool) -> ArgSignature: ...
-
-def _is_float0(__arg: Any) -> bool: ...
-
+    __arg: Any, __jax_enable_x64: bool
+) -> ArgSignature: ...
 
 class ArgumentSignature:
   static_args: Sequence[Any]
@@ -65,7 +51,6 @@ class ArgumentSignature:
   def __hash__(self, /): ...
   def __str__(self): ...
   def __repr__(self): ...
-
 
 def parse_arguments(
     positional_args: Sequence[Any],

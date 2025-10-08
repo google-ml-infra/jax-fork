@@ -14,7 +14,7 @@ kernelspec:
 (sharded-computation)=
 # Introduction to parallel programming
 
-<!--* freshness: { reviewed: '2024-05-10' } *-->
+<!--* freshness: { reviewed: '2025-05-19' } *-->
 
 This tutorial serves as an introduction to device parallelism for Single-Program Multi-Data (SPMD) code in JAX. SPMD is a parallelism technique where the same computation, such as the forward pass of a neural network, can be run on different input data (for example, different inputs in a batch) in parallel on different devices, such as several GPUs or Google TPUs.
 
@@ -147,7 +147,7 @@ print(result)
 
 +++ {"id": "Q4N5mrr9i_ki"}
 
-The result is partially replicated: that is, the first two elements of the array are replicated on devices `0` and `6`, the second on `1` and `7`, and so on.
+The result is partially replicated: that is, the first two elements of the array are replicated on devices `0` and `4`, the second on `1` and `5`, and so on.
 
 ## 2. Explicit sharding
 
@@ -193,7 +193,7 @@ print(f"replicated_array type: {jax.typeof(replicated_array)}")
 print(f"sharded_array type: {jax.typeof(sharded_array)}")
 ```
 
-We should read the type `f32[4@X, 2]` as "a 4-by-2 array of 32-bit floats whose first dimension
+We should read the type `int32[4@X, 2]` as "a 4-by-2 array of 32-bit ints whose first dimension
 is sharded along mesh axis 'X'. The array is replicated along all other mesh
 axes"
 
@@ -213,7 +213,7 @@ def add_arrays(x, y):
   print(f"ans sharding: {jax.typeof(ans)}")
   return ans
 
-with jax.sharding.use_mesh(mesh):
+with jax.set_mesh(mesh):
   add_arrays(arg0, arg1)
 ```
 
@@ -349,7 +349,7 @@ def layer_auto(x, weights, bias):
   print(f"out sharding: {jax.typeof(out)}")
   return out
 
-with jax.sharding.use_mesh(explicit_mesh):
+with jax.set_mesh(explicit_mesh):
   layer_auto(x_sharded, weights_sharded, bias)
 ```
 
@@ -377,4 +377,4 @@ This tutorial serves as a brief introduction of sharded and parallel computation
 To learn about each SPMD method in-depth, check out these docs:
 - {doc}`../notebooks/Distributed_arrays_and_automatic_parallelization`
 - {doc}`../notebooks/explicit-sharding`
-- {doc}`../notebooks/shard_map`
+- {doc}`../notebooks/shard_map`- {doc}`../the-training-cookbook`

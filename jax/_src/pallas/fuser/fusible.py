@@ -33,7 +33,7 @@ def _make_trivial_fusion(x: jax.Array) -> fusion_lib.Fusion:
   return fusion_lib.Fusion(
       func=lambda: x,
       in_type=((), {}),
-      out_type=jax.ShapeDtypeStruct(x.shape, x.dtype),
+      out_type=jax.typeof(x),
   )
 
 
@@ -50,7 +50,7 @@ def fusible(f=None, *, output_fusion_prefix: Any = True):
           lu.wrap_init(wrapped, debug_info=debug_info), in_tree
       )
       flat_avals = [jax_core.get_aval(x) for x in flat_args]
-      jaxpr, _, consts, _ = pe.trace_to_jaxpr_dynamic(flat_fun, flat_avals)
+      jaxpr, _, consts = pe.trace_to_jaxpr_dynamic(flat_fun, flat_avals)
       out_tree = out_tree_thunk()
       out = fusible_p.bind(
           *consts,

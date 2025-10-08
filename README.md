@@ -30,7 +30,7 @@ derivatives. It supports reverse-mode differentiation (a.k.a. backpropagation)
 via [`jax.grad`](#automatic-differentiation-with-grad) as well as forward-mode differentiation,
 and the two can be composed arbitrarily to any order.
 
-JAX uses [XLA](https://www.tensorflow.org/xla)
+JAX uses [XLA](https://www.openxla.org/xla)
 to compile and scale your NumPy programs on TPUs, GPUs, and other hardware accelerators.
 You can compile your own pure functions with [`jax.jit`](#compilation-with-jit).
 Compilation and automatic differentiation can be composed arbitrarily.
@@ -64,9 +64,8 @@ perex_grads = jax.jit(jax.vmap(grad_loss, in_axes=(None, 0, 0)))  # fast per-exa
 ### Contents
 * [Transformations](#transformations)
 * [Scaling](#scaling)
-* [Current gotchas](#current-gotchas)
+* [Current gotchas](#gotchas-and-sharp-bits)
 * [Installation](#installation)
-* [Neural net libraries](#neural-network-libraries)
 * [Citing JAX](#citing-jax)
 * [Reference documentation](#reference-documentation)
 
@@ -229,14 +228,14 @@ Notebook](https://docs.jax.dev/en/latest/notebooks/Common_Gotchas_in_JAX.html).
 
 ### Supported platforms
 
-|            | Linux x86_64 | Linux aarch64 | Mac x86_64   | Mac aarch64  | Windows x86_64 | Windows WSL2 x86_64 |
-|------------|--------------|---------------|--------------|--------------|----------------|---------------------|
-| CPU        | yes          | yes           | yes          | yes          | yes            | yes                 |
-| NVIDIA GPU | yes          | yes           | no           | n/a          | no             | experimental        |
-| Google TPU | yes          | n/a           | n/a          | n/a          | n/a            | n/a                 |
-| AMD GPU    | yes          | no            | experimental | n/a          | no             | no                  |
-| Apple GPU  | n/a          | no            | n/a          | experimental | n/a            | n/a                 |
-| Intel GPU  | experimental | n/a           | n/a          | n/a          | no             | no                  |
+|            | Linux x86_64 | Linux aarch64 | Mac aarch64  | Windows x86_64 | Windows WSL2 x86_64 |
+|------------|--------------|---------------|--------------|----------------|---------------------|
+| CPU        | yes          | yes           | yes          | yes            | yes                 |
+| NVIDIA GPU | yes          | yes           | n/a          | no             | experimental        |
+| Google TPU | yes          | n/a           | n/a          | n/a            | n/a                 |
+| AMD GPU    | yes          | no            | n/a          | no             | experimental        |
+| Apple GPU  | n/a          | no            | experimental | n/a            | n/a                 |
+| Intel GPU  | experimental | n/a           | n/a          | no             | no                  |
 
 
 ### Instructions
@@ -244,7 +243,7 @@ Notebook](https://docs.jax.dev/en/latest/notebooks/Common_Gotchas_in_JAX.html).
 | Platform        | Instructions                                                                                                    |
 |-----------------|-----------------------------------------------------------------------------------------------------------------|
 | CPU             | `pip install -U jax`                                                                                            |
-| NVIDIA GPU      | `pip install -U "jax[cuda12]"`                                                                                  |
+| NVIDIA GPU      | `pip install -U "jax[cuda13]"`                                                                                  |
 | Google TPU      | `pip install -U "jax[tpu]"`                                                                                     |
 | AMD GPU (Linux) | Follow [AMD's instructions](https://github.com/jax-ml/jax/blob/main/build/rocm/README.md).                      |
 | Mac GPU         | Follow [Apple's instructions](https://developer.apple.com/metal/jax/).                                          |

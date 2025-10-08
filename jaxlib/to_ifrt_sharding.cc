@@ -16,7 +16,6 @@ limitations under the License.
 #include "jaxlib/to_ifrt_sharding.h"
 
 #include <cstdint>
-#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -40,16 +39,15 @@ limitations under the License.
 #include "xla/tsl/platform/statusor.h"
 #include "xla/xla_data.pb.h"
 
-namespace xla {
+namespace jax {
 
 namespace nb = ::nanobind;
 
 // Gets `xla::HloSharding` from a JAX Sharding.
 xla::HloSharding GetXlaHloSharding(nb::handle sharding,
                                    int64_t num_dimensions) {
-  if (sharding.type().is(nb::handle(jax::GSPMDSharding::type().ptr()))) {
-    return nb::cast<jax::GSPMDSharding*>(nb::handle(sharding.ptr()))
-        ->hlo_sharding();
+  if (sharding.type().is(nb::handle(GSPMDSharding::type().ptr()))) {
+    return nb::cast<GSPMDSharding*>(nb::handle(sharding.ptr()))->hlo_sharding();
   } else {
     return nb::cast<xla::HloSharding>(
         sharding.attr("_to_xla_hlo_sharding")(num_dimensions));
@@ -59,7 +57,7 @@ xla::HloSharding GetXlaHloSharding(nb::handle sharding,
 // Gets `xla::ifrt::DeviceList` from a JAX Sharding.
 absl::StatusOr<xla::ifrt::DeviceListRef> GetIfrtDeviceList(
     nb::handle sharding_py) {
-  TF_ASSIGN_OR_RETURN(auto py_device_list, jax::GetPyDeviceList(sharding_py));
+  TF_ASSIGN_OR_RETURN(auto py_device_list, GetPyDeviceList(sharding_py));
   return py_device_list->ifrt_device_list();
 }
 
@@ -72,15 +70,13 @@ xla::ifrt::MemoryKind GetMemoryKind(nb::handle sharding) {
   // to a C++ type and use C++ `memory_kind()` method, which bypasses any Python
   // attribute access.
   nb::handle type = sharding.type();
-  if (type.is(jax::NamedSharding::type())) {
+  if (type.is(NamedSharding::type())) {
+    py_memory_kind = nb::cast<const NamedSharding*>(sharding)->memory_kind();
+  } else if (type.is(SingleDeviceSharding::type())) {
     py_memory_kind =
-        nb::cast<const jax::NamedSharding*>(sharding)->memory_kind();
-  } else if (type.is(jax::SingleDeviceSharding::type())) {
-    py_memory_kind =
-        nb::cast<const jax::SingleDeviceSharding*>(sharding)->memory_kind();
-  } else if (type.is(jax::GSPMDSharding::type())) {
-    py_memory_kind =
-        nb::cast<const jax::GSPMDSharding*>(sharding)->memory_kind();
+        nb::cast<const SingleDeviceSharding*>(sharding)->memory_kind();
+  } else if (type.is(GSPMDSharding::type())) {
+    py_memory_kind = nb::cast<const GSPMDSharding*>(sharding)->memory_kind();
   } else {
     py_memory_kind = sharding.attr("memory_kind");
   }
@@ -92,7 +88,7 @@ xla::ifrt::MemoryKind GetMemoryKind(nb::handle sharding) {
 }
 
 // Converts a JAX Sharding into `xla::ifrt::HloSharding`.
-absl::StatusOr<std::shared_ptr<const xla::ifrt::Sharding>> GetIfrtHloSharding(
+absl::StatusOr<xla::ifrt::ShardingRef> GetIfrtHloSharding(
     nb::handle sharding, const xla::ifrt::Shape& shape) {
   TF_ASSIGN_OR_RETURN(xla::ifrt::DeviceListRef device_list,
                       GetIfrtDeviceList(sharding));
@@ -104,9 +100,9 @@ absl::StatusOr<std::shared_ptr<const xla::ifrt::Sharding>> GetIfrtHloSharding(
 }
 
 // Converts a JAX Sharding into `xla::ifrt::ConcreteEvenSharding`.
-absl::StatusOr<std::shared_ptr<const xla::ifrt::Sharding>>
-GetIfrtConcreteEvenSharding(nb::handle sharding, xla::ifrt::DType dtype,
-                            const xla::ifrt::Shape& shape) {
+absl::StatusOr<xla::ifrt::ShardingRef> GetIfrtConcreteEvenSharding(
+    nb::handle sharding, xla::ifrt::DType dtype,
+    const xla::ifrt::Shape& shape) {
   TF_ASSIGN_OR_RETURN(xla::ifrt::DeviceListRef device_list,
                       GetIfrtDeviceList(sharding));
   xla::ifrt::MemoryKind memory_kind = GetMemoryKind(sharding.ptr());
@@ -127,9 +123,9 @@ GetIfrtConcreteEvenSharding(nb::handle sharding, xla::ifrt::DType dtype,
 }
 
 // Converts a JAX Sharding into `xla::ifrt::ConcreteSharding`.
-absl::StatusOr<std::shared_ptr<const xla::ifrt::Sharding>>
-GetIfrtConcreteSharding(nb::handle sharding, const xla::ifrt::Shape& shape,
-                        std::vector<xla::ifrt::Shape> shard_shapes) {
+absl::StatusOr<xla::ifrt::ShardingRef> GetIfrtConcreteSharding(
+    nb::handle sharding, const xla::ifrt::Shape& shape,
+    std::vector<xla::ifrt::Shape> shard_shapes) {
   TF_ASSIGN_OR_RETURN(xla::ifrt::DeviceListRef device_list,
                       GetIfrtDeviceList(sharding));
   xla::ifrt::MemoryKind memory_kind = GetMemoryKind(sharding.ptr());
@@ -138,4 +134,4 @@ GetIfrtConcreteSharding(nb::handle sharding, const xla::ifrt::Shape& shape,
       /*shard_shapes=*/std::move(shard_shapes));
 }
 
-}  // namespace xla
+}  // namespace jax

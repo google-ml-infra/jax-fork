@@ -1,4 +1,6 @@
 load("@llvm-project//mlir:tblgen.bzl", "gentbl_cc_library", "td_library")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
 load("@rules_python//python:defs.bzl", "py_library")
 
 # Copyright 2023 The JAX Authors.
@@ -21,7 +23,7 @@ licenses(["notice"])
 package(
     default_applicable_licenses = [],
     default_visibility = [
-        "//jax:mosaic_users",
+        "//jax/experimental:mosaic_users",
     ],
 )
 
@@ -69,11 +71,12 @@ cc_library(
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:str_format",
-        "@com_google_absl//absl/strings:string_view",
         "@com_google_absl//absl/types:span",
         "@llvm-project//llvm:Support",
         "@llvm-project//mlir:ArithDialect",
+        "@llvm-project//mlir:CommonFolders",
         "@llvm-project//mlir:ControlFlowDialect",
         "@llvm-project//mlir:DataLayoutInterfaces",
         "@llvm-project//mlir:Dialect",
@@ -229,6 +232,22 @@ cc_test(
         "//testing/base/public:gunit_main",
         "@llvm-project//mlir:Support",
         "@xla//xla:array",
+    ],
+)
+
+cc_test(
+    name = "tpu_ops_verification_test",
+    srcs = ["dialect/tpu/tpu_ops_verification_test.cc"],
+    deps = [
+        ":tpu_dialect",
+        "//testing/base/public:gunit_main",
+        "@com_google_absl//absl/status",
+        "@llvm-project//mlir:ArithDialect",
+        "@llvm-project//mlir:FuncDialect",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:MemRefDialect",
+        "@llvm-project//mlir:Support",
+        "@xla//xla/mlir/utils:error_util",
     ],
 )
 

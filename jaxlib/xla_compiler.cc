@@ -20,6 +20,7 @@ limitations under the License.
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -30,8 +31,8 @@ limitations under the License.
 #include "absl/strings/str_format.h"
 #include "absl/strings/str_join.h"
 #include "absl/strings/str_split.h"
-#include "absl/strings/string_view.h"
 #include "absl/types/span.h"
+#include "mlir/Support/LLVM.h"
 #include "nanobind/nanobind.h"
 #include "nanobind/ndarray.h"
 #include "nanobind/stl/optional.h"  // IWYU pragma: keep
@@ -52,30 +53,25 @@ limitations under the License.
 #include "xla/hlo/builder/xla_computation.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_module.h"
-#include "xla/hlo/ir/hlo_module_group.h"
 #include "xla/hlo/ir/hlo_print_options.h"
 #include "xla/hlo/ir/hlo_sharding.h"
 #include "xla/hlo/parser/hlo_parser.h"
-#include "xla/hlo/pass/hlo_pass_interface.h"
-#include "xla/hlo/transforms/simplifiers/flatten_call_graph.h"
-#include "xla/hlo/transforms/simplifiers/hlo_dce.h"
-#include "xla/hlo/transforms/simplifiers/tuple_simplifier.h"
 #include "xla/layout.h"
 #include "xla/layout_util.h"
 #include "xla/literal.h"
-#include "xla/pjrt/compile_options.pb.h"
 #include "xla/pjrt/exceptions.h"
 #include "xla/pjrt/pjrt_executable.h"
+#include "xla/pjrt/proto/compile_options.pb.h"
 #include "xla/pjrt/status_casters.h"
 #include "xla/python/nb_absl_span.h"  // IWYU pragma: keep
 #include "xla/python/nb_numpy.h"
 #include "xla/python/types.h"
-#include "xla/service/call_inliner.h"
 #include "xla/service/computation_placer.h"
 #include "xla/service/custom_call_target_registry.h"
 #include "xla/service/hlo.pb.h"
 #include "xla/service/hlo_graph_dumper.h"
 #include "xla/service/hlo_module_config.h"
+#include "xla/service/spmd/shardy/stablehlo_round_trip/stablehlo_import.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
 #include "xla/tsl/lib/strings/proto_serialization.h"
@@ -200,7 +196,7 @@ absl::StatusOr<Shape> MakeShapeWithDenseLayout(
 // `subgroup_types`: indicates the subgroups of the last `subgroup_types.size()`
 //   dimensions in `dims`.
 //
-// In practice, `reshape_dims` often maps to the axises of user defined device
+// In practice, `reshape_dims` often maps to the axes of user defined device
 // mesh, and `transpose_perm` often maps to the user specification of how a
 // tensor is partitioned based on the axes defined in the mesh, e.g. for a mesh
 // of size 4x2x2 as AxBxC:
@@ -322,7 +318,7 @@ absl::Status PyRegisterCustomCallTarget(const std::string& fn_name,
       api_version));
 }
 
-absl::Status PyRegisterCustomTypeId(absl::string_view type_name,
+absl::Status PyRegisterCustomTypeId(std::string_view type_name,
                                     nb::object type_id) {
   nb::capsule capsule;
   if (!nb::try_cast<nb::capsule>(type_id, capsule)) {
@@ -370,7 +366,9 @@ void DefRepeatedEnumProperty(nb::class_<T>& cls, const char* name,
         std::copy(elems->begin(), elems->end(), std::back_inserter(result));
         return result;
       },
-      [getter](T& obj, nb::sequence new_elems) {
+      [getter](
+          T& obj,
+          nb::typed<nb::sequence, typename Container::value_type> new_elems) {
         Container* elems = (obj.*getter)();
         elems->Clear();
         for (nb::handle e : new_elems) {
@@ -420,14 +418,14 @@ nb::ndarray<> LiteralToNdarray(Literal& obj) {
         "Creating an array from a tiled Literal is not supported.");
   }
 
-  if (!LayoutUtil::IsDenseArray(shape)) {
+  if (!shape.IsArray()) {
     throw XlaRuntimeError(
         "Creating an array is only supported for dense Literals.");
   }
 
   xla::PrimitiveType primitive_type = shape.element_type();
   nb::dlpack::dtype dtype =
-      ValueOrThrow(PrimitiveTypeToNbDLDataType(primitive_type));
+      ValueOrThrow(jax::PrimitiveTypeToNbDLDataType(primitive_type));
 
   absl::Span<const int64_t> dimensions = shape.dimensions();
   std::vector<size_t> unsigned_dimensions(dimensions.begin(), dimensions.end());
@@ -438,14 +436,51 @@ nb::ndarray<> LiteralToNdarray(Literal& obj) {
                        nb::device::cpu::value, 0);
 }
 
+struct Descriptor {};
+
 }  // namespace
 
 void BuildXlaCompilerSubmodule(nb::module_& m) {
+  // Types
+  nb::enum_<PrimitiveType>(m, "PrimitiveType", nb::is_arithmetic())
+      .value("PRIMITIVE_TYPE_INVALID", PRIMITIVE_TYPE_INVALID)
+      .value("PRED", PRED)
+      .value("S4", S4)
+      .value("S8", S8)
+      .value("S16", S16)
+      .value("S32", S32)
+      .value("S64", S64)
+      .value("U4", U4)
+      .value("U8", U8)
+      .value("U16", U16)
+      .value("U32", U32)
+      .value("U64", U64)
+      .value("F16", F16)
+      .value("F4E2M1FN", F4E2M1FN)
+      .value("F8E3M4", F8E3M4)
+      .value("F8E4M3", F8E4M3)
+      .value("F8E4M3FN", F8E4M3FN)
+      .value("F8E4M3B11FNUZ", F8E4M3B11FNUZ)
+      .value("F8E4M3FNUZ", F8E4M3FNUZ)
+      .value("F8E5M2", F8E5M2)
+      .value("F8E5M2FNUZ", F8E5M2FNUZ)
+      .value("F8E8M0FNU", F8E8M0FNU)
+      .value("BF16", BF16)
+      .value("F32", F32)
+      .value("F64", F64)
+      .value("C64", C64)
+      .value("C128", C128)
+      .value("TUPLE", TUPLE)
+      .value("OPAQUE_TYPE", OPAQUE_TYPE)
+      .value("TOKEN", TOKEN);
+
   // Shapes
   nb::class_<Layout> layout_class(m, "Layout");
   layout_class.def(nb::init<absl::Span<const int64_t>>())
       .def("__init__",
-           [](Layout* self, nb::sequence minor_to_major, nb::sequence tiling,
+           [](Layout* self, nb::typed<nb::sequence, int> minor_to_major,
+              nb::typed<nb::sequence, nb::typed<nb::tuple, int, nb::ellipsis>>
+                  tiling,
               int64_t element_size_in_bits) {
              std::vector<Tile> xla_tiles;
              xla_tiles.reserve(nb::len(tiling.ptr()));
@@ -463,17 +498,27 @@ void BuildXlaCompilerSubmodule(nb::module_& m) {
       .def("element_size_in_bits", &Layout::element_size_in_bits)
       .def("tiling",
            [](Layout layout) {
-             std::vector<nb::tuple> result;
+             std::vector<nb::typed<nb::tuple, int, nb::ellipsis>> result;
              result.reserve(layout.tiles().size());
              for (auto& t : layout.tiles()) {
                result.push_back(SpanToNbTuple(t.dimensions()));
              }
              return result;
            })
-      .def("__eq__", [](const Layout& layout,
-                        const Layout& other) { return layout == other; })
-      .def("__ne__", [](const Layout& layout,
-                        const Layout& other) { return layout != other; })
+      .def(
+          "__eq__",
+          [](const Layout& layout, const Layout& other) {
+            return layout == other;
+          },
+          nb::is_operator(),
+          nb::sig("def __eq__(self, other: object, /) -> bool"))
+      .def(
+          "__ne__",
+          [](const Layout& layout, const Layout& other) {
+            return layout != other;
+          },
+          nb::is_operator(),
+          nb::sig("def __ne__(self, other: object, /) -> bool"))
       .def("__str__", &Layout::ToString)
       .def("__hash__",
            [](const Layout& layout) { return absl::HashOf(layout); })
@@ -494,7 +539,7 @@ void BuildXlaCompilerSubmodule(nb::module_& m) {
         LayoutProto result;
         nb::bytes serialized = nb::cast<nb::bytes>(t[0]);
         result.ParseFromArray(serialized.c_str(), serialized.size());
-        new (self) Layout(Layout::CreateFromProto(result));
+        new (self) Layout(ValueOrThrow(Layout::FromProto(result)));
       });
 
   nb::class_<Shape> shape_class(m, "Shape");
@@ -509,32 +554,32 @@ void BuildXlaCompilerSubmodule(nb::module_& m) {
             return ShapeUtil::MakeTupleShape(shapes);
           },
           "Constructs a tuple shape.")
-      .def_static("array_shape",
-                  xla::ValueOrThrowWrapper(
-                      [](PrimitiveType type, nb::sequence dims_seq,
-                         std::optional<nb::sequence> layout_seq,
-                         std::optional<std::vector<bool>> dynamic_dimensions)
-                          -> absl::StatusOr<Shape> {
-                        std::vector<int64_t> dims =
-                            SequenceToVector<int64_t>(dims_seq);
-                        if (layout_seq) {
-                          std::vector<int64_t> layout =
-                              SequenceToVector<int64_t>(*layout_seq);
-                          return MakeShapeWithDenseLayout(type, dims, layout,
-                                                          dynamic_dimensions);
-                        } else {
-                          return MakeShapeWithDenseLayout(
-                              type, dims, std::nullopt, dynamic_dimensions);
-                        }
-                      }),
-                  "Constructs an array shape.", nb::arg("type"),
-                  nb::arg("dims"), nb::arg("layout").none() = std::nullopt,
-                  nb::arg("dynamic_dimensions").none() = std::nullopt)
       .def_static(
           "array_shape",
           xla::ValueOrThrowWrapper(
-              [](nb_dtype dtype, nb::sequence dims_seq,
-                 std::optional<nb::sequence> layout_seq,
+              [](PrimitiveType type, nb::typed<nb::sequence, int> dims_seq,
+                 std::optional<nb::typed<nb::sequence, int>> layout_seq,
+                 std::optional<std::vector<bool>> dynamic_dimensions)
+                  -> absl::StatusOr<Shape> {
+                std::vector<int64_t> dims = SequenceToVector<int64_t>(dims_seq);
+                if (layout_seq) {
+                  std::vector<int64_t> layout =
+                      SequenceToVector<int64_t>(*layout_seq);
+                  return MakeShapeWithDenseLayout(type, dims, layout,
+                                                  dynamic_dimensions);
+                } else {
+                  return MakeShapeWithDenseLayout(type, dims, std::nullopt,
+                                                  dynamic_dimensions);
+                }
+              }),
+          "Constructs an array shape.", nb::arg("type"), nb::arg("dims"),
+          nb::arg("layout").none() = std::nullopt,
+          nb::arg("dynamic_dimensions").none() = std::nullopt)
+      .def_static(
+          "array_shape",
+          xla::ValueOrThrowWrapper(
+              [](nb_dtype dtype, nb::typed<nb::sequence, int> dims_seq,
+                 std::optional<nb::typed<nb::sequence, int>> layout_seq,
                  std::optional<std::vector<bool>> dynamic_dimensions)
                   -> absl::StatusOr<Shape> {
                 PrimitiveType type = ValueOrThrow(DtypeToPrimitiveType(dtype));
@@ -567,9 +612,7 @@ void BuildXlaCompilerSubmodule(nb::module_& m) {
           },
           "Constructs a scalar shape.", nb::arg("type"))
       .def("dimensions",
-           [](const Shape& shape) -> nb::tuple {
-             return SpanToNbTuple(shape.dimensions());
-           })
+           [](const Shape& shape) { return SpanToNbTuple(shape.dimensions()); })
       .def("layout",
            [](const Shape& shape) -> Layout { return shape.layout(); })
       .def("xla_element_type", &Shape::element_type)
@@ -622,10 +665,16 @@ void BuildXlaCompilerSubmodule(nb::module_& m) {
           },
           "Returns a copy of a shape with missing layouts set to "
           "major-to-minor.")
-      .def("__eq__", [](const Shape& shape,
-                        const Shape& other) { return shape == other; })
-      .def("__ne__", [](const Shape& shape,
-                        const Shape& other) { return shape != other; })
+      .def(
+          "__eq__",
+          [](const Shape& shape, const Shape& other) { return shape == other; },
+          nb::is_operator(),
+          nb::sig("def __eq__(self, other: object, /) -> bool"))
+      .def(
+          "__ne__",
+          [](const Shape& shape, const Shape& other) { return shape != other; },
+          nb::is_operator(),
+          nb::sig("def __ne__(self, other: object, /) -> bool"))
       .def("__hash__", [](const Shape& shape) { return absl::HashOf(shape); })
       .def("__repr__", [](const Shape& shape) {
         return shape.ToString(/*print_layout=*/true);
@@ -758,7 +807,7 @@ void BuildXlaCompilerSubmodule(nb::module_& m) {
     ComputationWrapper(const HloComputation* comp,
                        const std::shared_ptr<HloModule> module)
         : comp_(comp), module_(module) {}
-    absl::string_view name() const { return comp_->name(); }
+    std::string_view name() const { return comp_->name(); }
     void render_html(const std::string& filename) {
       std::string html = xla::ValueOrThrow(RenderGraph(
           *comp_, /*label=*/"", comp_->parent()->config().debug_options(),
@@ -820,32 +869,6 @@ void BuildXlaCompilerSubmodule(nb::module_& m) {
                      return param_shardings;
                    });
 
-  nb::class_<HloModuleGroup> hlo_module_group_class(m, "HloModuleGroup");
-  hlo_module_group_class
-      .def("__init__",
-           [](HloModuleGroup* self, const std::string& name,
-              const std::vector<std::shared_ptr<HloModule>>& hlo_modules) {
-             std::vector<std::unique_ptr<HloModule>> modules;
-             modules.reserve(hlo_modules.size());
-             for (const auto& m : hlo_modules) {
-               modules.push_back(m->Clone(/*suffix=*/""));
-             }
-             new (self) HloModuleGroup(name, std::move(modules));
-           })
-      .def_prop_ro("name", &HloModuleGroup::name)
-      .def("to_string", &HloModuleGroup::ToString)
-      .def("to_modules",
-           [](HloModuleGroup& m) -> std::vector<std::shared_ptr<HloModule>> {
-             std::vector<std::unique_ptr<HloModule>> modules =
-                 m.ConsumeModules();
-             std::vector<std::shared_ptr<HloModule>> shared_modules;
-             shared_modules.reserve(modules.size());
-             for (auto& module : modules) {
-               shared_modules.push_back(std::move(module));
-             }
-             return shared_modules;
-           });
-
   m.def("hlo_module_to_dot_graph",
         [](const HloModule& hlo_module) -> std::string {
           return xla::ValueOrThrow(RenderGraph(
@@ -854,7 +877,8 @@ void BuildXlaCompilerSubmodule(nb::module_& m) {
         });
   m.def(
       "hlo_module_cost_analysis",
-      xla::ValueOrThrowWrapper([](PyClient* client, const HloModule& module)
+      xla::ValueOrThrowWrapper([](jax::PyClient* client,
+                                  const HloModule& module)
                                    -> absl::StatusOr<nb::dict> {
         TF_ASSIGN_OR_RETURN(auto analysis,
                             client->pjrt_client()->GetHloCostAnalysis());
@@ -862,7 +886,7 @@ void BuildXlaCompilerSubmodule(nb::module_& m) {
 
         // Convert from HloCostAnalysis::Properties to a standard map.
         nb::dict ret;
-        analysis->properties().ForEach([&](absl::string_view key, float val) {
+        analysis->properties().ForEach([&](std::string_view key, float val) {
           ret[nb::str(key.data(), key.size())] = nb::cast(val);
         });
         return ret;
@@ -1041,8 +1065,7 @@ void BuildXlaCompilerSubmodule(nb::module_& m) {
 
         for (const auto& [name, registration] : *ffi_handlers) {
           nb::dict bundle;
-          auto export_handler = [&](absl::string_view name,
-                                    XLA_FFI_Handler* h) {
+          auto export_handler = [&](std::string_view name, XLA_FFI_Handler* h) {
             if (h != nullptr) {
               bundle[nb::str(name.data(), name.size())] =
                   nb::capsule(reinterpret_cast<void*>(h));
@@ -1064,7 +1087,7 @@ void BuildXlaCompilerSubmodule(nb::module_& m) {
 
   m.def(
       "register_custom_type_id",
-      [](absl::string_view type_name, nb::object type_id) {
+      [](std::string_view type_name, nb::object type_id) {
         xla::ThrowIfError(PyRegisterCustomTypeId(type_name, type_id));
       },
       nb::arg("type_name"), nb::arg("type_id"));
@@ -1275,13 +1298,19 @@ void BuildXlaCompilerSubmodule(nb::module_& m) {
                    &ExecutableBuildOptions::memory_fitting_effort,
                    &ExecutableBuildOptions::set_memory_fitting_effort)
       .def_prop_rw(
-          "optimization_level", &ExecutableBuildOptions::optimization_level,
+          "optimization_level",
+          [](ExecutableBuildOptions& options) {
+            return static_cast<int>(options.optimization_level());
+          },
           [](ExecutableBuildOptions& options, int value) {
             options.set_optimization_level(
                 static_cast<xla::ExecutionOptions::EffortLevel>(value));
           })
       .def_prop_rw(
-          "memory_fitting_level", &ExecutableBuildOptions::memory_fitting_level,
+          "memory_fitting_level",
+          [](ExecutableBuildOptions& options) {
+            return static_cast<int>(options.memory_fitting_level());
+          },
           [](ExecutableBuildOptions& options, int value) {
             options.set_memory_fitting_level(
                 static_cast<xla::ExecutionOptions::EffortLevel>(value));
@@ -1330,6 +1359,7 @@ void BuildXlaCompilerSubmodule(nb::module_& m) {
   op_sharding_type.value("REPLICATED", OpSharding::REPLICATED)
       .value("MAXIMAL", OpSharding::MAXIMAL)
       .value("MANUAL", OpSharding::MANUAL)
+      .value("UNREDUCED", OpSharding::UNREDUCED)
       .value("TUPLE", OpSharding::TUPLE)
       .value("OTHER", OpSharding::OTHER)
       .value("UNKNOWN", OpSharding::UNKNOWN);
@@ -1340,14 +1370,9 @@ void BuildXlaCompilerSubmodule(nb::module_& m) {
       .value("LIKE", OpSharding::LIKE);
 
   nb::class_<OpSharding> op_sharding(m, "OpSharding");
+  op_sharding.attr("Type") = op_sharding_type;
+  op_sharding.attr("ShardGroupType") = op_sharding_shard_group_type;
   op_sharding
-      .def_prop_ro_static(
-          "Type",
-          [op_sharding_type](const nb::object&) { return op_sharding_type; })
-      .def_prop_ro_static("ShardGroupType",
-                          [op_sharding_shard_group_type](const nb::object&) {
-                            return op_sharding_shard_group_type;
-                          })
       .def(nb::init<>())
       .def("__getstate__",
            [](const OpSharding& self) {
@@ -1417,18 +1442,32 @@ void BuildXlaCompilerSubmodule(nb::module_& m) {
           nb::arg("subgroup_types") = absl::Span<const xla::OpSharding::Type>())
       .def_static("manual", [] { return HloSharding::Manual(); })
       .def_static("replicate", [] { return HloSharding::Replicate(); })
+      .def_static("unreduced", [] { return HloSharding::Unreduced(); })
       .def_static("unknown", [] { return HloSharding::Unknown(); })
       .def_static(
           "subgroup_with_device_ordering",
           xla::ValueOrThrowWrapper(SubgroupWithTileAssignmentHelper),
           nb::arg("tile_assignment"),
           nb::arg("subgroup_types") = absl::Span<const xla::OpSharding::Type>())
-      .def("__eq__", [](const xla::HloSharding& a,
-                        const xla::HloSharding& b) { return a == b; })
+      .def(
+          "__eq__",
+          [](const xla::HloSharding& a, const xla::HloSharding& b) {
+            return a == b;
+          },
+          nb::is_operator(),
+          nb::sig("def __eq__(self, other: object, /) -> bool"))
+      .def(
+          "__ne__",
+          [](const xla::HloSharding& a, const xla::HloSharding& b) {
+            return a != b;
+          },
+          nb::is_operator(),
+          nb::sig("def __ne__(self, other: object, /) -> bool"))
       .def("__hash__",
            [](const xla::HloSharding& self) { return absl::HashOf(self); })
       .def("is_replicated", &xla::HloSharding::IsReplicated)
       .def("is_manual", &xla::HloSharding::IsManual)
+      .def("is_unreduced", &xla::HloSharding::IsUnreduced)
       .def("is_unknown", &xla::HloSharding::IsUnknown)
       .def("is_tiled", &xla::HloSharding::IsTiled)
       .def("is_maximal", &xla::HloSharding::IsTileMaximal)
@@ -1454,6 +1493,10 @@ void BuildXlaCompilerSubmodule(nb::module_& m) {
             return self.tile_assignment().num_dimensions();
           },
           nb::lock_self())
+      .def("is_tile_assignment_iota",
+           [](const xla::HloSharding& self) {
+             return self.tile_assignment().iota().has_value();
+           })
       .def(
           "tile_assignment_dimensions",
           [](const xla::HloSharding& self) {
@@ -1478,27 +1521,13 @@ void BuildXlaCompilerSubmodule(nb::module_& m) {
       .def("subgroup_types", &xla::HloSharding::subgroup_types)
       .def("__repr__",
            [](const xla::HloSharding& self) { return self.ToString(); })
-      .def("to_proto", &xla::HloSharding::ToProto);
-
-
-  // Hlo Module Passes
-  nb::class_<HloPassInterface> hlo_pass_interface(m, "HloPassInterface");
-  hlo_pass_interface.def_prop_ro("name", &HloPassInterface::name)
-      .def("is_pass_pipeline", &HloPassInterface::IsPassPipeline)
-      .def("run",
-           [](HloPassInterface& pass, HloModule* module) -> bool {
-             return xla::ValueOrThrow(pass.Run(module));
-           })
-      .def("run_on_module_group",
-           [](HloPassInterface& pass, HloModuleGroup* module_group) -> bool {
-             return xla::ValueOrThrow(pass.RunOnModuleGroup(module_group));
-           });
-
-  nb::class_<HloDCE, HloPassInterface>(m, "HloDCE").def(nb::init<>());
-  nb::class_<CallInliner, HloPassInterface>(m, "CallInliner").def(nb::init<>());
-  nb::class_<FlattenCallGraph, HloPassInterface>(m, "FlattenCallGraph")
-      .def(nb::init<>());
-  nb::class_<TupleSimplifier, HloPassInterface>(m, "TupleSimplifier")
-      .def(nb::init<>());
+      .def("to_proto", &xla::HloSharding::ToProto)
+      .def("get_axis_sizes", [](const xla::HloSharding& self) {
+        // If returning the SmallVector, we encounter the error "unable to
+        // convert function return value to a Python type!".
+        mlir::SmallVector<int64_t> mesh_shape =
+            xla::sdy::getAxisSizes(self.tile_assignment());
+        return std::vector<int64_t>(mesh_shape.begin(), mesh_shape.end());
+      });
 }  // NOLINT(readability/fn_size)
 }  // namespace xla

@@ -191,7 +191,7 @@ class PallasCallStatefulTest(jtu.JaxTestCase):
     np.testing.assert_allclose(o, x @ y, atol=atol)
 
 
-class ShmallasTest(jtu.JaxTestCase):
+class CoreMapTest(jtu.JaxTestCase):
 
   def setUp(self):
     super().setUp()
@@ -219,6 +219,22 @@ class ShmallasTest(jtu.JaxTestCase):
     x = jnp.arange(8 * 128, dtype=jnp.int32).reshape((8, 128))
     y = f(x)
     np.testing.assert_array_equal(y, x)
+
+  def test_empty_core_map_raises_error(self):
+    @jax.jit
+    def f(x):
+      y = jnp.zeros_like(x)
+      def inner(refs):
+        del refs  # Unused.
+        @pl.core_map(pltpu.create_tensorcore_mesh("x"))
+        def _():
+          pass
+      _, y = pl.run_state(inner)((x, y))
+      return y
+    x = jnp.arange(8 * 128, dtype=jnp.int32).reshape((8, 128))
+    with self.assertRaisesRegex(Exception,
+      "Attempted to lower core_map without discharging."):
+      f(x)
 
   def test_can_query_core_index_pallas_kernel_with_core_map(self):
     mesh = pltpu.create_tensorcore_mesh("x")
@@ -258,6 +274,27 @@ class ShmallasTest(jtu.JaxTestCase):
     ).reshape(x.shape)
     y = f(x)
     np.testing.assert_array_equal(y, expected_out)
+
+  def test_raises_on_captured_arrays(self):
+    @jax.jit
+    def f(x):
+      y = jnp.zeros_like(x)
+
+      def inner(x_ref):
+        @pl.core_map(pltpu.create_tensorcore_mesh("x"))
+        def _():
+          @functools.partial(
+              pl.run_scoped, tmp_ref=pltpu.VMEM(x_ref.shape, x_ref.dtype)
+          )
+          def _(tmp_ref):
+            pltpu.sync_copy(x_ref, tmp_ref)
+            tmp_ref[...] += y
+
+      return pl.run_state(inner)(x)
+
+    x = jnp.arange(8 * 128, dtype=jnp.int32).reshape((8, 128))
+    with self.assertRaisesRegex(Exception, "core_map .* captures constants"):
+      f(x)
 
 
 if __name__ == "__main__":

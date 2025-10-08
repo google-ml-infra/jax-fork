@@ -205,6 +205,8 @@ class NNFunctionsTest(jtu.JaxTestCase):
       raise unittest.SkipTest("CUDA or cuDNN versions are not compatible.")
     if impl == 'cudnn' and dtype == jnp.float32:
       raise unittest.SkipTest("cuDNN only supports fp16 or bf16.")
+    if impl == 'cudnn' and jtu.is_cuda_version_at_least(13, 0):
+      raise unittest.SkipTest("cuDNN creates no execution plans on CUDA 13.0.")
 
     B, S, T, N, H, G = 2, 128, 128, 4, 32, group_num
     keys = random.split(random.PRNGKey(0), 5)
@@ -252,6 +254,8 @@ class NNFunctionsTest(jtu.JaxTestCase):
     min_cudnn_version = 90200 if 'sliding_window' in mask_mode else 8904
     if not _is_required_cudnn_version_satisfied("8.0", min_cudnn_version):
       raise unittest.SkipTest("CUDA or cuDNN versions are not compatible.")
+    if jtu.is_cuda_version_at_least(13, 0):
+      raise unittest.SkipTest("cuDNN creates no execution plans on CUDA 13.0.")
 
     dtype = jnp.bfloat16
     B, S, T, N, H = 2, 128, 128, 4, 32
@@ -315,6 +319,8 @@ class NNFunctionsTest(jtu.JaxTestCase):
   def testDotProductAttentionBiasGradient(self, batch_size, use_vmap):
     if not _is_required_cudnn_version_satisfied("8.0", 8904):
       raise unittest.SkipTest("CUDA or cuDNN versions are not compatible.")
+    if jtu.is_cuda_version_at_least(13, 0):
+      raise unittest.SkipTest("cuDNN creates no execution plans on CUDA 13.0.")
 
     dtype = jnp.bfloat16
     B, S, N, H = batch_size, 128, 4, 32
@@ -357,13 +363,9 @@ class NNFunctionsTest(jtu.JaxTestCase):
       _, f_vjp = jax.vjp(attn_ans, x, bias, mask)
       return f_vjp(x)
 
-    if batch_size != 1:
-      with self.assertRaisesRegex(ValueError, _cudnn_dbias_error):
-        _, dbias_ans, _ = bwd_ans(x, bias, mask)
-    else:
-      _, dbias_ref, _ = bwd_ref(x, bias, mask)
-      _, dbias_ans, _ = bwd_ans(x, bias, mask)
-      self.assertAllClose(dbias_ans, dbias_ref, rtol=0.1, atol=0.1)
+    _, dbias_ref, _ = bwd_ref(x, bias, mask)
+    _, dbias_ans, _ = bwd_ans(x, bias, mask)
+    self.assertAllClose(dbias_ans, dbias_ref, rtol=0.1, atol=0.1)
 
   @jtu.skip_on_flag("jax_skip_slow_tests", True)
   def testSoftplusGrad(self):
@@ -719,6 +721,47 @@ class NNFunctionsTest(jtu.JaxTestCase):
 
     with jax.checking_leaks():
       fwd()  # doesn't crash
+
+  @parameterized.product(
+      shape=[(5,), (3, 5), (2, 3, 5)],
+      use_where=[True, False],
+      keepdims=[True, False],
+  )
+  def testLogMeanExp(self, shape, use_where, keepdims):
+    x = self.rng().rand(*shape) * 2 - 1
+    axis = self.rng().randint(0, x.ndim)
+    if use_where:
+      where = self.rng().randint(0, 2, size=shape).astype(bool)
+    else:
+      where = None
+    got = nn.logmeanexp(x, axis=axis, where=where, keepdims=keepdims)
+    expected = jnp.log(jnp.mean(jnp.exp(x), axis=axis, where=where, keepdims=keepdims))
+    self.assertAllClose(got, expected, atol=1e-3)
+
+  def testLog1mExp(self):
+    x, expected = jnp.array([
+        [0.1, jnp.log(1 - jnp.exp(-0.1))],
+        [1.1, jnp.log(1 - jnp.exp(-1.1))],
+        [0, -jnp.inf],
+        [1, -0.45867515],
+        [1e2, 0.0],
+        [1e-5, jnp.log(1e-5)],
+        [-1, jnp.nan],
+        [-1e-2, jnp.nan],
+        [-1e2, jnp.nan],
+        [jnp.inf, 0.0],
+    ]).T
+    got = nn.log1mexp(x)
+    self.assertAllClose(got, expected, rtol=1e-3, atol=1e-3)
+
+  def testLog1mExpGrad(self):
+    check_grads(
+        nn.log1mexp,
+        (jnp.array([1e-2, 1e-1, 1e0, 1e1, 1e2]),),
+        order=1,
+        rtol=1e-2 if jtu.test_device_matches(["tpu"]) else 1e-3,
+        atol=1e-3,
+    )
 
 
 InitializerRecord = collections.namedtuple(

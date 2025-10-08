@@ -146,14 +146,10 @@ class CompilationCacheTest(CompilationCacheTestCase):
     )
     backend = xla_bridge.get_backend()
     executable_devices = xc.DeviceList(tuple(backend.local_devices()))
-    if jax._src.lib.jaxlib_extension_version < 331:
-      executable1 = backend.compile(computation1, compile_options)
-      executable2 = backend.compile(computation2, compile_options)
-    else:
-      executable1 = backend.compile(
-          computation1, executable_devices, compile_options)
-      executable2 = backend.compile(
-          computation2, executable_devices, compile_options)
+    executable1 = backend.compile_and_load(
+        computation1, executable_devices, compile_options)
+    executable2 = backend.compile_and_load(
+        computation2, executable_devices, compile_options)
     cc.put_executable_and_time(
         "key1", "computation1", executable1, backend, FAKE_COMPILE_TIME)
     cc.put_executable_and_time(
@@ -177,11 +173,8 @@ class CompilationCacheTest(CompilationCacheTestCase):
     )
     backend = xla_bridge.get_backend()
     executable_devices = xc.DeviceList(tuple(devices.flat))
-    if jax._src.lib.jaxlib_extension_version < 331:
-      executable = backend.compile(str(computation), compile_options)
-    else:
-      executable = backend.compile(
-          str(computation), executable_devices, compile_options)
+    executable = backend.compile_and_load(
+        str(computation), executable_devices, compile_options)
     key = cc.get_cache_key(computation, devices, compile_options, backend)
     cc.put_executable_and_time(
         key, "alambda", executable, backend, FAKE_COMPILE_TIME)
@@ -198,7 +191,7 @@ class CompilationCacheTest(CompilationCacheTestCase):
 
   def test_pmap(self):
     f = pmap(lambda x: x - lax.psum(x, "i"), axis_name="i")
-    x = np.arange(jax.device_count(), dtype=np.int64)
+    x = np.arange(jax.device_count(), dtype=np.int32)
     f(x)
     self.assertEqual(count_cache_items(), 1)
     x = np.arange(jax.device_count(), dtype=np.float32)
@@ -206,12 +199,49 @@ class CompilationCacheTest(CompilationCacheTestCase):
     self.assertEqual(count_cache_items(), 2)
     # TODO: create a test for calling pmap with the same input more than once
 
+  def test_pmap_with_consts(self):
+    const = jnp.array([42, 43], dtype=np.int32)
+    clear_cache()
+    f = pmap(lambda x: x - lax.psum(x, "i") + const[0], axis_name="i")
+    x = np.arange(jax.device_count(), dtype=np.int32)
+    self.assertAllClose(f(x), x - np.sum(x, dtype=np.int32) + np.int32(42))
+    self.assertEqual(count_cache_items(), 1)
+
+    const1 = jnp.array([142, 143], dtype=np.int32)  # another const
+    f1 = pmap(lambda x: x - lax.psum(x, "i") + const1[0], axis_name="i")
+    expected_compilations = 0 if config.use_simplified_jaxpr_constants.value else 1
+    self.assertCacheMisses(lambda: f1(x),
+                           lowering=1,
+                           compilation_after_persistent_cache_miss=expected_compilations)
+    self.assertAllClose(f1(x), x - np.sum(x, dtype=np.int32) + np.int32(142))
+    self.assertEqual(count_cache_items(), 1 + expected_compilations)
+
   def test_jit(self):
     f = jit(lambda x: x * x)
-    f(1)
+    self.assertCacheMisses(lambda: f(1), lowering=1,
+                           compilation_after_persistent_cache_miss=1)
     self.assertEqual(count_cache_items(), 1)
+    f1 = jit(lambda x: x * x)
+    self.assertCacheMisses(lambda: f1(2), lowering=1,
+                           compilation_after_persistent_cache_miss=0)
     f(1.0)
     self.assertEqual(count_cache_items(), 2)
+
+  def test_jit_with_constants(self):
+    const = jnp.array([42, 43])  #  A distinctive shape
+    clear_cache()
+    f = jit(lambda x: x * const[0])
+    self.assertAllClose(f(2), 2 * 42)
+    self.assertEqual(count_cache_items(), 1)
+
+    const1 = jnp.array([142, 143])  # The closed over const can be different
+    f1 = jit(lambda x: x * const1[0])
+    expected_compilations = 0 if config.use_simplified_jaxpr_constants.value else 1
+    self.assertCacheMisses(
+        lambda: f1(3), lowering=1,
+        compilation_after_persistent_cache_miss=expected_compilations)
+    self.assertAllClose(f1(3), 3 * 142)
+    self.assertEqual(count_cache_items(), 1 + expected_compilations)
 
   def test_set_cache_dir_after_backends_init(self):
     # This a regression test for #25768
@@ -251,7 +281,7 @@ class CompilationCacheTest(CompilationCacheTestCase):
           g = jit(lambda x: x * 3)
           g(2)
           cache = cc._get_cache(backend)
-          self.assertIsNotNone(cache) # Cache should be initalized
+          self.assertIsNotNone(cache) # Cache should be initialized
 
   def test_xla_autofdo_profile_version(self):
     original_profile_version = config.jax_xla_profile_version.value
@@ -298,7 +328,7 @@ class CompilationCacheTest(CompilationCacheTestCase):
     self.assertIn(
         (
             "Error writing persistent compilation cache entry "
-            "for 'jit__lambda_': RuntimeError: test error"
+            "for 'jit__lambda': RuntimeError: test error"
         ),
         str(w[0].message),
     )
@@ -322,7 +352,7 @@ class CompilationCacheTest(CompilationCacheTestCase):
     self.assertIn(
         (
             "Error reading persistent compilation cache entry "
-            "for 'jit__lambda_': RuntimeError: test error"
+            "for 'jit__lambda': RuntimeError: test error"
         ),
         str(w[0].message),
     )
@@ -358,7 +388,8 @@ class CompilationCacheTest(CompilationCacheTestCase):
       config.persistent_cache_min_entry_size_bytes(0),
     ):
       durations = Counter()  # Map metric name to time duration.
-      def append_metric_duration(metric, duration):
+      def append_metric_duration(metric, duration, **kwargs):
+        del kwargs
         durations[metric] += duration
 
       with jtu.register_event_duration_listener(append_metric_duration):
@@ -576,13 +607,9 @@ class CompilationCacheTest(CompilationCacheTestCase):
         .runtime_executable()
     )
     serialized_executable = backend.serialize_executable(executable)
-    if jax._src.lib.jaxlib_extension_version < 331:
-      deserialized_executable = backend.deserialize_executable(  # type: ignore
-          serialized_executable, None)
-    else:
-      deserialized_executable = backend.deserialize_executable(  # type: ignore
-          serialized_executable,
-          xc.DeviceList(tuple(jax.local_devices(backend=backend))), None)
+    deserialized_executable = backend.deserialize_executable(  # type: ignore
+        serialized_executable,
+        xc.DeviceList(tuple(jax.local_devices(backend=backend))), None)
     self.assertEqual(
         executable.fingerprint, deserialized_executable.fingerprint)
 

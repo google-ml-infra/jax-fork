@@ -89,10 +89,10 @@ def patch_copy_mlir_import(
 ):
   src_file = _get_file_path(src_file, runfiles, wheel_sources_map)
   src_filename = os.path.basename(src_file)
-  with open(src_file) as f:
+  with open(src_file, encoding="utf-8") as f:
     src = f.read()
 
-  with open(dst_dir / src_filename, "w") as f:
+  with open(dst_dir / src_filename, "w", encoding="utf-8") as f:
     replaced = re.sub(
         r"^from mlir(\..*)? import (.*)",
         r"from jaxlib.mlir\1 import \2",
@@ -153,10 +153,10 @@ def prepare_wheel(wheel_sources_path: pathlib.Path, *, cpu, wheel_sources):
   # prefixes, so we need to create a map of paths relative to the root package
   # to the full paths.
   # E.g. if we have the wheel sources paths like
-  # bazel-out/k8-opt/bin/jaxlib/mlir/_mlir_libs/register_jax_dialects.py and
+  # bazel-out/k8-opt/bin/jaxlib/mlir/_mlir_libs/_jax_mlir_ext.py and
   # external/xla/xla/ffi/api/c_api.h, the resulting map will be
-  # {'jaxlib/mlir/_mlir_libs/register_jax_dialects.py':
-  # 'bazel-out/k8-opt/bin/jaxlib/mlir/_mlir_libs/register_jax_dialects.py',
+  # {'jaxlib/mlir/_mlir_libs/_jax_mlir_ext.py':
+  # 'bazel-out/k8-opt/bin/jaxlib/mlir/_mlir_libs/_jax_mlir_ext.py',
   # 'xla/ffi/api/c_api.h': 'external/xla/xla/ffi/api/c_api.h'}
   wheel_sources_map = build_utils.create_wheel_sources_map(
       wheel_sources, root_packages=["jaxlib", "xla"]
@@ -190,12 +190,12 @@ def prepare_wheel(wheel_sources_path: pathlib.Path, *, cpu, wheel_sources):
       dst_dir=jaxlib_dir,
       src_files=[
           f"{source_file_prefix}jaxlib/cpu_feature_guard.{pyext}",
+          f"{source_file_prefix}jaxlib/cpu_sparse.py",
           f"{source_file_prefix}jaxlib/utils.{pyext}",
           f"{source_file_prefix}jaxlib/jax_common.dll"
           if build_utils.is_windows()
           else f"{source_file_prefix}jaxlib/libjax_common.{soext}",
           f"{source_file_prefix}jaxlib/lapack.py",
-          f"{source_file_prefix}jaxlib/hlo_helpers.py",
           f"{source_file_prefix}jaxlib/gpu_prng.py",
           f"{source_file_prefix}jaxlib/gpu_linalg.py",
           f"{source_file_prefix}jaxlib/gpu_rnn.py",
@@ -204,12 +204,17 @@ def prepare_wheel(wheel_sources_path: pathlib.Path, *, cpu, wheel_sources):
           f"{source_file_prefix}jaxlib/gpu_solver.py",
           f"{source_file_prefix}jaxlib/gpu_sparse.py",
           f"{source_file_prefix}jaxlib/plugin_support.py",
+          f"{source_file_prefix}jaxlib/_pretty_printer.{pyext}",
           f"{source_file_prefix}jaxlib/version.py",
           f"{source_file_prefix}jaxlib/xla_client.py",
           f"{source_file_prefix}jaxlib/weakref_lru_cache.{pyext}",
           f"{source_file_prefix}jaxlib/weakref_lru_cache.pyi",
+          f"{source_file_prefix}jaxlib/_ifrt_proxy.{pyext}",
           f"{source_file_prefix}jaxlib/_jax.{pyext}",
+          f"{source_file_prefix}jaxlib/_sdy_mpmd.{pyext}",
+          f"{source_file_prefix}jaxlib/_pathways.{pyext}",
           f"{source_file_prefix}jaxlib/_profiler.{pyext}",
+          f"{source_file_prefix}jaxlib/_profile_data.{pyext}",
       ],
   )
   # This file is required by PEP-561. It marks jaxlib as package containing
@@ -221,6 +226,7 @@ def prepare_wheel(wheel_sources_path: pathlib.Path, *, cpu, wheel_sources):
       dst_dir=jaxlib_dir / "cpu",
       src_files=[
           f"{source_file_prefix}jaxlib/cpu/_lapack.{pyext}",
+          f"{source_file_prefix}jaxlib/cpu/_sparse.{pyext}",
       ],
   )
 
@@ -259,9 +265,7 @@ def prepare_wheel(wheel_sources_path: pathlib.Path, *, cpu, wheel_sources):
       dst_dir=jaxlib_dir / "mlir",
       src_files=[
           f"{source_file_prefix}jaxlib/mlir/ir.py",
-          f"{source_file_prefix}jaxlib/mlir/ir.pyi",
           f"{source_file_prefix}jaxlib/mlir/passmanager.py",
-          f"{source_file_prefix}jaxlib/mlir/passmanager.pyi",
       ],
   )
   copy_files(
@@ -270,11 +274,13 @@ def prepare_wheel(wheel_sources_path: pathlib.Path, *, cpu, wheel_sources):
           f"{source_file_prefix}jaxlib/mlir/dialects/_arith_enum_gen.py",
           f"{source_file_prefix}jaxlib/mlir/dialects/_arith_ops_gen.py",
           f"{source_file_prefix}jaxlib/mlir/dialects/_builtin_ops_gen.py",
+          f"{source_file_prefix}jaxlib/mlir/dialects/_cf_ops_gen.py",
           f"{source_file_prefix}jaxlib/mlir/dialects/_chlo_ops_gen.py",
           f"{source_file_prefix}jaxlib/mlir/dialects/_func_ops_gen.py",
           f"{source_file_prefix}jaxlib/mlir/dialects/_math_ops_gen.py",
           f"{source_file_prefix}jaxlib/mlir/dialects/_memref_ops_gen.py",
           f"{source_file_prefix}jaxlib/mlir/dialects/_mhlo_ops_gen.py",
+          f"{source_file_prefix}jaxlib/mlir/dialects/_mpmd_ops_gen.py",
           f"{source_file_prefix}jaxlib/mlir/dialects/_ods_common.py",
           f"{source_file_prefix}jaxlib/mlir/dialects/_scf_ops_gen.py",
           f"{source_file_prefix}jaxlib/mlir/dialects/_sdy_enums_gen.py",
@@ -294,11 +300,13 @@ def prepare_wheel(wheel_sources_path: pathlib.Path, *, cpu, wheel_sources):
           f"{source_file_prefix}jaxlib/mlir/dialects/_llvm_ops_gen.py",
           f"{source_file_prefix}jaxlib/mlir/dialects/arith.py",
           f"{source_file_prefix}jaxlib/mlir/dialects/builtin.py",
+          f"{source_file_prefix}jaxlib/mlir/dialects/cf.py",
           f"{source_file_prefix}jaxlib/mlir/dialects/chlo.py",
           f"{source_file_prefix}jaxlib/mlir/dialects/func.py",
           f"{source_file_prefix}jaxlib/mlir/dialects/math.py",
           f"{source_file_prefix}jaxlib/mlir/dialects/memref.py",
           f"{source_file_prefix}jaxlib/mlir/dialects/mhlo.py",
+          f"{source_file_prefix}jaxlib/mlir/dialects/mpmd.py",
           f"{source_file_prefix}jaxlib/mlir/dialects/scf.py",
           f"{source_file_prefix}jaxlib/mlir/dialects/sdy.py",
           f"{source_file_prefix}jaxlib/mlir/dialects/sparse_tensor.py",
@@ -328,7 +336,6 @@ def prepare_wheel(wheel_sources_path: pathlib.Path, *, cpu, wheel_sources):
       ],
   )
 
-
   mlir_libs_dir = jaxlib_dir / "mlir" / "_mlir_libs"
   copy_files(
       dst_dir=mlir_libs_dir,
@@ -342,8 +349,9 @@ def prepare_wheel(wheel_sources_path: pathlib.Path, *, cpu, wheel_sources):
           f"{source_file_prefix}jaxlib/_mosaic_gpu_ext.{pyext}",
           f"{source_file_prefix}jaxlib/_tpu_ext.{pyext}",
           f"{source_file_prefix}jaxlib/_sdy.{pyext}",
+          f"{source_file_prefix}jaxlib/_sdyMpmd.{pyext}",
           f"{source_file_prefix}jaxlib/_stablehlo.{pyext}",
-          f"{source_file_prefix}jaxlib/register_jax_dialects.{pyext}",
+          f"{source_file_prefix}jaxlib/_jax_mlir_ext.{pyext}",
           f"{source_file_prefix}jaxlib/_mlirDialectsGPU.{pyext}",
           f"{source_file_prefix}jaxlib/_mlirDialectsLLVM.{pyext}",
           f"{source_file_prefix}jaxlib/_mlirDialectsNVGPU.{pyext}",

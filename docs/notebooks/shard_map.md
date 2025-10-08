@@ -26,7 +26,7 @@ kernelspec:
 
 If you're familiar with `pmap`, think of `shard_map` as an evolution. It's more expressive, performant, and composable with other JAX APIs. It even works eagerly, for easier debugging! (For more, see [a detailed comparison to `pmap`.](https://docs.jax.dev/en/latest/jep/14273-shard-map.html#why-don-t-pmap-or-xmap-already-solve-this))
 
-By reading this tutorial, you'll learn how to use `shard_map` to get full control over your multi-device code. You'll see in detail how it composes with `jax.jit`'s automatic parallelization and `jax.grad`'s automatic differentiation. We'll also give some basic examples of neural network parallelization strategies.
+By reading this tutorial, you'll learn how to use `shard_map` to get full control over your multi-device code. You'll see in detail how it composes with `jax.jit`'s automatic parallelization and `jax.grad`'s automatic differentiation. We'll also give some basic examples of neural network parallelization strategies, for a more detailed example see {doc}`../the-training-cookbook`.
 
 We'll assume this tutorial is being run in an environment with eight devices:
 
@@ -554,17 +554,20 @@ from jax.sharding import Mesh
 Specs = PyTree[PartitionSpec]
 
 def shard_map(
-    f: Callable, mesh: Mesh, in_specs: Specs, out_specs: Specs,
-    auto: collections.abc.Set[AxisName] = frozenset([]),
+    f: Callable, /, *, out_specs: Specs, mesh: Mesh | None = None,
+    in_specs: Specs | None = None,
+    axis_names: collections.abc.Set[AxisName] = set(),
     check_vma: bool = True,
 ) -> Callable:
   ...
 ```
 where:
 * communication collectives like `psum` in the body of `f` can mention the axis names of `mesh`;
-* `mesh` encodes devices arranged in an array and with associated axis names, just like it does for `sharding.NamedSharding`;
-* `in_specs` and `out_specs` are `PartitionSpec`s which can affinely mention axis names from `mesh` to express slicing/unconcatenation and concatenation of inputs and outputs, respectively, with unmentioned names corresponding to replication and untiling (assert-replicated-so-give-me-one-copy), respectively;
-* `auto` is an optional set of axis names corresponding to the subset of names of `mesh` to treat automatically in the body, as in the caller, rather than manually;
+* `mesh` encodes devices arranged in an array and with associated axis names, just like it does for `sharding.NamedSharding`; If None, mesh will be inferred from the
+context which can be set via the `jax.set_mesh` context manager.
+* `in_specs` are `PartitionSpec`s which can zero or one times mention axis names from `mesh` to express slicing/unconcatenation of inputs, respectively, with unmentioned names corresponding to replication and untiling (assert-replicated-so-give-me-one-copy). If None, all mesh axes must be of type `Explicit`, in which case the in_specs are inferred from the argument types;
+* `out_specs` are `PartitionSpec`s which can zero or one times mention axis names from `mesh` to express concatenation of outputs, with unmentioned names corresponding to replication and untiling (assert-replicated-so-give-me-one-copy), respectively;
+* `axis_names` is an optional set of axis names corresponding to the subset of names of `mesh` to treat manual in the body. If empty,  `f` is manual over all axes of the mesh.
 * `check_vma` is an optional boolean indicating whether to check statically for any replication errors in `out_specs`, and also whether to enable a related automatic differentiation optimization (see [JEP](https://docs.jax.dev/en/latest/jep/17111-shmap-transpose.html)).
 
 The shapes of the arguments passed to `f` have the same ranks as the arguments

@@ -22,19 +22,20 @@ import collections.abc
 from collections.abc import Callable, Sequence
 import dataclasses
 import enum
-import functools
 import io
-from typing import Any
+import json
+from typing import Any, TypedDict
 
-import jax
+from jax._src import api
 from jax._src import config
 from jax._src import core
+from jax._src import dispatch
 from jax._src import sharding_impls
 from jax._src.cloud_tpu_init import is_cloud_tpu_older_than
+from jax._src.frozen_dict import FrozenDict
+from jax._src.interpreters import batching
 from jax._src.interpreters import mlir
 from jax._src.lib import tpu
-from jax._src.lib import xla_client
-from jax.interpreters import xla
 from jaxlib.mlir import ir
 from jaxlib.mlir.passmanager import PassManager
 
@@ -63,16 +64,35 @@ _MOSAIC_ALLOW_HLO = config.bool_state(
 #
 # We should also add a TODO to remove the conditional one month later.
 def get_ir_version(ctx: mlir.LoweringRuleContext) -> int | None:
-  # TODO(jevinjiang): remove the forward compatibility check after 2025-05-05.
-  if ctx.is_forward_compat() or is_cloud_tpu_older_than(2025, 4, 5):
-    return 3
+  backend = ctx.module_context.get_backend(optional=True)
+  # TODO(naumsmogers): remove the forward compatibility check after 2025-09-14.
+  if (
+      ctx.is_forward_compat()
+      or backend is None
+      or is_cloud_tpu_older_than(2025, 8, 14, backend)
+  ):
+    return 7
   return None
 
 
 tpu_custom_call_p = core.Primitive("tpu_custom_call")
-tpu_custom_call_p.def_impl(
-    functools.partial(xla.apply_primitive, tpu_custom_call_p))
 tpu_custom_call_p.multiple_results = True
+dispatch.simple_impl(tpu_custom_call_p)
+
+
+def tpu_custom_call_batcher(axis_data, args, dims, **kwargs):
+  if axis_data.size != 1:
+    raise NotImplementedError(
+        "tpu_custom_call does not support non-trivial batching."
+    )
+  unbatched_args = tuple(
+      a if (d is batching.not_mapped or d is None) else a[d]
+      for a, d in zip(args, dims, strict=True)
+  )
+  out_unbatched = tpu_custom_call_p.bind(*unbatched_args, **kwargs)
+  out = tuple(o[None] for o in out_unbatched)
+  return out, (0,) * len(out)
+batching.fancy_primitive_batchers[tpu_custom_call_p] = tpu_custom_call_batcher
 
 
 class MemorySpace(enum.Enum):
@@ -80,6 +100,7 @@ class MemorySpace(enum.Enum):
   VMEM = enum.auto()
   SEMAPHORE_MEM = enum.auto()
   SMEM = enum.auto()
+  HOST = enum.auto()
 
   @property
   def color(self) -> int:
@@ -91,21 +112,16 @@ class MemorySpace(enum.Enum):
       return 2
     elif self == MemorySpace.SMEM:
       return 4
+    elif self == MemorySpace.HOST:
+      return 5
     else:
       raise ValueError("invalid memory space: " + str(self))
 
 
-@dataclasses.dataclass(frozen=True)
-class CostEstimate:
+class CostEstimate(TypedDict):
   flops: int
   transcendentals: int
   bytes_accessed: int
-
-  def to_json(self) -> bytes:
-    return (
-        f'{{"flops": {self.flops}, "transcendentals": {self.transcendentals},'
-        f' "bytes_accessed": {self.bytes_accessed}}}'
-    ).encode('ascii')
 
 
 @dataclasses.dataclass(frozen=True)
@@ -125,6 +141,17 @@ class CustomCallBackendConfig:
   internal_scratch_in_bytes: int | None
   output_memory_spaces: tuple[MemorySpace | None, ...] | None
   disable_bounds_checks: bool
+  active_core_count: int | None
+  input_memory_spaces: tuple[MemorySpace | None, ...] | None
+  skip_device_barrier: bool
+
+  def __post_init__(self):
+    if self.allow_input_fusion is not None:
+      object.__setattr__(self, "allow_input_fusion",
+                         tuple(self.allow_input_fusion))
+    if self.cost_estimate is not None:
+      object.__setattr__(self, "cost_estimate",
+                         FrozenDict(self.cost_estimate))
 
   # We omit the body while printing, because primitive params get embedded
   # in HLO metadata, and the body blows up its size.
@@ -146,7 +173,9 @@ class CustomCallBackendConfig:
       config.write(str(self.collective_id).encode("ascii"))
     if self.cost_estimate is not None:
       config.write(b', "cost_estimate": ')
-      config.write(self.cost_estimate.to_json())
+      config.write(
+          json.dumps(dict(self.cost_estimate), sort_keys=True).encode("ascii")
+      )
     if self.needs_hlo_passes:
       config.write(b', "needs_hlo_passes": ')
       config.write(str(self.needs_hlo_passes).lower().encode("ascii"))
@@ -175,9 +204,40 @@ class CustomCallBackendConfig:
         color = memory_space.color if memory_space is not None else -1
         config.write(str(color).encode("ascii"))
       config.write(b"]")
+    if self.input_memory_spaces is not None:
+      comma = False
+      for i, input_memory_space in enumerate(self.input_memory_spaces):
+        if input_memory_space is None:
+          continue
+        if input_memory_space is MemorySpace.SMEM:
+          # TODO(sharadmv): Add support for SMEM (though atm, XLA will not
+          # page out SMEM arrays).
+          continue
+        if input_memory_space not in (
+            MemorySpace.HBM,
+            MemorySpace.VMEM,
+            MemorySpace.SMEM,
+        ):
+          raise NotImplementedError(
+              "input_memory_space_colors only supports HBM, VMEM and SMEM"
+          )
+        if comma:
+          config.write(b",")
+        else:
+          config.write(b', "input_memory_space_colors": [')
+        config.write(
+            f'{{"operand_index":{i},"color":{input_memory_space.color}}}'
+            .encode("ascii")
+        )
+        comma = True
+      if comma:
+        config.write(b"]")
     if self.disable_bounds_checks:
       config.write(b', "disable_bounds_checks": ')
       config.write(str(self.disable_bounds_checks).lower().encode("ascii"))
+    if self.skip_device_barrier:
+      config.write(b', "skip_device_barrier": ')
+      config.write(str(self.skip_device_barrier).lower().encode("ascii"))
     config.write(b"}")  # End of custom_call_config.
     if self.device_type is not None:
       config.write(b', "device_type": ')
@@ -212,6 +272,8 @@ class CustomCallBackendConfig:
         if i + 1 != len(self.flags):
           config.write(b",")
       config.write(b"]")
+    if self.device_type == "sparsecore" and self.active_core_count == 1:
+      config.write(b', "megachip_parallelism_config": {"cores": ["0"]}')
     config.write(b"}")
     return config.getvalue()
 
@@ -222,7 +284,7 @@ def _tpu_custom_call_abstract_eval(*_, out_avals, **__):
 
 
 def _avals_to_layouts(avals) -> Sequence[Sequence[int]]:
-  return [tuple(range(a.ndim - 1, -1, -1)) for a in avals]
+  return [tuple(range(a.ndim - 1, -1, -1)) for a in avals]  # pytype: disable=attribute-error
 
 
 def _tpu_custom_call_lowering(
@@ -233,6 +295,7 @@ def _tpu_custom_call_lowering(
     kernel_name: str | None,
     out_avals: Any,
     input_output_aliases: tuple[tuple[int, int], ...],
+    metadata: Any | None,
 ) -> ir.OpResultList:
   result_types = [mlir.aval_to_ir_type(aval) for aval in out_avals]
   axis_context = ctx.module_context.axis_context
@@ -278,7 +341,10 @@ def _tpu_custom_call_lowering(
       result_shapes=result_shapes,
       extra_attributes=extra_attributes,
   )
-
+  if metadata is not None:
+    call.attributes["mhlo.frontend_attributes"] = ir.DictAttr.get(
+        dict(kernel_metadata=ir.StringAttr.get(json.dumps(metadata)))
+    )
   return call.results
 
 
@@ -289,9 +355,7 @@ mlir.register_lowering(tpu_custom_call_p, _tpu_custom_call_lowering,
 def _lower_mosaic_module_to_asm(
     module: ir.Module,
     *,
-    backend: str,
     device_type: str | None,
-    kernel_name: str | None,
     ir_version: int | None = None,
 ) -> tuple[ir.Module, tuple[bool, bool, bool, bool]]:
   has_communication, has_custom_barrier = tpu.private_has_communication(
@@ -355,18 +419,92 @@ def _get_device_type(module: ir.Module) -> str | None:
   )
   if tensorcore_func_found and sparsecore_func_found:
     raise ValueError(
-        "A single Mosaic kernel cannot contain both "
-        "TensorCore and SparseCore functions."
+        "A single Mosaic kernel cannot contain both TensorCore and SparseCore"
+        " functions."
     )
   if sparsecore_func_found:
     return "sparsecore"
   return None
 
 
+def _get_active_core_count(module: ir.Module) -> int | None:
+
+  def get_core_parallel_dim_size(
+      dim_semantics: ir.ArrayAttr,
+      iter_bounds: ir.DenseI64ArrayAttr,
+      other_subkernel_core_dim_size: int | None = None) -> int | None:
+
+    if len(iter_bounds) != len(dim_semantics):
+      raise ValueError(
+          "The iteration bounds and dimension semantics attributes must have"
+          " the same number of elements."
+      )
+
+    subkernel_core_dim_size = None
+
+    for dim_idx, (dim_size, dim_sem) in enumerate(
+        zip(iter_bounds, dim_semantics)
+    ):
+      if str(dim_sem) != "#tpu.dimension_semantics<core_parallel>":
+        continue
+
+      if ir.ShapedType.is_dynamic_size(dim_size):
+        raise ValueError(
+            "The iteration bound corresponding to the core-parallel dimension "
+            f"{dim_idx} must be statically known."
+        )
+      if subkernel_core_dim_size is not None:
+        raise ValueError(
+            "A single Mosaic subkernel cannot contain multiple core sharding "
+            "dimensions."
+        )
+      if (
+          other_subkernel_core_dim_size is not None
+          and other_subkernel_core_dim_size != dim_size
+      ):
+        raise ValueError(
+            "The iteration bound corresponding to the core-parallel dimension "
+            "be the same across all subkernels."
+        )
+      subkernel_core_dim_size = dim_size
+
+    return subkernel_core_dim_size
+
+  core_parallel_dim_size = None
+
+  for op in module.body.operations:
+    if op.operation.name != "func.func":
+      continue
+
+    if (
+        "iteration_bounds" not in op.attributes
+        or "dimension_semantics" not in op.attributes
+    ):
+      continue
+
+    try:
+      iter_bounds = ir.DenseI64ArrayAttr(op.attributes["iteration_bounds"])
+    except ValueError as e:
+      e.add_note("The iteration bounds attribute must be an array.")
+      raise
+    try:
+      dim_semantics = ir.ArrayAttr(op.attributes["dimension_semantics"])
+    except ValueError as e:
+      e.add_note("The dimension semantics attribute must be an array.")
+      raise
+
+    core_parallel_dim_size = get_core_parallel_dim_size(
+        dim_semantics=dim_semantics,
+        iter_bounds=iter_bounds,
+        other_subkernel_core_dim_size=core_parallel_dim_size,
+    )
+
+  return core_parallel_dim_size
+
+
 def _lower_to_custom_call_config(
     module: ir.Module,
     *,
-    backend: str,
     vmem_limit_bytes: int | None,
     cost_estimate: CostEstimate | None,
     flags: dict[str, bool | int | float] | None,
@@ -375,9 +513,11 @@ def _lower_to_custom_call_config(
     collective_id: int | None,
     serialization_format: int | None,
     output_memory_spaces: tuple[MemorySpace | None, ...] | None = None,
-    kernel_name: str | None = None,
     ir_version: int | None = None,
     disable_bounds_checks: bool = False,
+    input_memory_spaces: tuple[MemorySpace | None, ...] | None = None,
+    skip_device_barrier: bool = False,
+    allow_collective_id_without_custom_barrier: bool = False,
 ) -> CustomCallBackendConfig:
   device_type = _get_device_type(module)
   lowered_module_asm, (
@@ -387,11 +527,10 @@ def _lower_to_custom_call_config(
       needs_layout_passes,
   ) = _lower_mosaic_module_to_asm(
       module,
-      backend=backend,
       device_type=device_type,
-      kernel_name=kernel_name,
       ir_version=ir_version,
   )
+  active_core_count = _get_active_core_count(module)
   return _lowered_to_custom_call_config(
       lowered_module_asm,
       vmem_limit_bytes=vmem_limit_bytes,
@@ -408,6 +547,10 @@ def _lower_to_custom_call_config(
       needs_layout_passes=needs_layout_passes,
       output_memory_spaces=output_memory_spaces,
       disable_bounds_checks=disable_bounds_checks,
+      active_core_count=active_core_count,
+      input_memory_spaces=input_memory_spaces,
+      skip_device_barrier=skip_device_barrier,
+      allow_collective_id_without_custom_barrier=allow_collective_id_without_custom_barrier,
   )
 
 
@@ -428,13 +571,17 @@ def _lowered_to_custom_call_config(
     device_type: str | None,
     output_memory_spaces: tuple[MemorySpace | None, ...] | None = None,
     disable_bounds_checks: bool = False,
+    active_core_count: int | None = None,
+    input_memory_spaces: tuple[MemorySpace | None, ...] | None = None,
+    skip_device_barrier: bool = False,
+    allow_collective_id_without_custom_barrier: bool = False,
 ):
   if has_custom_barrier:
     if collective_id is None:
       raise ValueError(
           "collective_id has to be specified when using a custom barrier"
       )
-  elif collective_id is not None:
+  elif collective_id is not None and not allow_collective_id_without_custom_barrier:
     raise ValueError(
         "collective_id has to be unspecified or None when not using a custom"
         " barrier"
@@ -459,6 +606,9 @@ def _lowered_to_custom_call_config(
       internal_scratch_in_bytes,
       output_memory_spaces,
       disable_bounds_checks,
+      active_core_count=active_core_count,
+      input_memory_spaces=input_memory_spaces,
+      skip_device_barrier=skip_device_barrier,
   )
   return config
 
@@ -468,7 +618,6 @@ def lower_module_to_custom_call(
     *in_nodes: ir.Value,
     module: ir.Module,
     out_type: Any,
-    backend: str,
     kernel_name: str,
     cost_estimate: CostEstimate | None,
     vmem_limit_bytes: int | None,
@@ -481,10 +630,13 @@ def lower_module_to_custom_call(
     serialization_format: int | None,
     output_memory_spaces: tuple[MemorySpace | None, ...] | None,
     disable_bounds_checks: bool = False,
+    input_memory_spaces: tuple[MemorySpace | None, ...] | None,
+    metadata: Any | None = None,
+    skip_device_barrier: bool = False,
+    allow_collective_id_without_custom_barrier: bool = False,
 ) -> Sequence[ir.Value]:
   config = _lower_to_custom_call_config(
       module,
-      backend=backend,
       vmem_limit_bytes=vmem_limit_bytes,
       cost_estimate=cost_estimate,
       flags=flags,
@@ -493,9 +645,11 @@ def lower_module_to_custom_call(
       collective_id=collective_id,
       serialization_format=serialization_format,
       output_memory_spaces=output_memory_spaces,
-      kernel_name=kernel_name,
       ir_version=get_ir_version(ctx),
       disable_bounds_checks=disable_bounds_checks,
+      input_memory_spaces=input_memory_spaces,
+      skip_device_barrier=skip_device_barrier,
+      allow_collective_id_without_custom_barrier=allow_collective_id_without_custom_barrier,
   )
   return _tpu_custom_call_lowering(
       ctx,
@@ -505,6 +659,7 @@ def lower_module_to_custom_call(
       kernel_name=kernel_name,
       out_avals=out_type,
       input_output_aliases=input_output_aliases,
+      metadata=metadata,
   )
 
 
@@ -513,7 +668,6 @@ def as_tpu_kernel(
     out_type: Any,
     *,
     cost_estimate: CostEstimate | None = None,
-    backend: str | xla_client.Client = "tpu",
     kernel_name: str | None = None,
     vmem_limit_bytes: int | None = None,
     flags: dict[str, bool | int | float] | None = None,
@@ -525,11 +679,12 @@ def as_tpu_kernel(
     serialization_format: int | None = 1,
     output_memory_spaces: tuple[MemorySpace | None, ...] | None = None,
     disable_bounds_checks: bool = False,
+    input_memory_spaces: tuple[MemorySpace | None, ...] | None = None,
+    metadata: Any | None = None,
 ) -> Callable[..., Any]:
   """Turns an MLIR Mosaic kernel into a JAX-compatible function."""
   config = _lower_to_custom_call_config(
       module,
-      backend=backend,
       vmem_limit_bytes=vmem_limit_bytes,
       cost_estimate=cost_estimate,
       flags=flags,
@@ -538,8 +693,8 @@ def as_tpu_kernel(
       collective_id=collective_id,
       serialization_format=serialization_format,
       output_memory_spaces=output_memory_spaces,
-      kernel_name=kernel_name,
       disable_bounds_checks=disable_bounds_checks,
+      input_memory_spaces=input_memory_spaces,
   )
   return _as_jax_callable(
       config,
@@ -547,6 +702,7 @@ def as_tpu_kernel(
       out_type,
       kernel_name=kernel_name,
       input_output_aliases=input_output_aliases,
+      metadata=metadata,
   )
 
 
@@ -569,6 +725,8 @@ def lowered_as_tpu_kernel(
     serialization_format: int | None = None,
     internal_scratch_in_bytes: int | None = None,
     disable_bounds_checks: bool = False,
+    metadata: Any | None = None,
+    allow_collective_id_without_custom_barrier: bool = False,
 ) -> Callable[..., Any]:
   device_type = _get_device_type(lowered_module)
   lowered_module_asm = lowered_module.operation.get_asm(
@@ -589,6 +747,7 @@ def lowered_as_tpu_kernel(
       needs_hlo_passes=needs_hlo_passes,
       needs_layout_passes=needs_layout_passes,
       disable_bounds_checks=disable_bounds_checks,
+      allow_collective_id_without_custom_barrier=allow_collective_id_without_custom_barrier,
   )
   return _as_jax_callable(
       config,
@@ -596,6 +755,7 @@ def lowered_as_tpu_kernel(
       out_type,
       kernel_name=kernel_name,
       input_output_aliases=input_output_aliases,
+      metadata=metadata,
   )
 
 
@@ -606,6 +766,7 @@ def _as_jax_callable(
     *,
     kernel_name: str | None,
     input_output_aliases: tuple[tuple[int, int], ...],
+    metadata: Any | None,
 ) -> Callable[..., Any]:
   unpack = False
   if not isinstance(out_type, collections.abc.Iterable):
@@ -622,7 +783,8 @@ def _as_jax_callable(
         kernel_name=kernel_name,
         out_avals=out_avals,
         input_output_aliases=input_output_aliases,
+        metadata=metadata,
     )
     return result[0] if unpack else result
 
-  return jax.jit(apply_kernel)
+  return api.jit(apply_kernel)

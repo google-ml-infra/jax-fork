@@ -33,7 +33,6 @@ from jax._src import compiler
 from jax._src import config
 from jax._src import test_util as jtu
 from jax._src import xla_bridge
-from jax._src.lib import jaxlib_extension_version
 from jax._src.lib import xla_client as xc
 from jax import lax
 from jax.experimental import jax2tf
@@ -83,14 +82,10 @@ class ShardingTest(tf_test_util.JaxToTfTestCase):
       raise unittest.SkipTest("Test requires at least 2 local devices")
     self.devices = np.array(jax.devices()[:2])  # use 2 devices
 
-    self.warning_ctx = jtu.ignore_warning(
-        message="jax2tf.convert with native_serialization=False is deprecated"
+  def get_xla_options(self):
+    return tf.tpu.XLAOptions(
+        use_shardy_partitioner=jax.config.jax_use_shardy_partitioner
     )
-    self.warning_ctx.__enter__()
-
-  def tearDown(self):
-    self.warning_ctx.__exit__(None, None, None)
-    super().tearDown()
 
   def log_jax_hlo(self, f_jax, args: Sequence[Any], *,
                   num_replicas=1, num_partitions=2):
@@ -111,12 +106,8 @@ class ShardingTest(tf_test_util.JaxToTfTestCase):
           device_assignment=device_assignment,
           use_spmd_partitioning=use_spmd_partitioning,
       )
-      if jaxlib_extension_version < 332:
-        executable = backend.compile(
-            jax_hlo, compile_options=compile_options)  # type: ignore
-      else:
-        executable = backend.compile(
-            jax_hlo, xc.DeviceList(tuple(self.devices.flat)), compile_options)  # type: ignore
+      executable = backend.compile_and_load(
+          jax_hlo, xc.DeviceList(tuple(self.devices.flat)), compile_options)  # type: ignore
       jax_optimized_hlo = executable.hlo_modules()[0].to_string()
       logging.info("[%s] got JAX optimized HLO for platform %s %s",
                    self._testMethodName, backend.platform, jax_optimized_hlo)
@@ -216,20 +207,21 @@ class ShardingTest(tf_test_util.JaxToTfTestCase):
       f_converted = jax2tf.convert(f_jax)
       if jtu.test_device_matches(["tpu"]):
         return tf.compat.v1.tpu.rewrite(
-            f_converted, [tf.convert_to_tensor(x)],
+            f_converted,
+            [tf.convert_to_tensor(x)],
             device_assignment=self.device_assignment(
                 computation_shape=[1, 1, 1, 2],
-            ))[0]
+            ),
+            xla_options=self.get_xla_options(),
+        )[0]
       else:
         return f_converted(x)
 
     # Annotation count for the input
     count_in_P = 1 if in_shardings == "P" else 0
-    if config.jax2tf_default_native_serialization.value:
-      # With native serialization even unspecified in_shardings turn into replicated
-      count_in_replicated = 1 if in_shardings in [None, "missing"] else 0
-    else:
-      count_in_replicated = 1 if in_shardings is None else 0
+    # With native serialization even unspecified in_shardings turn into replicated
+    count_in_replicated = 1 if in_shardings in [None, "missing"] else 0
+
     # Annotation count for the output
     count_out_P = 1 if out_shardings == "P" else 0
     count_out_replicated = 1 if out_shardings is None else 0
@@ -238,10 +230,10 @@ class ShardingTest(tf_test_util.JaxToTfTestCase):
         jax2tf.convert(f_jax), [x],
         checks=[
             # The argument
-            (r"f32\[10,20\].*custom_call_target.*Sharding.*sharding.*devices=\[1,2\]",
+            (r"f32\[10,20\].*custom_call_target.*\"Sharding.*sharding.*devices=\[1,2\]",
              count_in_P),
             # The result
-            (r"f32\[20,10\].*custom_call_target.*Sharding.*sharding.*devices=\[2,1\]",
+            (r"f32\[20,10\].*custom_call_target.*\"Sharding.*sharding.*devices=\[2,1\]",
              count_out_P),
         ])
     # TODO(b/326476605): Change the condition below if required.
@@ -249,11 +241,11 @@ class ShardingTest(tf_test_util.JaxToTfTestCase):
       self.check_sharding(
         jax2tf.convert(f_jax), [x],
         checks=[
-            (r"f32\[10,20\].*custom_call_target.*Sharding.*sharding.*replicated",
+            (r"f32\[10,20\].*custom_call_target.*\"Sharding.*sharding.*replicated",
              count_in_replicated),
-            (r"f32\[20,10\].*custom_call_target.*Sharding.*sharding.*replicated",
+            (r"f32\[20,10\].*custom_call_target.*\"Sharding.*sharding.*replicated",
              count_out_replicated),
-            (r"custom_call_target.*Sharding",
+            (r"custom_call_target.*\"Sharding",
              count_in_P + count_in_replicated + count_out_P + count_out_replicated),
         ])
 
@@ -283,13 +275,13 @@ class ShardingTest(tf_test_util.JaxToTfTestCase):
         f_tf, [y],
         checks=[
             # The variable argument
-            (r"f32\[10,20\].*custom_call_target.*Sharding.*sharding.*devices=\[1,2\]", 1),
+            (r"f32\[10,20\].*custom_call_target.*\"Sharding.*sharding.*devices=\[1,2\]", 1),
             # The y argument
-            (r"f32\[20,30\].*custom_call_target.*Sharding.*sharding.*devices=\[2,1\]", 1),
+            (r"f32\[20,30\].*custom_call_target.*\"Sharding.*sharding.*devices=\[2,1\]", 1),
             # The output sharding
-            (r"f32\[10,30\].*custom_call_target.*Sharding.*sharding.*replicated", 1),
+            (r"f32\[10,30\].*custom_call_target.*\"Sharding.*sharding.*replicated", 1),
             # No other annotations
-            (r"custom_call_target.*Sharding", 3)
+            (r"custom_call_target.*\"Sharding", 3)
         ])
 
   @jtu.with_mesh([("x", 2)])
@@ -306,9 +298,12 @@ class ShardingTest(tf_test_util.JaxToTfTestCase):
       f_converted = jax2tf.convert(f_jax)
       if jtu.test_device_matches(["tpu"]):
         return tf.compat.v1.tpu.rewrite(
-            f_converted, [tf.convert_to_tensor(x)],
+            f_converted,
+            [tf.convert_to_tensor(x)],
             device_assignment=self.device_assignment(
-                computation_shape=[1, 1, 1, 2])
+                computation_shape=[1, 1, 1, 2]
+            ),
+            xla_options=self.get_xla_options(),
         )[0]
       else:
         return f_converted(x)
@@ -317,10 +312,10 @@ class ShardingTest(tf_test_util.JaxToTfTestCase):
         jax2tf.convert(f_jax), [x],
         checks=[
             # x
-            (r"f32\[10,20\].*custom_call_target.*Sharding.*sharding.*devices=\[2,1\]",
+            (r"f32\[10,20\].*custom_call_target.*\"Sharding.*sharding.*devices=\[2,1\]",
              1),
             # The result
-            (r"f32\[20,10\].*custom_call_target.*Sharding.*sharding.*replicated",
+            (r"f32\[20,10\].*custom_call_target.*\"Sharding.*sharding.*replicated",
              self.GEQ(1)),
         ])
 
@@ -364,16 +359,16 @@ class ShardingTest(tf_test_util.JaxToTfTestCase):
         f_tf, [x],
         checks=[
             # The input argument
-            (r"f32\[10,20\].*custom_call_target.*Sharding.*sharding.*replicated", 1),
+            (r"f32\[10,20\].*custom_call_target.*\"Sharding.*sharding.*replicated", 1),
             # The y argument
-            (r"f32\[10,40\].*custom_call_target.*Sharding.*sharding.*devices=\[2,1\]",
+            (r"f32\[10,40\].*custom_call_target.*\"Sharding.*sharding.*devices=\[2,1\]",
              count_inner_sharding),
-            (r"f32\[10,40\].*custom_call_target.*Sharding.*sharding.*replicated",
+            (r"f32\[10,40\].*custom_call_target.*\"Sharding.*sharding.*replicated",
              count_inner_replicated),
             # The output sharding
-            (r"f32\[10,80\].*custom_call_target.*Sharding.*sharding.*replicated", 1),
+            (r"f32\[10,80\].*custom_call_target.*\"Sharding.*sharding.*replicated", 1),
             # No other annotations
-            (r"custom_call_target.*Sharding", 2 + count_inner_sharding + count_inner_replicated)
+            (r"custom_call_target.*\"Sharding", 2 + count_inner_sharding + count_inner_replicated)
         ])
 
   @jtu.parameterized_filterable(
@@ -384,8 +379,6 @@ class ShardingTest(tf_test_util.JaxToTfTestCase):
       for out_shardings in ("missing", None, "P")
   ])
   def test_grad_pjit(self, in_shardings="P", out_shardings=None):
-    if not config.jax2tf_default_native_serialization.value:
-      self.skipTest("TODO: failure in non-native serialization")
     local_devices = list(jax.local_devices())
     size = 2
     if len(local_devices) < size:
@@ -418,33 +411,27 @@ class ShardingTest(tf_test_util.JaxToTfTestCase):
 
     # Annotation count for the primal input and the grad output
     count_in_P = self.GEQ(2) if in_shardings == "P" else 0
-    if config.jax2tf_default_native_serialization.value:
-      # With native serialization even unspecified shardings turn into replicated
-      count_in_replicated = self.GEQ(2) if in_shardings in [None, "missing"] else 0
-    else:
-      count_in_replicated = self.GEQ(2) if in_shardings is None else 0
+    # With native serialization even unspecified shardings turn into replicated
+    count_in_replicated = self.GEQ(2) if in_shardings in [None, "missing"] else 0
     # Annotation count for the contangent input
     count_out_P = self.GEQ(1) if out_shardings == "P" else 0
-    if config.jax2tf_default_native_serialization.value:
-      # With native serialization even unspecified shardings turn into replicated
-      count_out_replicated = self.GEQ(1) if out_shardings in [None, "missing"] else 0
-    else:
-      count_out_replicated = self.GEQ(1) if out_shardings is None else 0
+    # With native serialization even unspecified shardings turn into replicated
+    count_out_replicated = self.GEQ(1) if out_shardings in [None, "missing"] else 0
 
     self.check_sharding(f_grad_tf, [x, x.T],
         checks=[
             # The input primal argument, and the output grad
-            (r"f32\[10,20\].*custom_call_target.*Sharding.*sharding.*devices=\[1,2\]", count_in_P),
+            (r"f32\[10,20\].*custom_call_target.*\"Sharding.*sharding.*devices=\[1,2\]", count_in_P),
             # The primal result, and the input cotangent
-            (r"f32\[20,10\].*custom_call_target.*Sharding.*sharding.*devices=\[2,1\]", count_out_P),
+            (r"f32\[20,10\].*custom_call_target.*\"Sharding.*sharding.*devices=\[2,1\]", count_out_P),
         ])
     # TODO(b/326476605): Change the condition below if required.
     if out_shardings not in [None, "missing"] and in_shardings not in [None, "missing"]:
       self.check_sharding(f_grad_tf, [x, x.T],
         checks=[
-            (r"f32\[10,20\].*custom_call_target.*Sharding.*sharding.*replicated", count_in_replicated),
+            (r"f32\[10,20\].*custom_call_target.*\"Sharding.*sharding.*replicated", count_in_replicated),
             # The primal result, and the input cotangent
-            (r"f32\[20,10\].*custom_call_target.*Sharding.*sharding.*devices=\[2,1\]", count_out_P),
+            (r"f32\[20,10\].*custom_call_target.*\"Sharding.*sharding.*devices=\[2,1\]", count_out_P),
         ])
 
   def test_grad_sharding_different_mesh(self):
@@ -481,54 +468,6 @@ class ShardingTest(tf_test_util.JaxToTfTestCase):
       g_rev = tape.gradient(res_tf_rev, input_v)
     self.assertAllClose(g, g_rev)
 
-  @jtu.parameterized_filterable(
-    kwargs=[
-      dict(testcase_name=f"_func={func}", func=func)
-      for func in ("pjit_sharded", "pjit_replicated",
-                   "nested_pjit_sharded", "nested_pjit_replicated")
-  ])
-  def test_pjit_eager_error(self, func="pjit_sharded"):
-    if config.jax2tf_default_native_serialization.value:
-      raise unittest.SkipTest("There is no error in eager mode for native serialization")
-
-    # Define some test functions
-    @partial(pjit.pjit, in_shardings=(P("x"),),
-             out_shardings=None)
-    def f_pjit_sharded(a):
-      return a + a
-
-    @partial(pjit.pjit, in_shardings=None,
-             out_shardings=None)
-    def f_pjit_replicated(a):
-      return a + a
-
-    def f_nested_pjit_sharded(a):
-      return a + pjit.pjit(jnp.sin, in_shardings=(P("x"),), out_shardings=None)(a)
-
-    def f_nested_pjit_replicated(a):
-      return a + pjit.pjit(jnp.sin, in_shardings=None, out_shardings=None)(a)
-
-    shape = (8, 10)
-    a = np.arange(np.prod(shape), dtype=np.float32).reshape(shape)
-
-    if func == "pjit_sharded":
-      f_jax = f_pjit_sharded
-    elif func == "pjit_replicated":
-      f_jax = f_pjit_replicated
-    elif func == "nested_pjit_sharded":
-      f_jax = f_nested_pjit_sharded
-    elif func == "nested_pjit_replicated":
-      f_jax = f_nested_pjit_replicated
-    else:
-      assert False
-
-    with Mesh(self.devices, axis_names=("x",)):
-      _ = f_jax(a)
-      with self.assertRaisesRegex(
-          ValueError,
-          "function with sharded arguments or results must be used under a `tf.function` context"):
-        jax2tf.convert(f_jax)(a)
-
   @jtu.ignore_warning(category=UserWarning,
                       message="all_to_all .* are only implemented properly for TPUs and GPUs .*")
   def test_shmap_all_to_all(self):
@@ -547,12 +486,15 @@ class ShardingTest(tf_test_util.JaxToTfTestCase):
 
     @tf.function(autograph=False, jit_compile=True)
     def f_tf(a):
-      f_converted = jax2tf.convert(f_jax, native_serialization=True)
+      f_converted = jax2tf.convert(f_jax)
       if jtu.test_device_matches(["tpu"]):
         return tf.compat.v1.tpu.rewrite(
-            f_converted, [tf.convert_to_tensor(a)],
+            f_converted,
+            [tf.convert_to_tensor(a)],
             device_assignment=self.device_assignment(
-                computation_shape=[1, 1, 1, 2])
+                computation_shape=[1, 1, 1, 2]
+            ),
+            xla_options=self.get_xla_options(),
         )[0]
       else:
         return f_converted(a)
@@ -568,11 +510,6 @@ class ShardingTest(tf_test_util.JaxToTfTestCase):
       self.assertAllClose(res_jax, res)
       res_tf = f_tf(a)
       self.assertAllClose(res_tf, res_jax)
-
-      # TODO(b/274648842): Failed to GetCompilerIr
-      # self.check_sharding(
-      #     jax2tf.convert(f_jax, native_serialization=True), [a],
-      #     checks=[])
 
   @unittest.skip("TODO(b/268295912): ShardingRemover crash,on all platforms!!!")
   def test_repro_xla_bug_shmap_collective_permute(self):
@@ -597,7 +534,7 @@ class ShardingTest(tf_test_util.JaxToTfTestCase):
 
       # XLA bug: invoke the f_tf without tpu.replicate
       f_tf = tf.function(
-          jax2tf.convert(f_jax, native_serialization=True),
+          jax2tf.convert(f_jax),
           autograph=False, jit_compile=True)
 
       res_tf = f_tf(a)
@@ -625,13 +562,15 @@ class ShardingTest(tf_test_util.JaxToTfTestCase):
 
     @tf.function(autograph=False, jit_compile=True)
     def f_tf(a):
-      f_converted = jax2tf.convert(f_jax, native_serialization=True,
-                                   polymorphic_shapes=poly)
+      f_converted = jax2tf.convert(f_jax, polymorphic_shapes=poly)
       if jtu.test_device_matches(["tpu"]):
         res = tf.compat.v1.tpu.rewrite(
-            f_converted, [tf.convert_to_tensor(a)],
+            f_converted,
+            [tf.convert_to_tensor(a)],
             device_assignment=self.device_assignment(
-                computation_shape=[1, 1, 1, 2])
+                computation_shape=[1, 1, 1, 2]
+            ),
+            xla_options=self.get_xla_options(),
         )[0]
       else:
         res = f_converted(a)
@@ -645,10 +584,7 @@ class ShardingTest(tf_test_util.JaxToTfTestCase):
       self.assertAllClose(res_jax, expected)
       res_tf = f_tf(a)
       self.assertAllClose(res_tf, expected)
-      # TODO(b/274648842): Failed to GetCompilerIr
-      # self.check_sharding(
-      #     jax2tf.convert(f_jax, native_serialization=True), [a],
-      #     checks=[])
+
 
 if __name__ == "__main__":
   absltest.main(testLoader=jtu.JaxTestLoader())

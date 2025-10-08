@@ -32,6 +32,7 @@ from jax._src.custom_derivatives import custom_jvp
 from jax._src.lax import lax
 from jax._src.lax import other as lax_other
 from jax._src.typing import Array, ArrayLike
+from jax._src.numpy import array_constructors
 from jax._src.numpy import error as jnp_error
 from jax._src.numpy import reductions
 from jax._src.numpy.ufunc_api import ufunc
@@ -53,7 +54,7 @@ _INT_DTYPES = {
 }
 
 def _constant_like(x, const):
-  return np.array(const, dtype=dtypes.dtype(x))
+  return array_constructors.array(const, dtype=dtypes.dtype(x))
 
 def _replace_inf(x: ArrayLike) -> Array:
   return lax.select(isposinf(real(x)), lax._zeros(x), x)
@@ -120,7 +121,7 @@ def fabs(x: ArrayLike, /) -> Array:
     Array([1., 0.], dtype=float32)
   """
   x = ensure_arraylike('fabs', x)
-  if dtypes.issubdtype(dtypes.dtype(x), np.complexfloating):
+  if dtypes.issubdtype(x.dtype, np.complexfloating):
     raise TypeError("ufunc 'fabs' does not support complex dtypes")
   return lax.abs(*promote_args_inexact('fabs', x))
 
@@ -297,7 +298,7 @@ def sign(x: ArrayLike, /) -> Array:
       -1, & x < 0
     \end{cases}
 
-  For complex valued input, ``jnp.sign`` returns a unit vector repesenting the
+  For complex valued input, ``jnp.sign`` returns a unit vector representing the
   phase. For generalized case, the sign of ``x`` is given by:
 
   .. math::
@@ -347,8 +348,8 @@ def floor(x: ArrayLike, /) -> Array:
     the nearest integer that is less than or equal to the value itself.
 
   See also:
-    - :func:`jax.numpy.fix`: Rounds the input to the nearest interger towards zero.
-    - :func:`jax.numpy.trunc`: Rounds the input to the nearest interger towards
+    - :func:`jax.numpy.fix`: Rounds the input to the nearest integer towards zero.
+    - :func:`jax.numpy.trunc`: Rounds the input to the nearest integer towards
       zero.
     - :func:`jax.numpy.ceil`: Rounds the input up to the nearest integer.
 
@@ -366,7 +367,7 @@ def floor(x: ArrayLike, /) -> Array:
            [-5.,  2.,  1.]], dtype=float32)
   """
   x = ensure_arraylike('floor', x)
-  if dtypes.isdtype(dtypes.dtype(x), ('integral', 'bool')):
+  if dtypes.isdtype(x.dtype, ('integral', 'bool')):
     return x
   return lax.floor(*promote_args_inexact('floor', x))
 
@@ -386,8 +387,8 @@ def ceil(x: ArrayLike, /) -> Array:
     the nearest integer that is greater than or equal to the value itself.
 
   See also:
-    - :func:`jax.numpy.fix`: Rounds the input to the nearest interger towards zero.
-    - :func:`jax.numpy.trunc`: Rounds the input to the nearest interger towards
+    - :func:`jax.numpy.fix`: Rounds the input to the nearest integer towards zero.
+    - :func:`jax.numpy.trunc`: Rounds the input to the nearest integer towards
       zero.
     - :func:`jax.numpy.floor`: Rounds the input down to the nearest integer.
 
@@ -405,7 +406,7 @@ def ceil(x: ArrayLike, /) -> Array:
            [ 5.,  4., -1.]], dtype=float32)
   """
   x = ensure_arraylike('ceil', x)
-  if dtypes.isdtype(dtypes.dtype(x), ('integral', 'bool')):
+  if dtypes.isdtype(x.dtype, ('integral', 'bool')):
     return lax.asarray(x)
   return lax.ceil(*promote_args_inexact('ceil', x))
 
@@ -1605,7 +1606,7 @@ def arctan2(x1: ArrayLike, x2: ArrayLike, /) -> Array:
     :math:`\tan(\theta) = y / x`, and compute :math:`\theta = \tan^{-1}(y/x)`.
     Unfortunately, this does not recover the input angle:
 
-    >>> with jnp.printoptions(precision=2, suppress=True):
+    >>> with jnp.printoptions(precision=2, suppress=True):  # doctest: +SKIP
     ...   print(jnp.arctan(y / x))
     [-0.    0.79  1.57 -0.79  0.    0.79  1.57 -0.79  0.  ]
 
@@ -1621,13 +1622,12 @@ def arctan2(x1: ArrayLike, x2: ArrayLike, /) -> Array:
 
     The results match the input ``theta``, except at the endpoints where :math:`+\pi`
     and :math:`-\pi` represent indistinguishable points on the unit circle. By convention,
-    :func:`arctan2` alwasy returns values between :math:`-\pi` and :math:`+\pi` inclusive.
+    :func:`arctan2` always returns values between :math:`-\pi` and :math:`+\pi` inclusive.
   """
   return lax.atan2(*promote_args_inexact("arctan2", x1, x2))
 
 
-@export
-@partial(jit, inline=True)
+@binary_ufunc(identity=None, reduce=reductions._reduce_min)
 def minimum(x: ArrayLike, y: ArrayLike, /) -> Array:
   """Return element-wise minimum of the input arrays.
 
@@ -1687,8 +1687,7 @@ def minimum(x: ArrayLike, y: ArrayLike, /) -> Array:
   return lax.min(*promote_args("minimum", x, y))
 
 
-@export
-@partial(jit, inline=True)
+@binary_ufunc(identity=None, reduce=reductions._reduce_max)
 def maximum(x: ArrayLike, y: ArrayLike, /) -> Array:
   """Return element-wise maximum of the input arrays.
 
@@ -1712,7 +1711,7 @@ def maximum(x: ArrayLike, y: ArrayLike, /) -> Array:
       arrays.
     - :func:`jax.numpy.fmax`: Returns element-wise maximum of the input arrays,
       ignoring NaNs.
-    - :func:`jax.numpy.amax`: Retruns the maximum of array elements along a given
+    - :func:`jax.numpy.amax`: Returns the maximum of array elements along a given
       axis.
     - :func:`jax.numpy.nanmax`: Returns the maximum of the array elements along
       a given axis, ignoring NaNs.
@@ -1776,7 +1775,7 @@ def float_power(x: ArrayLike, y: ArrayLike, /) -> Array:
     >>> jnp.float_power(x, y)
     Array([ 9. ,  1. , -0.2], dtype=float32)
 
-    Inputs with broacast compatibility:
+    Inputs with broadcast compatibility:
 
     >>> x1 = jnp.array([[2, -4, 1],
     ...                 [-1, 2, 3]])
@@ -2344,7 +2343,7 @@ def absolute(x: ArrayLike, /) -> Array:
     Array([17.,  5.,  5.], dtype=float32)
   """
   x = ensure_arraylike('absolute', x)
-  dt = dtypes.dtype(x)
+  dt = x.dtype
   return lax.asarray(x) if dt == np.bool_ or dtypes.issubdtype(dt, np.unsignedinteger) else lax.abs(x)
 
 
@@ -2387,9 +2386,9 @@ def rint(x: ArrayLike, /) -> Array:
     Array([-2.+4.j,  4.-0.j], dtype=complex64)
   """
   x = ensure_arraylike('rint', x)
-  dtype = dtypes.dtype(x)
+  dtype = x.dtype
   if dtype == bool or dtypes.issubdtype(dtype, np.integer):
-    return lax.convert_element_type(x, dtypes.float_)
+    return lax.convert_element_type(x, dtypes.default_float_dtype())
   if dtypes.issubdtype(dtype, np.complexfloating):
     return lax.complex(rint(lax.real(x)), rint(lax.imag(x)))
   return lax.round(x, lax.RoundingMethod.TO_NEAREST_EVEN)
@@ -2430,7 +2429,7 @@ def copysign(x1: ArrayLike, x2: ArrayLike, /) -> Array:
            [ 2.,  3.]], dtype=float32)
   """
   x1, x2 = promote_args_inexact("copysign", x1, x2)
-  if dtypes.issubdtype(dtypes.dtype(x1), np.complexfloating):
+  if dtypes.issubdtype(x1.dtype, np.complexfloating):
     raise TypeError("copysign does not support complex-valued inputs")
   return _where(signbit(x2).astype(bool), -lax.abs(x1), lax.abs(x1))
 
@@ -2525,7 +2524,7 @@ def floor_divide(x1: ArrayLike, x2: ArrayLike, /) -> Array:
   """
   x1, x2 = promote_args_numeric("floor_divide", x1, x2)
   jnp_error._set_error_if_divide_by_zero(x2)
-  dtype = dtypes.dtype(x1)
+  dtype = x1.dtype
   if dtypes.issubdtype(dtype, np.unsignedinteger):
     return lax.div(x1, x2)
   elif dtypes.issubdtype(dtype, np.integer):
@@ -2576,7 +2575,7 @@ def divmod(x1: ArrayLike, x2: ArrayLike, /) -> tuple[Array, Array]:
      Array([0.30000007, 1.        , 2.9       ], dtype=float32))
   """
   x1, x2 = promote_args_numeric("divmod", x1, x2)
-  if dtypes.issubdtype(dtypes.dtype(x1), np.integer):
+  if dtypes.issubdtype(x1.dtype, np.integer):
     return floor_divide(x1, x2), remainder(x1, x2)
   else:
     jnp_error._set_error_if_divide_by_zero(x2)
@@ -2699,13 +2698,13 @@ def _power(x1: ArrayLike, x2: ArrayLike) -> Array:
 
   # Case 2: bool/integer result
   x1_, x2_ = promote_args_numeric("power", x1, x2)
-  if (dtypes.issubdtype(dtypes.dtype(x1_), np.integer) or
-      dtypes.issubdtype(dtypes.dtype(x1_), np.bool_)):
-    assert np.iinfo(dtypes.dtype(x1_)).bits <= 64  # _pow_int_int assumes <=64bit
+  if (dtypes.issubdtype(x1_.dtype, np.integer) or
+      dtypes.issubdtype(x1_.dtype, np.bool_)):
+    assert np.iinfo(x1_.dtype).bits <= 64  # _pow_int_int assumes <=64bit
     return _pow_int_int(x1_, x2_)
 
   # Case 3: float/complex base with integer power (special autodiff behavior)
-  d1, d2 = dtypes.dtype(x1), dtypes.dtype(x2)
+  d1, d2 = x1.dtype, x2.dtype
   if dtypes.issubdtype(d1, np.inexact) and dtypes.issubdtype(d2, np.integer):
     return lax.pow(x1, x2)
 
@@ -2782,8 +2781,7 @@ def logaddexp2(x1: ArrayLike, x2: ArrayLike, /) -> Array:
     Array(True, dtype=bool)
   """
   x1, x2 = promote_args_inexact("logaddexp2", x1, x2)
-  ln2 = float(np.log(2))
-  return logaddexp(x1 * ln2, x2 * ln2) / ln2
+  return lax_other.logaddexp2(x1, x2)
 
 
 @export
@@ -2838,13 +2836,14 @@ def log10(x: ArrayLike, /) -> Array:
     [-2. -1.  0.  1.  2.  3.]
   """
   x, = promote_args_inexact("log10", x)
+  one_over_log10 = np.array(0.4342944819032518,  # exact value of 1 / log(10)
+                            dtype=dtypes.finfo(x.dtype).dtype)
   if dtypes.issubdtype(x.dtype, np.complexfloating):
     r = lax.log(x)
     re = lax.real(r)
     im = lax.imag(r)
-    ln10 = lax.log(_constant_like(re, 10))
-    return lax.complex(lax.div(re, ln10), lax.div(im, ln10))
-  out = lax.div(lax.log(x), lax.log(_constant_like(x, 10)))
+    return lax.complex(lax.mul(re, one_over_log10), lax.mul(im, one_over_log10))
+  out = lax.mul(lax.log(x), one_over_log10)
   jnp_error._set_error_if_nan(out)
   return out
 
@@ -2930,7 +2929,7 @@ def signbit(x: ArrayLike, /) -> Array:
     Array([False,  True, False,  True], dtype=bool)
     """
   x, = promote_args("signbit", x)
-  dtype = dtypes.dtype(x)
+  dtype = x.dtype
   if dtypes.issubdtype(dtype, np.integer):
     return lax.lt(x, _constant_like(x, 0))
   elif dtypes.issubdtype(dtype, np.bool_):
@@ -2996,13 +2995,13 @@ def ldexp(x1: ArrayLike, x2: ArrayLike, /) -> Array:
     Array([ 2.,  3.,  5., 11.], dtype=float32)
   """
   x1, x2 = ensure_arraylike("ldexp", x1, x2)
-  x1_dtype = dtypes.dtype(x1)
-  x2_dtype = dtypes.dtype(x2)
+  x1_dtype = x1.dtype
+  x2_dtype = x2.dtype
   if (dtypes.issubdtype(x1_dtype, np.complexfloating)
       or dtypes.issubdtype(x2_dtype, np.inexact)):
     raise ValueError(f"ldexp not supported for input types {(x1_dtype, x2_dtype)}")
   x1, = promote_args_inexact("ldexp", x1)
-  x2 = lax.convert_element_type(x2, dtypes.dtype(x1))
+  x2 = lax.convert_element_type(x2, x1.dtype)
 
   # Split off the exponent to avoid overflow for small x1 and large x2.
   m, e = frexp(x1)
@@ -3079,7 +3078,7 @@ def _frexp_jvp(primals, tangents):
   t, = tangents
   m, e = frexp(x)
   mdot = t * exp2(-e.astype(t.dtype))
-  edot = np.empty(e.shape, dtypes.float0)
+  edot = lax.full_like(e, fill_value=0, dtype=dtypes.float0)
   return (m, e), (mdot, edot)
 
 
@@ -3483,7 +3482,7 @@ def isfinite(x: ArrayLike, /) -> Array:
     Array(True, dtype=bool, weak_type=True)
   """
   x = ensure_arraylike("isfinite", x)
-  dtype = dtypes.dtype(x)
+  dtype = x.dtype
   if dtypes.issubdtype(dtype, np.floating):
     return lax.is_finite(x)
   elif dtypes.issubdtype(dtype, np.complexfloating):
@@ -3524,7 +3523,7 @@ def isinf(x: ArrayLike, /) -> Array:
     Array([False,  True, False,  True, False], dtype=bool)
   """
   x = ensure_arraylike("isinf", x)
-  dtype = dtypes.dtype(x)
+  dtype = x.dtype
   if dtypes.issubdtype(dtype, np.floating):
     return lax.eq(lax.abs(x), _constant_like(x, np.inf))
   elif dtypes.issubdtype(dtype, np.complexfloating):
@@ -3539,7 +3538,7 @@ def isinf(x: ArrayLike, /) -> Array:
 def _isposneginf(infinity: float, x: Array, out) -> Array:
   if out is not None:
     raise NotImplementedError("The 'out' argument to isneginf/isposinf is not supported.")
-  dtype = dtypes.dtype(x)
+  dtype = x.dtype
   if dtypes.issubdtype(dtype, np.floating):
     return lax.eq(x, _constant_like(x, infinity))
   elif dtypes.issubdtype(dtype, np.complexfloating):

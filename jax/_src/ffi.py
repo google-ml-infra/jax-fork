@@ -16,22 +16,23 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 import ctypes
+import dataclasses
 import functools
 import os
 from typing import Any, overload
 
 import numpy as np
 
-import jax
 from jax._src import core
 from jax._src import dispatch
 from jax._src import effects
 from jax._src import util
 from jax._src import xla_bridge
+from jax._src.hashable_array import HashableArray
 from jax._src.interpreters import ad
 from jax._src.interpreters import batching
 from jax._src.interpreters import mlir
-from jax._src.layout import DeviceLocalLayout
+from jax._src.layout import Layout
 from jax._src.lib import jaxlib
 from jax._src.lib import xla_client
 from jax._src.lib.mlir import ir
@@ -39,7 +40,7 @@ from jax._src.typing import (Array, ArrayLike, DeprecatedArg, DuckTypedArray,
                              Shape)
 
 map, unsafe_map = util.safe_map, map
-FfiLayoutOptions = Sequence[int] | DeviceLocalLayout | None
+FfiLayoutOptions = Sequence[int] | Layout | None
 
 
 def register_ffi_target(
@@ -55,7 +56,7 @@ def register_ffi_target(
     name: the name of the target.
     fn: a ``PyCapsule`` object containing the function pointer, or a ``dict``
       where the keys are FFI stage names (e.g. `"execute"`) and the values are
-      ``PyCapsule`` objects continaing a pointer to the handler for that stage.
+      ``PyCapsule`` objects containing a pointer to the handler for that stage.
     platform: the target platform.
     api_version: the XLA custom call API version to use. Supported versions are:
       1 (default) for the typed FFI or 0 for the earlier "custom call" API.
@@ -143,8 +144,8 @@ def _convert_layout_for_lowering(
   """Convert a layout to the minor-to-major order used by the custom call API."""
   if layout is None:
     return tuple(reversed(range(len(_aval_shape(aval)))))
-  elif isinstance(layout, DeviceLocalLayout):
-    if layout._tiling is not None:
+  elif isinstance(layout, Layout):
+    if layout.tiling is not None:
       raise ValueError("The FFI does not support layouts with tiling")
     return layout.major_to_minor[::-1]
   else:
@@ -157,6 +158,7 @@ def build_ffi_lowering_function(
     operand_layouts: Sequence[FfiLayoutOptions] | None = None,
     result_layouts: Sequence[FfiLayoutOptions] | None = None,
     backend_config: Mapping[str, ir.Attribute] | str | None = None,
+    skip_ffi_layout_processing: bool = False,
     **lowering_args: Any,
 ) -> Callable[..., ir.Operation]:
   """Build a lowering op for an foreign function interface (FFI) target.
@@ -167,7 +169,7 @@ def build_ffi_lowering_function(
 
   Note that layouts passed to this function as tuples should be in
   minor-to-major order (as expected by XLA) rather than major-to-minor as used
-  by :func:`~jax.ffi.ffi_call` and ``DeviceLocalLayout``.
+  by :func:`~jax.ffi.ffi_call` and ``Layout``.
 
   If keyword arguments are passed to the lowering rule, these are treated as
   attributes, and added to `backend_config`.
@@ -182,6 +184,8 @@ def build_ffi_lowering_function(
       arguments passed to the lowering rule will added to this dictionary.
     lowering_args: Any other arguments to :func:`mlir.custom_call` will also be
       passed through if provided as extra arguments to this function.
+    skip_ffi_layout_processing: If true, skip processing of operand and result
+      layout arguments passed to the lowering rule.
   """
 
   def _lowering_op(
@@ -203,18 +207,25 @@ def build_ffi_lowering_function(
       kwargs["backend_config"] = backend_config
     if "result_types" not in kwargs:
       kwargs["result_types"] = [mlir.aval_to_ir_type(aval) for aval in ctx.avals_out]
-    if operand_layouts is None:
-      kwargs["operand_layouts"] = map(_convert_layout_for_lowering, ctx.avals_in)
-    else:
-      kwargs["operand_layouts"] = [
-          _convert_layout_for_lowering(*args)
-          for args in zip(ctx.avals_in, operand_layouts)]
-    if result_layouts is None:
-      kwargs["result_layouts"] = map(_convert_layout_for_lowering, ctx.avals_out)
-    else:
-      kwargs["result_layouts"] = [
-          _convert_layout_for_lowering(*args)
-          for args in zip(ctx.avals_out, result_layouts)]
+    if not skip_ffi_layout_processing:
+      if operand_layouts is None:
+        kwargs["operand_layouts"] = map(
+            _convert_layout_for_lowering, ctx.avals_in
+        )
+      else:
+        kwargs["operand_layouts"] = [
+            _convert_layout_for_lowering(*args)
+            for args in zip(ctx.avals_in, operand_layouts)
+        ]
+      if result_layouts is None:
+        kwargs["result_layouts"] = map(
+            _convert_layout_for_lowering, ctx.avals_out
+        )
+      else:
+        kwargs["result_layouts"] = [
+            _convert_layout_for_lowering(*args)
+            for args in zip(ctx.avals_out, result_layouts)
+        ]
     if "result_shapes" not in kwargs and not all(
         core.is_constant_shape(_aval_shape(aval)) for aval in ctx.avals_out):
       kwargs["result_shapes"] = [
@@ -232,6 +243,7 @@ def ffi_lowering(
     operand_layouts: Sequence[FfiLayoutOptions] | None = None,
     result_layouts: Sequence[FfiLayoutOptions] | None = None,
     backend_config: Mapping[str, ir.Attribute] | str | None = None,
+    skip_ffi_layout_processing: bool = False,
     **lowering_args: Any
 ) -> mlir.LoweringRule:
   """Build a lowering rule for an foreign function interface (FFI) target.
@@ -242,7 +254,7 @@ def ffi_lowering(
 
   Note that layouts passed to this function as tuples should be in
   minor-to-major order (as expected by XLA) rather than major-to-minor as used
-  by :func:`~jax.ffi.ffi_call` and ``DeviceLocalLayout``.
+  by :func:`~jax.ffi.ffi_call` and ``Layout``.
 
   If keyword arguments are passed to the lowering rule, these are treated as
   attributes, and added to `backend_config`.
@@ -257,6 +269,8 @@ def ffi_lowering(
       arguments passed to the lowering rule will added to this dictionary.
     lowering_args: Any other arguments to :func:`mlir.custom_call` will also be
       passed through if provided as extra arguments to this function.
+    skip_ffi_layout_processing: If true, skip processing of operand and result
+      layout arguments passed to the lowering rule.
   """
 
   def _lowering(
@@ -267,6 +281,7 @@ def ffi_lowering(
         operand_layouts=operand_layouts,
         result_layouts=result_layouts,
         backend_config=backend_config,
+        skip_ffi_layout_processing=skip_ffi_layout_processing,
         **lowering_args,
     )(ctx, *operands, **params)
 
@@ -308,7 +323,7 @@ def _convert_layouts_for_ffi_call(
   return tuple(
       _convert_layout_for_lowering(
           aval,
-          layout if layout is None or isinstance(layout, DeviceLocalLayout)
+          layout if layout is None or isinstance(layout, Layout)
           else layout[::-1]
       )
       for aval, layout in zip(avals, layouts))
@@ -368,7 +383,7 @@ def ffi_call(
 
   Like :func:`~jax.pure_callback`, the behavior of ``ffi_call`` under
   :func:`~jax.vmap` depends on the value of ``vmap_method``. See the
-  :func:`~jax.pure_callback` documenation for more details about the allowed
+  :func:`~jax.pure_callback` documentation for more details about the allowed
   values and examples of their behavior.
 
   The current default behavior is to use ``vmap_method="sequential"`` when
@@ -391,7 +406,7 @@ def ffi_call(
       :func:`~jax.vmap` as described above.
     input_layouts: a sequence of layouts for each input argument. In each case,
       the layout can be (a) ``None`` indicating that this input is in default
-      row-major order, (b) a ``DeviceLocalLayout`` specifying the axis order,
+      row-major order, (b) a ``Layout`` specifying the axis order,
       or (c) a sequence of integers specifying the major-to-minor axis
       ordering. Users who are familiar with XLA layouts should note that this
       function expects layouts in major-to-minor order instead of the
@@ -558,24 +573,6 @@ def _unwrap_kwargs_hashable(kwargs: Sequence[tuple[str, Any]]) -> dict[str, Any]
   return unwrapped_kwargs
 
 
-class HashableArray:
-  __slots__ = ["val"]
-
-  def __init__(self, val):
-    assert isinstance(val, np.ndarray)
-    self.val = np.copy(val)
-    self.val.setflags(write=False)
-
-  def __repr__(self):
-    return f"HashableArray({self.val})"
-
-  def __hash__(self):
-    return hash((self.val.shape, self.val.dtype, self.val.tobytes()))
-
-  def __eq__(self, other):
-    return isinstance(other, HashableArray) and np.array_equal(self.val, other.val)
-
-
 class HashableDict:
   __slots__ = ["val"]
 
@@ -593,6 +590,7 @@ class HashableDict:
     return isinstance(other, HashableDict) and self.val == other.val
 
 
+@dataclasses.dataclass(frozen=True)
 class FfiEffect(effects.Effect):
   def __str__(self):
     return "FFI"
@@ -611,7 +609,10 @@ def ffi_call_abstract_eval(
 ):
   out_vma = core.standard_vma_rule('ffi_call', *avals_in)
   effects = {_FfiEffect} if has_side_effect else core.no_effects
-  return tuple(r if r is core.abstract_token else r.update(vma=out_vma)
+  return tuple(r if r is core.abstract_token else
+               r.update(sharding=(core.get_cur_mesh_sharding()
+                                  if r.sharding.mesh.empty else r.sharding),  # type: ignore
+                        vma=out_vma)
                for r in result_avals), effects
 
 
@@ -660,6 +661,9 @@ def ffi_batching_rule(
     result_avals: Sequence[core.ShapedArray],
     **kwargs: Any,
 ):
+  from jax._src.lax import control_flow  # pytype: disable=import-error
+  from jax._src.lax import lax  # pytype: disable=import-error
+
   axis_size, = {a.shape[d] for a, d in zip(args, dims)
                 if d is not batching.not_mapped}
   new_args = [arg if dim is batching.not_mapped else
@@ -694,7 +698,7 @@ def ffi_batching_rule(
   elif vmap_method == "expand_dims" or vmap_method == "broadcast_all":
     size = axis_size if vmap_method == "broadcast_all" else 1
     bcast_args = [
-        jax.lax.broadcast(x, (size,)) if d is batching.not_mapped else x
+        lax.broadcast(x, (size,)) if d is batching.not_mapped else x
         for x, d in zip(new_args, dims)]
     if kwargs.get("input_layouts") is not None:
       kwargs["input_layouts"] = tuple(
@@ -719,7 +723,7 @@ def ffi_batching_rule(
       )
     unroll = vmap_method == "sequential_unrolled"
     g = lambda _, x: ((), _batch_fun(x))
-    _, outvals = jax.lax.scan(g, (), batched_args, unroll=unroll)
+    _, outvals = control_flow.scan(g, (), batched_args, unroll=unroll)
   else:
     raise NotImplementedError(
         f"vmap is only supported for the {prim.name} primitive when vmap_method "

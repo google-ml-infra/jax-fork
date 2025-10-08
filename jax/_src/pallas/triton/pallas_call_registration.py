@@ -17,10 +17,12 @@
 from __future__ import annotations
 
 import io
+import json
 from typing import cast
 import zlib
 
 import jax
+from jax._src import frozen_dict
 import jax._src.core as jax_core
 from jax._src.interpreters import mlir
 from jax._src.lib import gpu_triton as triton_kernel_call_lib
@@ -40,7 +42,7 @@ def normalize_grid(grid: pallas_core.StaticGrid) -> tuple[int, int, int]:
 
 
 def avals_to_layouts(avals):
-  return [list(reversed(range(aval.ndim))) for aval in avals]
+  return [list(reversed(range(aval.ndim))) for aval in avals]  # pytype: disable=attribute-error
 
 
 def pallas_call_lowering(
@@ -55,6 +57,7 @@ def pallas_call_lowering(
     compiler_params: dict[str, pallas_core.CompilerParams],
     cost_estimate: pallas_core.CostEstimate | None,
     out_avals: tuple[jax_core.AbstractValue, ...],
+    metadata: frozen_dict.FrozenDict[str, str] | None,
 ):
   del interpret, out_avals, cost_estimate
   debug_info = jaxpr.debug_info
@@ -72,9 +75,9 @@ def pallas_call_lowering(
   [lowering_platform] = ctx.platforms or ctx.module_context.platforms
 
   if "triton" in compiler_params:
-    params = cast(triton_core.TritonCompilerParams, compiler_params["triton"])
+    params = cast(triton_core.CompilerParams, compiler_params["triton"])
   else:
-    params = triton_core.TritonCompilerParams()
+    params = triton_core.CompilerParams()
   num_warps = 4 if params.num_warps is None else params.num_warps
   num_stages = params.num_stages
   if num_stages is None:
@@ -101,12 +104,16 @@ def pallas_call_lowering(
   buf = io.BytesIO()
   module_op.write_bytecode(buf)
 
+  serialized_metadata = None
+  if metadata is not None:
+    serialized_metadata = json.dumps(dict(metadata))
+
   # TODO(b/394629193): Remove True once the bug is fixed.
   if True:
     # AOT Triton compilation is only available on jaxlib 0.5.1+.
     out_types = [
-      ir.RankedTensorType.get(bm.array_shape_dtype.shape,
-                              mlir.dtype_to_ir_type(bm.array_shape_dtype.dtype))
+      ir.RankedTensorType.get(bm.array_aval.shape,
+                              mlir.dtype_to_ir_type(bm.array_aval.dtype))
       for bm in grid_mapping.block_mappings_output
     ]
     backend_config = dict(
@@ -119,10 +126,10 @@ def pallas_call_lowering(
         grid_z=mlir.i32_attr(grid_z),
         debug=ir.BoolAttr.get(debug),
     )
-    if params.serialized_metadata is not None:
+    if serialized_metadata is not None:
       # This field is unstable and may be removed in the future.
       backend_config["serialized_metadata"] = ir.StringAttr.get(
-          params.serialized_metadata
+          serialized_metadata
       )
     return mlir.custom_call(
         call_target_name="__gpu$xla.gpu.triton",
@@ -182,7 +189,7 @@ def pallas_call_lowering(
       backend_config=zlib.compress(
           kernel_call.to_proto(
               debug_info.func_name,
-              params.serialized_metadata or b"",
+              (serialized_metadata or "").encode(),
           )
       ),
       operand_layouts=avals_to_layouts(ctx.avals_in),

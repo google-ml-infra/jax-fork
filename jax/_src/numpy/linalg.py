@@ -18,22 +18,24 @@ from collections.abc import Sequence
 from functools import partial
 import itertools
 import math
-
-import numpy as np
 import operator
 from typing import Literal, NamedTuple, overload
 
-import jax
-from jax import jit, custom_jvp
-from jax import lax
+import numpy as np
 
+from jax._src import api
+from jax._src import core
+from jax._src import config
 from jax._src import deprecations
-from jax._src.lax import lax as lax_internal
-from jax._src.lax.lax import PrecisionLike
+from jax._src.custom_derivatives import custom_jvp
+from jax._src.lax import lax
 from jax._src.lax import linalg as lax_linalg
+from jax._src.lax import utils as lax_utils
+from jax._src.numpy import array_creation
 from jax._src.numpy import einsum
 from jax._src.numpy import indexing
 from jax._src.numpy import lax_numpy as jnp
+from jax._src.sharding_impls import NamedSharding, PartitionSpec as P
 from jax._src.numpy import reductions, tensor_contractions, ufuncs
 from jax._src.numpy.util import promote_dtypes_inexact, ensure_arraylike
 from jax._src.util import canonicalize_axis, set_module
@@ -44,24 +46,24 @@ export = set_module('jax.numpy.linalg')
 
 
 class EighResult(NamedTuple):
-  eigenvalues: jax.Array
-  eigenvectors: jax.Array
+  eigenvalues: Array
+  eigenvectors: Array
 
 
 class QRResult(NamedTuple):
-  Q: jax.Array
-  R: jax.Array
+  Q: Array
+  R: Array
 
 
 class SlogdetResult(NamedTuple):
-  sign: jax.Array
-  logabsdet: jax.Array
+  sign: Array
+  logabsdet: Array
 
 
 class SVDResult(NamedTuple):
-  U: jax.Array
-  S: jax.Array
-  Vh: jax.Array
+  U: Array
+  S: Array
+  Vh: Array
 
 
 def _H(x: ArrayLike) -> Array:
@@ -72,7 +74,7 @@ def _symmetrize(x: Array) -> Array: return (x + _H(x)) / 2
 
 
 @export
-@partial(jit, static_argnames=['upper', 'symmetrize_input'])
+@partial(api.jit, static_argnames=['upper', 'symmetrize_input'])
 def cholesky(a: ArrayLike, *, upper: bool = False, symmetrize_input: bool = True) -> Array:
   """Compute the Cholesky decomposition of a matrix.
 
@@ -202,7 +204,7 @@ def svd(
 
 @export
 @partial(
-    jit,
+    api.jit,
     static_argnames=(
         "full_matrices",
         "compute_uv",
@@ -293,7 +295,9 @@ def svd(
     s = lax.abs(v)
     if compute_uv:
       sign = lax.sign(v)
-      idxs = lax.broadcasted_iota(np.int64, s.shape, dimension=s.ndim - 1)
+      idx_dtype = lax_utils.int_dtype_for_dim(
+          s.shape[s.ndim - 1], signed=False)
+      idxs = lax.broadcasted_iota(idx_dtype, s.shape, dimension=s.ndim - 1)
       s, idxs, sign = lax.sort((s, idxs, sign), dimension=-1, num_keys=1)
       s = lax.rev(s, dimensions=[s.ndim - 1])
       idxs = lax.rev(idxs, dimensions=[s.ndim - 1])
@@ -322,7 +326,7 @@ def svd(
 
 
 @export
-@partial(jit, static_argnames=('n',))
+@partial(api.jit, static_argnames=('n',))
 def matrix_power(a: ArrayLike, n: int) -> Array:
   """Raise a square matrix to an integer power.
 
@@ -367,8 +371,7 @@ def matrix_power(a: ArrayLike, n: int) -> Array:
     Array([[ 5.5 , -2.5 ],
            [-3.75,  1.75]], dtype=float32)
   """
-  a = ensure_arraylike("jnp.linalg.matrix_power", a)
-  arr, = promote_dtypes_inexact(a)
+  arr = ensure_arraylike("jnp.linalg.matrix_power", a)
 
   if arr.ndim < 2:
     raise TypeError("{}-dimensional array given. Array must be at least "
@@ -404,7 +407,7 @@ def matrix_power(a: ArrayLike, n: int) -> Array:
 
 
 @export
-@jit
+@api.jit
 def matrix_rank(
   M: ArrayLike, rtol: ArrayLike | None = None, *,
   tol: ArrayLike | DeprecatedArg | None = DeprecatedArg()) -> Array:
@@ -509,7 +512,7 @@ def _slogdet_qr(a: Array) -> tuple[Array, Array]:
 
 
 @export
-@partial(jit, static_argnames=('method',))
+@partial(api.jit, static_argnames=('method',))
 def slogdet(a: ArrayLike, *, method: str | None = None) -> SlogdetResult:
   """
   Compute the sign and (natural) logarithm of the determinant of an array.
@@ -563,7 +566,7 @@ def _slogdet_jvp(primals, tangents):
     sign_dot = (ans_dot - ufuncs.real(ans_dot).astype(ans_dot.dtype)) * sign
     ans_dot = ufuncs.real(ans_dot)
   else:
-    sign_dot = jnp.zeros_like(sign)
+    sign_dot = array_creation.zeros_like(sign)
   return (sign, ans), (sign_dot, ans_dot)
 
 _slogdet_lu.defjvp(_slogdet_jvp)
@@ -645,18 +648,18 @@ def _cofactor_solve(a: ArrayLike, b: ArrayLike) -> tuple[Array, Array]:
   permutation = jnp.broadcast_to(permutation, (*batch_dims, a_shape[-1]))
   iotas = jnp.ix_(*(lax.iota(np.int32, b) for b in (*batch_dims, 1)))
   # filter out any matrices that are not full rank
-  d = jnp.ones(x.shape[:-1], x.dtype)
+  d = array_creation.ones(x.shape[:-1], x.dtype)
   d = lax_linalg.triangular_solve(lu, d, left_side=True, lower=False)
   d = reductions.any(ufuncs.logical_or(ufuncs.isnan(d), ufuncs.isinf(d)), axis=-1)
   d = jnp.tile(d[..., None, None], d.ndim*(1,) + x.shape[-2:])
-  x = jnp.where(d, jnp.zeros_like(x), x)  # first filter
+  x = jnp.where(d, array_creation.zeros_like(x), x)  # first filter
   x = x[iotas[:-1] + (permutation, slice(None))]
   x = lax_linalg.triangular_solve(lu, x, left_side=True, lower=True,
                                   unit_diagonal=True)
   x = jnp.concatenate((x[..., :-1, :] * partial_det[..., -1, None, None],
                       x[..., -1:, :]), axis=-2)
   x = lax_linalg.triangular_solve(lu, x, left_side=True, lower=False)
-  x = jnp.where(d, jnp.zeros_like(x), x)  # second filter
+  x = jnp.where(d, array_creation.zeros_like(x), x)  # second filter
 
   return partial_det[..., -1], x
 
@@ -690,7 +693,7 @@ def _det_jvp(primals, tangents):
 
 
 @export
-@jit
+@api.jit
 def det(a: ArrayLike) -> Array:
   """
   Compute the determinant of an array.
@@ -773,7 +776,7 @@ def eig(a: ArrayLike) -> tuple[Array, Array]:
 
 
 @export
-@jit
+@api.jit
 def eigvals(a: ArrayLike) -> Array:
   """
   Compute the eigenvalues of a general matrix.
@@ -811,7 +814,7 @@ def eigvals(a: ArrayLike) -> Array:
 
 
 @export
-@partial(jit, static_argnames=('UPLO', 'symmetrize_input'))
+@partial(api.jit, static_argnames=('UPLO', 'symmetrize_input'))
 def eigh(a: ArrayLike, UPLO: str | None = None,
          symmetrize_input: bool = True) -> EighResult:
   """
@@ -869,7 +872,7 @@ def eigh(a: ArrayLike, UPLO: str | None = None,
 
 
 @export
-@partial(jit, static_argnames=('UPLO', 'symmetrize_input'))
+@partial(api.jit, static_argnames=('UPLO', 'symmetrize_input'))
 def eigvalsh(a: ArrayLike, UPLO: str | None = 'L', *,
              symmetrize_input: bool = True) -> Array:
   """
@@ -970,7 +973,7 @@ def pinv(a: ArrayLike, rtol: ArrayLike | None = None,
 
 
 @partial(custom_jvp, nondiff_argnums=(1, 2))
-@partial(jit, static_argnames=('hermitian'))
+@partial(api.jit, static_argnames=('hermitian'))
 def _pinv(a: ArrayLike, rtol: ArrayLike | None = None, hermitian: bool = False) -> Array:
   # Uses same algorithm as
   # https://github.com/numpy/numpy/blob/v1.17.0/numpy/linalg/linalg.py#L1890-L1979
@@ -978,7 +981,7 @@ def _pinv(a: ArrayLike, rtol: ArrayLike | None = None, hermitian: bool = False) 
   arr, = promote_dtypes_inexact(a)
   m, n = arr.shape[-2:]
   if m == 0 or n == 0:
-    return jnp.empty(arr.shape[:-2] + (n, m), arr.dtype)
+    return array_creation.empty(arr.shape[:-2] + (n, m), arr.dtype)
   arr = ufuncs.conj(arr)
   if rtol is None:
     max_rows_cols = max(arr.shape[-2:])
@@ -996,7 +999,7 @@ def _pinv(a: ArrayLike, rtol: ArrayLike | None = None, hermitian: bool = False) 
 
 
 @_pinv.defjvp
-@jax.default_matmul_precision("float32")
+@config.default_matmul_precision("float32")
 def _pinv_jvp(rtol, hermitian, primals, tangents):
   # The Differentiation of Pseudo-Inverses and Nonlinear Least Squares Problems
   # Whose Variables Separate. Author(s): G. H. Golub and V. Pereyra. SIAM
@@ -1025,7 +1028,7 @@ def _pinv_jvp(rtol, hermitian, primals, tangents):
 
 
 @export
-@jit
+@api.jit
 def inv(a: ArrayLike) -> Array:
   """Return the inverse of a square matrix
 
@@ -1085,7 +1088,7 @@ def inv(a: ArrayLike) -> Array:
 
 
 @export
-@partial(jit, static_argnames=('ord', 'axis', 'keepdims'))
+@partial(api.jit, static_argnames=('ord', 'axis', 'keepdims'))
 def norm(x: ArrayLike, ord: int | str | None = None,
          axis: None | tuple[int, ...] | int = None,
          keepdims: bool = False) -> Array:
@@ -1226,7 +1229,7 @@ def qr(a: ArrayLike, mode: Literal["r"]) -> Array: ...
 def qr(a: ArrayLike, mode: str = "reduced") -> Array | QRResult: ...
 
 @export
-@partial(jit, static_argnames=('mode',))
+@partial(api.jit, static_argnames=('mode',))
 def qr(a: ArrayLike, mode: str = "reduced") -> Array | QRResult:
   """Compute the QR decomposition of an array
 
@@ -1310,7 +1313,7 @@ def qr(a: ArrayLike, mode: str = "reduced") -> Array | QRResult:
 
 
 @export
-@jit
+@api.jit
 def solve(a: ArrayLike, b: ArrayLike) -> Array:
   """Solve a linear system of equations.
 
@@ -1368,6 +1371,7 @@ def solve(a: ArrayLike, b: ArrayLike) -> Array:
       " To recover this behavior, use solve(a, b[..., None]).squeeze(-1).")
 
   signature = "(m,m),(m)->(m)" if b.ndim == 1 else "(m,m),(m,n)->(m,n)"
+  a, b = core.standard_insert_pvary(a, b)
   return jnp.vectorize(lax_linalg._solve, signature=signature)(a, b)
 
 
@@ -1390,9 +1394,9 @@ def _lstsq(a: ArrayLike, b: ArrayLike, rcond: float | None, *,
   m, n = a.shape
   dtype = a.dtype
   if a.size == 0:
-    s = jnp.empty(0, dtype=a.dtype)
+    s = array_creation.empty(0, dtype=a.dtype)
     rank = jnp.array(0, dtype=int)
-    x = jnp.empty((n, *b.shape[1:]), dtype=a.dtype)
+    x = array_creation.empty((n, *b.shape[1:]), dtype=a.dtype)
   else:
     if rcond is None:
       rcond = float(jnp.finfo(dtype).eps) * max(n, m)
@@ -1416,7 +1420,7 @@ def _lstsq(a: ArrayLike, b: ArrayLike, rcond: float | None, *,
     x = x.ravel()
   return x, resid, rank, s
 
-_jit_lstsq = jit(partial(_lstsq, numpy_resid=False))
+_jit_lstsq = api.jit(partial(_lstsq, numpy_resid=False))
 
 
 @export
@@ -1617,8 +1621,8 @@ def matrix_transpose(x: ArrayLike, /) -> Array:
   x_arr = ensure_arraylike('jnp.linalg.matrix_transpose', x)
   ndim = x_arr.ndim
   if ndim < 2:
-    raise ValueError(f"matrix_transpose requres at least 2 dimensions; got {ndim=}")
-  return jax.lax.transpose(x_arr, (*range(ndim - 2), ndim - 1, ndim - 2))
+    raise ValueError(f"matrix_transpose requires at least 2 dimensions; got {ndim=}")
+  return lax.transpose(x_arr, (*range(ndim - 2), ndim - 1, ndim - 2))
 
 
 @export
@@ -1683,14 +1687,14 @@ def vector_norm(x: ArrayLike, /, *, axis: int | tuple[int, ...] | None = None, k
     raise ValueError(msg)
   else:
     abs_x = ufuncs.abs(x)
-    ord_arr = lax_internal._const(abs_x, ord)
-    ord_inv = lax_internal._const(abs_x, 1. / ord_arr)
+    ord_arr = lax._const(abs_x, ord)
+    ord_inv = lax._const(abs_x, 1. / ord_arr)
     out = reductions.sum(abs_x ** ord_arr, axis=axis, keepdims=keepdims)
     return ufuncs.power(out, ord_inv)
 
 @export
 def vecdot(x1: ArrayLike, x2: ArrayLike, /, *, axis: int = -1,
-           precision: PrecisionLike = None,
+           precision: lax.PrecisionLike = None,
            preferred_element_type: DTypeLike | None = None) -> Array:
   """Compute the (batched) vector conjugate dot product of two arrays.
 
@@ -1741,7 +1745,7 @@ def vecdot(x1: ArrayLike, x2: ArrayLike, /, *, axis: int = -1,
 
 @export
 def matmul(x1: ArrayLike, x2: ArrayLike, /, *,
-           precision: PrecisionLike = None,
+           precision: lax.PrecisionLike = None,
            preferred_element_type: DTypeLike | None = None) -> Array:
   """Perform a matrix multiplication.
 
@@ -1803,8 +1807,9 @@ def matmul(x1: ArrayLike, x2: ArrayLike, /, *,
 @export
 def tensordot(x1: ArrayLike, x2: ArrayLike, /, *,
               axes: int | tuple[Sequence[int], Sequence[int]] = 2,
-              precision: PrecisionLike = None,
-              preferred_element_type: DTypeLike | None = None) -> Array:
+              precision: lax.PrecisionLike = None,
+              preferred_element_type: DTypeLike | None = None,
+              out_sharding: NamedSharding | P | None = None) -> Array:
   """Compute the tensor dot product of two N-dimensional arrays.
 
   JAX implementation of :func:`numpy.linalg.tensordot`.
@@ -1878,8 +1883,9 @@ def tensordot(x1: ArrayLike, x2: ArrayLike, /, *,
            [2, 4, 6]], dtype=int32)
   """
   x1, x2 = ensure_arraylike('jnp.linalg.tensordot', x1, x2)
-  return tensor_contractions.tensordot(x1, x2, axes=axes, precision=precision,
-                                       preferred_element_type=preferred_element_type)
+  return tensor_contractions.tensordot(
+      x1, x2, axes=axes, precision=precision,
+      preferred_element_type=preferred_element_type, out_sharding=out_sharding)
 
 
 @export
@@ -2040,7 +2046,7 @@ def tensorsolve(a: ArrayLike, b: ArrayLike, axes: tuple[int, ...] | None = None)
 
 
 @export
-def multi_dot(arrays: Sequence[ArrayLike], *, precision: PrecisionLike = None) -> Array:
+def multi_dot(arrays: Sequence[ArrayLike], *, precision: lax.PrecisionLike = None) -> Array:
   """Efficiently compute matrix products between a sequence of arrays.
 
   JAX implementation of :func:`numpy.linalg.multi_dot`.
@@ -2132,7 +2138,7 @@ def multi_dot(arrays: Sequence[ArrayLike], *, precision: PrecisionLike = None) -
 
 
 @export
-@partial(jit, static_argnames=['p'])
+@partial(api.jit, static_argnames=['p'])
 def cond(x: ArrayLike, p=None):
   """Compute the condition number of a matrix.
 

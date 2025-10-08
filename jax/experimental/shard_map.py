@@ -53,7 +53,7 @@ def shard_map(
     out_specs: a pytree with :class:`~jax.sharding.PartitionSpec` instances as leaves,
       with a tree structure that is a tree prefix of the output of ``f``. Each
       ``PartitionSpec`` represents how the corresponding output shards should be
-      concatenated. In each ``PartitionSpec``, metioning a ``mesh`` axis name at
+      concatenated. In each ``PartitionSpec``, mentioning a ``mesh`` axis name at
       a position expresses concatenation of that mesh axis's shards along the
       corresponding positional axis. Not mentioning a ``mesh`` axis name
       expresses a promise that the output values are equal along that mesh axis,
@@ -77,6 +77,6 @@ def shard_map(
   .. _SPMD multi-device parallelism with shard_map: https://docs.jax.dev/en/latest/notebooks/shard_map.html
   """
   axis_names = frozenset(mesh.axis_names) - auto
-  return jshmap.shard_map(
+  return jshmap._shard_map(
       f, mesh=mesh, in_specs=in_specs, out_specs=out_specs,
-      check_vma=check_rep, axis_names=axis_names)
+      check_vma=check_rep, axis_names=axis_names, _skip_mesh_check=True)

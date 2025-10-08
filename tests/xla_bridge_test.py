@@ -17,7 +17,6 @@ import platform
 
 from absl import logging
 from absl.testing import absltest
-
 from jax import version
 from jax._src import compiler
 from jax._src import config
@@ -36,18 +35,14 @@ class XlaBridgeTest(jtu.JaxTestCase):
   def test_set_device_assignment_no_partition(self):
     compile_options = compiler.get_compile_options(
         num_replicas=4, num_partitions=1, device_assignment=[0, 1, 2, 3])
-    expected_device_assignment = ("Computations: 1 Replicas: 4\nComputation 0: "
-                                  "0 1 2 3 \n")
-    self.assertEqual(compile_options.device_assignment.__repr__(),
-                     expected_device_assignment)
+    self.assertEqual(compile_options.device_assignment.replica_count(), 4)
+    self.assertEqual(compile_options.device_assignment.computation_count(), 1)
 
   def test_set_device_assignment_with_partition(self):
     compile_options = compiler.get_compile_options(
         num_replicas=2, num_partitions=2, device_assignment=[[0, 1], [2, 3]])
-    expected_device_assignment = ("Computations: 2 Replicas: 2\nComputation 0: "
-                                  "0 2 \nComputation 1: 1 3 \n")
-    self.assertEqual(compile_options.device_assignment.__repr__(),
-                     expected_device_assignment)
+    self.assertEqual(compile_options.device_assignment.replica_count(), 2)
+    self.assertEqual(compile_options.device_assignment.computation_count(), 2)
 
   def test_set_fdo_profile(self):
     compile_options = compiler.get_compile_options(
@@ -143,7 +138,9 @@ class XlaBridgeTest(jtu.JaxTestCase):
     registration = xb._backend_factories["name1"]
     with mock.patch.object(xc, "make_c_api_client", autospec=True) as mock_make:
       with mock.patch.object(
-          xc, "pjrt_plugin_initialized", autospec=True, return_vale=True
+          xc,
+          "pjrt_plugin_initialized",
+          autospec=True,
       ):
         with mock.patch.object(xc, "initialize_pjrt_plugin", autospec=True):
           registration.factory()
@@ -181,7 +178,9 @@ class XlaBridgeTest(jtu.JaxTestCase):
     registration = xb._backend_factories["name1"]
     with mock.patch.object(xc, "make_c_api_client", autospec=True) as mock_make:
       with mock.patch.object(
-          xc, "pjrt_plugin_initialized", autospec=True, return_vale=True
+          xc,
+          "pjrt_plugin_initialized",
+          autospec=True,
       ):
         with mock.patch.object(xc, "initialize_pjrt_plugin", autospec=True):
           registration.factory()
@@ -202,6 +201,28 @@ class XlaBridgeTest(jtu.JaxTestCase):
       options["ml_framework_version"] = version.__version__
 
     mock_make.assert_called_once_with("name1", options, None)
+
+  def test_register_plugin_with_lazy_config(self):
+    options = {"bar": "baz"}
+
+    def getopts():
+      return options
+
+    def make_c_api_client(plugin_name, new_options, *args, **kwargs):
+      for k in options:
+        self.assertEqual(new_options[k], options[k])
+
+    with mock.patch.object(xc, "load_pjrt_plugin_dynamically", autospec=True):
+      with mock.patch.object(
+          _profiler, "register_plugin_profiler", autospec=True
+      ):
+        xb.register_plugin("foo", options=getopts, library_path="/dev/null")
+    with mock.patch.object(
+        xc, "make_c_api_client", autospec=True, wraps=make_c_api_client
+    ) as mock_make:
+      with mock.patch.object(xc, "pjrt_plugin_initialized", autospec=True):
+        xb._backend_factories["foo"].factory()
+    mock_make.assert_called_once()
 
 
 class GetBackendTest(jtu.JaxTestCase):

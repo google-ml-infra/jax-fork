@@ -14,22 +14,18 @@
 
 # buildifier: disable=module-docstring
 load("//third_party:repo.bzl", "tf_http_archive", "tf_mirror_urls")
-
-# To update XLA to a new revision,
-# a) update XLA_COMMIT to the new git commit hash
-# b) get the sha256 hash of the commit by running:
-#    curl -L https://github.com/openxla/xla/archive/<git hash>.tar.gz | sha256sum
-#    and update XLA_SHA256 with the result.
-
-XLA_COMMIT = "b77c3dfa079d9d78e40cd7fcd18f821e7c90b8ed"
-XLA_SHA256 = "c527159d433b3301acc6a3d01e504a1718d80c4dfa0a4d38e2cf7529d4fb8162"
+load("//third_party/xla:revision.bzl", "XLA_COMMIT", "XLA_SHA256")
 
 def repo():
     tf_http_archive(
         name = "xla",
         sha256 = XLA_SHA256,
-        strip_prefix = "xla-{commit}".format(commit = XLA_COMMIT),
-        urls = tf_mirror_urls("https://github.com/openxla/xla/archive/{commit}.tar.gz".format(commit = XLA_COMMIT)),
+        type = "tar.gz",
+        strip_prefix = "openxla-xla-{commit}".format(commit = XLA_COMMIT[:7]),
+        # We use an automated tool to update the revision.bzl file. GitHub prohibits the crawling of
+        # web links (`/archive/`) links so we use the GitHub API endpoint to get the tarball
+        # instead.
+        urls = tf_mirror_urls("https://api.github.com/repos/openxla/xla/tarball/{commit}".format(commit = XLA_COMMIT)),
     )
 
     # For development, one often wants to make changes to the TF repository as well

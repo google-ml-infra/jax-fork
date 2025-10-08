@@ -20,14 +20,13 @@ import dataclasses
 import functools
 from typing import Any, Union
 
-from jax._src import config
 from jax._src.util import use_cpp_class, cache, use_cpp_method
 from jax._src.lib import xla_client as xc
 from jax._src.lib.mlir.dialects import sdy
 from jax._src import mesh as mesh_lib
+from jax._src.mesh import AxisType
 from jax._src.partition_spec import PartitionSpec
 from jax._src import sharding as JSharding
-from jax._src import xla_bridge as xb
 import numpy as np
 
 Shape = tuple[int, ...]
@@ -41,10 +40,11 @@ class AUTO:
   def __init__(self, mesh: mesh_lib.Mesh):
     self.mesh = mesh
 
-  def _to_sdy_sharding(self, ndim: int) -> SdyArraySharding:
-    dim_shardings = [SdyDimSharding(axes=[], is_open=True)
+  def _to_sdy_sharding(self, ndim: int) -> SdyArray:
+    dim_shardings = [SdyDim(axes=[], is_open=True)
                      for _ in range(ndim)]
-    return SdyArraySharding(self.mesh.shape_tuple, dim_shardings)
+    return SdyArray(mesh_shape=self.mesh.shape_tuple,
+                    dim_shardings=dim_shardings)
 
 class UnspecifiedValue:
   def __repr__(self):
@@ -73,6 +73,11 @@ ArrayMapping = collections.OrderedDict[MeshAxisName, int]
 ArrayMappingOrAutoOrUnspecified = Union[ArrayMapping, AUTO, UnspecifiedValue]
 
 
+def _unpickle_named_sharding(mesh, spec, memory_kind, logical_device_ids):
+  return NamedSharding(mesh, spec, memory_kind=memory_kind,
+                       _logical_device_ids=logical_device_ids)
+
+
 @use_cpp_class(xc.NamedSharding)
 class NamedSharding(JSharding.Sharding):
   r"""A :class:`NamedSharding` expresses sharding using named axes.
@@ -91,10 +96,9 @@ class NamedSharding(JSharding.Sharding):
   is sharded across ``x`` axis of the mesh, and the second dimension is sharded
   across ``y`` axis of the mesh.
 
-  The Distributed arrays and automatic parallelization
-  (https://docs.jax.dev/en/latest/notebooks/Distributed_arrays_and_automatic_parallelization.html#namedsharding-gives-a-way-to-express-shardings-with-names)
-  tutorial has more details and diagrams that explain how
-  :class:`Mesh` and :class:`PartitionSpec` are used.
+  The `Distributed arrays and automatic parallelization`_
+  and `Explicit Sharding`_ tutorials have more details and diagrams that
+  explain how :class:`Mesh` and :class:`PartitionSpec` are used.
 
   Args:
     mesh: A :class:`jax.sharding.Mesh` object.
@@ -107,6 +111,9 @@ class NamedSharding(JSharding.Sharding):
     >>> mesh = Mesh(np.array(jax.devices()).reshape(2, 4), ('x', 'y'))
     >>> spec = P('x', 'y')
     >>> named_sharding = jax.sharding.NamedSharding(mesh, spec)
+
+  .. _Distributed arrays and automatic parallelization: https://docs.jax.dev/en/latest/notebooks/Distributed_arrays_and_automatic_parallelization.html
+  .. _Explicit Sharding:  https://docs.jax.dev/en/latest/notebooks/explicit-sharding.html
   """
 
   mesh: mesh_lib.Mesh | mesh_lib.AbstractMesh
@@ -132,20 +139,21 @@ class NamedSharding(JSharding.Sharding):
     return f'NamedSharding(mesh={mesh_repr}, spec={self.spec}{mem}{ldi})'
 
   def __reduce__(self):
-    return (type(self), (self.mesh, self.spec),
-            {'memory_kind': self.memory_kind,
-             '_logical_device_ids': self._logical_device_ids})
+    return (_unpickle_named_sharding,
+            (self.mesh, self.spec, self.memory_kind, self._logical_device_ids))
 
   @property
   def memory_kind(self) -> str | None:
     return self._memory_kind
 
+  @use_cpp_method()
   def __hash__(self):
     if not hasattr(self, '_hash'):
       self._hash = hash(
           (self.mesh, self.memory_kind, self.spec, self._logical_device_ids))
     return self._hash
 
+  @use_cpp_method()
   def __eq__(self, other):
     if not isinstance(other, NamedSharding):
       return False
@@ -189,14 +197,8 @@ class NamedSharding(JSharding.Sharding):
     if isinstance(self.mesh, mesh_lib.AbstractMesh):
       raise ValueError('is_fully_addressable is not implemented for '
                        '`jax.sharding.AbstractMesh`.')
-    # Speed up `is_fully_addressable` since there is a high chance that the
-    # mesh across multiple NamedSharding objects will be the same.
-    if config.enable_empty_arrays.value:
-      client = self._internal_device_list[0].client  # type: ignore
-      return (len(self.mesh._process_indices) == 1 and
-              next(iter(self.mesh._process_indices)) ==
-              xb.process_index(client))
-    return not self.mesh.is_multi_process
+    # return False if addressable_device_list is empty.
+    return self._internal_device_list.is_fully_addressable  # type: ignore
 
   @property
   def _is_concrete(self) -> bool:
@@ -225,18 +227,24 @@ class NamedSharding(JSharding.Sharding):
     return num_partitions == 1
 
   def with_memory_kind(self, kind: str) -> NamedSharding:
-    return NamedSharding(self.mesh, self.spec, memory_kind=kind)
+    return self.update(memory_kind=kind)
 
-  def with_spec(self, spec: PartitionSpec | Sequence[Any]) -> NamedSharding:
+  def update(self, **kwargs) -> NamedSharding:
+    spec = kwargs.pop("spec", self.spec)
     if not isinstance(spec, PartitionSpec):
       spec = PartitionSpec(*spec)
-    return NamedSharding(self.mesh, spec, memory_kind=self.memory_kind)
+    return NamedSharding(
+        mesh=kwargs.pop("mesh", self.mesh),
+        spec=spec,
+        memory_kind=kwargs.pop("memory_kind", self.memory_kind),
+        _logical_device_ids=kwargs.pop("_logical_device_ids",
+                                       self._logical_device_ids))
 
   def _to_xla_hlo_sharding(self, num_dimensions: int) -> xc.HloSharding:
     return named_sharding_to_xla_hlo_sharding(self, num_dimensions)
 
-  def _to_sdy_sharding(self, num_dimensions: int) -> SdyArraySharding:
-    dim_shardings = [SdyDimSharding(axes=[], is_open=False)
+  def _to_sdy_sharding(self, num_dimensions: int) -> SdyArray:
+    dim_shardings = [SdyDim(axes=[], is_open=False)
                      for _ in range(num_dimensions)]
     for i, dim_spec in enumerate(self.spec):
       if dim_spec is PartitionSpec.UNCONSTRAINED:
@@ -247,8 +255,10 @@ class NamedSharding(JSharding.Sharding):
       else:
         dim_spec = dim_spec if isinstance(dim_spec, tuple) else (dim_spec,)
         dim_shardings[i].axes = dim_spec
-    return SdyArraySharding(self.mesh.shape_tuple, dim_shardings,
-                            self._logical_device_ids)
+    return SdyArray(mesh_shape=self.mesh.shape_tuple,
+                    dim_shardings=dim_shardings,
+                    logical_device_ids=self._logical_device_ids,
+                    unreduced_axes=self.spec.unreduced)
 
 NamedSharding.__module__ = 'jax.sharding'
 
@@ -267,34 +277,40 @@ def get_array_mapping(
   return d
 
 @dataclasses.dataclass
-class SdyDimSharding:
+class SdyDim:
   axes: Sequence[str]
   is_open: bool
-  priority: int | None = None
 
   def build(self) -> sdy.DimensionShardingAttr:
     return sdy.DimensionShardingAttr.get(
         [sdy.AxisRefAttr.get(axis) for axis in self.axes],
-        is_closed=not self.is_open, priority=self.priority)
+        is_closed=not self.is_open)
 
   def __repr__(self):
-    return f'SdyDimSharding({self._custom_repr()})'
+    return f'SdyDim({self._custom_repr()})'
 
   def _custom_repr(self):
     axes_repr = ', '.join(f"'{a}'" for a in self.axes)
     open_repr = ''
     if self.is_open:
       open_repr = ', ?' if self.axes else '?'
-    priority_repr = '' if self.priority is None else f'p{self.priority}'
-    return f'{{{axes_repr}{open_repr}}}{priority_repr}'
+    return f'{{{axes_repr}{open_repr}}}'
 
+def _get_axes(axes, mesh_shape):
+  if not axes:
+    return ()
+  assert mesh_shape is not None
+  # Sort wrt mesh axis names so order is deterministic and doesn't hang in
+  # McJAX.
+  return tuple(n for n, _ in mesh_shape if n in axes)
 
-@dataclasses.dataclass
-class SdyArraySharding:
+@dataclasses.dataclass(kw_only=True)
+class SdyArray:
   mesh_shape: tuple[tuple[str, int], ...] | None
-  dimension_shardings: Sequence[SdyDimSharding]
+  dim_shardings: Sequence[SdyDim]
   logical_device_ids: tuple[int, ...] | None = None
   replicated_axes: tuple[str, ...] = ()
+  unreduced_axes: frozenset[str] = frozenset()
 
   def build(self) -> sdy.TensorShardingAttr:
     if self.mesh_shape is None:
@@ -305,19 +321,41 @@ class SdyArraySharding:
       mesh_attr = sdy.MeshAttr.get(
           [sdy.MeshAxisAttr.get(name, size) for name, size in self.mesh_shape],
           ldi)
+
+    replicated_axes = _get_axes(self.replicated_axes, self.mesh_shape)
+    unreduced_axes = _get_axes(self.unreduced_axes, self.mesh_shape)
     return sdy.TensorShardingAttr.get(
         mesh_attr,
-        [dim_sharding.build() for dim_sharding in self.dimension_shardings],
-        replicated_axes=[sdy.AxisRefAttr.get(axis) for axis in self.replicated_axes])
+        [dim_sharding.build() for dim_sharding in self.dim_shardings],
+        replicated_axes=[sdy.AxisRefAttr.get(axis) for axis in replicated_axes],
+        unreduced_axes=[sdy.AxisRefAttr.get(axis) for axis in unreduced_axes])
 
   def __repr__(self):
     dim_sharding_repr = ', '.join(
-        d._custom_repr() for d in self.dimension_shardings)
+        d._custom_repr() for d in self.dim_shardings)
     device_id_repr = (f', device_ids={self.logical_device_ids}'
                       if self.logical_device_ids is not None else '')
     rar = (f', replicated_axes={self.replicated_axes}'
            if self.replicated_axes else '')
-    return f"SdyArraySharding([{dim_sharding_repr}]{device_id_repr}{rar})"
+    return f"SdyArray([{dim_sharding_repr}]{device_id_repr}{rar})"
+
+
+# TODO(yashkatariya): Upstream this into `_to_sdy_sharding` maybe with an extra
+# parameter to it `_to_sdy_sharding(self, ndim, modify_wrt_axis_types=False)`
+def modify_sdy_sharding_wrt_axis_types(sdy_sharding: SdyArray, mesh):
+  if mesh._any_axis_auto:
+    dim_shardings, used_axes = [], []  # type: ignore
+    for d in sdy_sharding.dim_shardings:
+      dim_shardings.append(SdyDim(axes=d.axes, is_open=True))
+      used_axes.extend(d.axes)
+    remaining_axes = set(mesh.axis_names) - set(used_axes)
+    replicated_axes = tuple(r for r in remaining_axes
+                            if mesh._name_to_type[r] == mesh_lib.AxisType.Explicit)
+    return SdyArray(mesh_shape=sdy_sharding.mesh_shape,
+                    dim_shardings=dim_shardings,
+                    logical_device_ids=sdy_sharding.logical_device_ids,
+                    replicated_axes=replicated_axes)
+  return sdy_sharding
 
 
 @cache(max_size=4096, trace_context_in_key=False)
@@ -333,6 +371,12 @@ def named_sharding_to_xla_hlo_sharding(
     axis_names = self.mesh.axis_names
     for manual_axis in manual_axes:
       special_axes[axis_names.index(manual_axis)] = xc.OpSharding.Type.MANUAL
+
+  unreduced_axes = self.spec.unreduced
+  if unreduced_axes:
+    axis_names = self.mesh.axis_names
+    for u in unreduced_axes:
+      special_axes[axis_names.index(u)] = xc.OpSharding.Type.UNREDUCED
 
   replicated_mesh_axes = []
   for i, (axis_name, axis_val) in enumerate(mesh_shape.items()):
@@ -414,6 +458,7 @@ def array_mapping_to_axis_resources(array_mapping: ArrayMapping):
 def check_pspec(mesh, spec, _manual_axes=frozenset()):
   _check_unique_resources(spec, "NamedSharding spec", mesh)
   _check_mesh_resource_axis(mesh, spec)
+  _check_mesh_unreduced(mesh, spec)
 
 class DuplicateSpecError(Exception):
   def __init__(self, message, mesh, pspec):
@@ -447,6 +492,18 @@ def _check_unique_resources(pspec: PartitionSpec, arg_name: str, mesh=None
             f' for {mesh_lib.show_axes(multiple_uses)}'),
         mesh=mesh, pspec=pspec)
 
+def check_pspec_mix_axis_type(mesh, pspec):
+  for spec in pspec:
+    if isinstance(spec, tuple):
+      if all(mesh._name_to_type[spec[0]] == mesh._name_to_type[p]
+             for p in spec):
+        continue
+      if any(mesh._name_to_type[p] == AxisType.Manual for p in spec):
+        raise ValueError(
+            'Tuple subset of `PartitionSpec` cannot contain `Manual` mixed'
+            f' with `Auto` or `Explicit`. Got pspec {pspec} and subset'
+            f' {spec} with axis types:'
+            f' ({", ".join(str(mesh._name_to_type[p]) for p in spec)})')
 
 def _check_mesh_resource_axis(mesh, pspec):
   for p in pspec:
@@ -454,18 +511,37 @@ def _check_mesh_resource_axis(mesh, pspec):
       continue
     p = p if isinstance(p, tuple) else (p,)
     for r in p:
-      if r not in mesh.shape:
+      if r not in mesh.axis_names:
         raise ValueError(
             f"Resource axis: {r} of {pspec} "
             f"is not found in mesh: {tuple(mesh.shape.keys())}.")
-    if not all(mesh._name_to_type[p[0]] == mesh._name_to_type[r] for r in p):
-      raise ValueError(
-          'AxisTypes should be the same in a tuple subset of PartitionSpec:'
-          f' {pspec}. Got subset {p} with axis'
-          f' types: ({", ".join(str(mesh._name_to_type[r]) for r in p)})')
-  if (mesh_lib.AxisType.Auto not in mesh._axis_types_dict and
+  check_pspec_mix_axis_type(mesh, pspec)
+  if (AxisType.Auto not in mesh.axis_types and
       PartitionSpec.UNCONSTRAINED in pspec):
     raise ValueError(
         f'{pspec} cannot contain'
         ' `P.UNCONSTRAINED` when no mesh axis_types are `Auto`. Got mesh'
-        f' axis_types: {mesh._axis_types_dict}')
+        f' axis_types: {mesh.axis_types}')
+
+def _check_mesh_unreduced(mesh, pspec):
+  for u in pspec.unreduced:
+    if u not in mesh.axis_names:
+      raise ValueError(
+          f'Unreduced axes {u} is not found in {mesh.axis_names=}. '
+          f'Got {pspec=}')
+    if mesh._name_to_type[u] in (AxisType.Auto, AxisType.Manual):
+      raise ValueError(
+          'Unreduced axes can only refer to mesh axes that is of type'
+          f' `Explicit`. Got unreduced axes: {pspec.unreduced} and'
+          f' mesh: {mesh}')
+
+  for u in pspec.reduced:
+    if u not in mesh.axis_names:
+      raise ValueError(
+          f'Reduced axes {u} is not found in {mesh.axis_names=}. '
+          f'Got {pspec=}')
+    if mesh._name_to_type[u] in (AxisType.Auto, AxisType.Manual):
+      raise ValueError(
+          'Reduced axes can only refer to mesh axes that is of type'
+          f' `Explicit`. Got reduced axes: {pspec.reduced} and'
+          f' mesh: {mesh}')

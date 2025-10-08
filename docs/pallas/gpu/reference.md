@@ -30,7 +30,7 @@ the next instruction.
 <center><img alt="A diagram of one NVIDIA SM" src="../../_static/pallas/gpu/nvidia_sm.svg" style="width:60%; min-width: 400px;"></center>
 
 Going further, recent CUDA versions also outline the concept of a _warpgroup_, which are
-4 consecutive warps. Knowing how the hardware looks like, we can see where this is comming
+4 consecutive warps. Knowing how the hardware looks like, we can see where this is coming
 from: 4 consecutive warps occupy the 4 quarters of an SM and let us issue instructions
 that utilize the whole SM.
 
@@ -49,7 +49,7 @@ warps always run in lockstep (modulo the jitter from hardware scheduling) and ne
 different paths through control flow (with the small exception of `core_map` that we will
 discuss later). One notable addition here is that we still allow you to co-schedule multiple
 of those Pallas-level threads on the same SM so that they can cooperate and communicate
-through shared memory (we relize that by putting them in the same CUDA block).
+through shared memory (we realize that by putting them in the same CUDA block).
 
 ```{note}
 From now on, whenever we say "thread", we refer to the Pallas thread, not a CUDA thread/lane.
@@ -225,16 +225,19 @@ def body(..., scratch_ref):
 There are two ways in which references are allocated and each has a way to select
 the desired transforms:
 
-**1. Using `GPUBlockSpec`**
+**1. Using `plgpu.BlockSpec`**
 
 ```python
 transforms = (plgpu.TileTransform((8, 64)), plgpu.SwizzleTransform(128))
 f = pl.pallas_call(
-  in_specs=plgpu.GPUBlockSpec(in_block_shape, in_index_map, transforms=transforms),
-  out_specs=plgpu.GPUBlockSpec(out_block_shape, out_index_map, transforms=transforms),
+  in_specs=plgpu.BlockSpec(in_block_shape, in_index_map, transforms=transforms),
+  out_specs=plgpu.BlockSpec(out_block_shape, out_index_map, transforms=transforms),
   ...
 )
 ```
+
+Note that unlike `plgpu.BlockSpec`, `pl.BlockSpec` does *not* allow specifying
+transforms.
 
 **2. Specifying the `transforms` argument on the allocated `SMEM`**
 
@@ -317,6 +320,7 @@ Each use of MMA involves a few steps:
 
 Steps 2.-4. are usually performed in a loop over the contraction dimension (`K`).
 
+(memory-space-a-b-mma)=
 ### Memory space of `A` and `B` operands
 
 The `A` and `B` operands are generally best passed in through SMEM, where they can
@@ -326,7 +330,7 @@ transforms specified upon their allocation. For all currently supported generati
 the TensorCore requires the data to be laid out into row-major 2D tiles of shape
 `(8, swizzle_elems)`, where `swizzle_elems` is derived by dividing the swizzle by the
 element type bytewidth.  The currently supported swizzles are: 128, 64, and 32. Larger
-swizzles are preferrable as they improve the performance of GMEM-to-SMEM copies.
+swizzles are preferable as they improve the performance of GMEM-to-SMEM copies.
 
 ```python
 def mma_transforms(shape_dtype: jax.ShapeDtypeStruct):
@@ -406,8 +410,8 @@ TODO: Explain the conditions under which it is acceptable to do this.
 
 The supported MMA shapes are such that:
 * `M` is divisible by 64
-* `N` is divisible by 8 and smaller than 256
-* `K` is a multiple of `swizzle` divided by the bytewidth of element type
+* `N` is divisible by 8 and not greater than 256
+* `K` is a multiple of `swizzle` divided by the operand's element type bytewidth
 
 The currently supported data types are: `jnp.float32`, `jnp.bfloat16` and `jnp.float16`.
 The accumulator `D` must be a `jnp.float32`, with the exception of `jnp.float16` inputs,
@@ -450,18 +454,396 @@ jax.lax.fori_loop(0, num_steps, loop_body, None)
 
 ### Blackwell (`tcgen05`)
 
-While Mosaic GPU supports `tcgen05` MMA instructions, exposing this capability to Pallas
-is still work in progress. Stay tuned!
+The Blackwell generation has significantly redesigned the TensorCore subunit.
+It is now significantly more independent from the regular warp schedulers and
+no longer uses or even supports using registers as its operands. In their place,
+a new memory space called _tensor memory_ (TMEM) has been introduced. What's
+more TensorCores from pairs of SMs can now pool their resources and compute
+larger MMA operations that span both SMs. We call this a ["collective MMA operation"](#collective-mma).
+
+#### Allocating the accumulator / Using TMEM
+
+TMEM references can be allocated in the same way in which all other references
+are allocated---using {py:func}`pl.run_scoped <jax.experimental.pallas.run_scoped>`:
+
+```python
+@functools.partial(pl.run_scoped, tmem_ref=plgpu.TMEM((128, 128), jnp.float32))
+def barrier_scope(tmem_ref):
+  ...
+```
+
+Not all shapes can be allocated in TMEM. Only 2D references are supported, and
+the number of rows (the size of the first dimension) must be 128 or 64 at the
+moment.
+
+What's more, if the data type has a bitwidth smaller than 32-bits, it is necessary
+to declare if the allocation is supposed to be packed (e.g. putting two 16-bit
+elements into a single 32-bit cell in TMEM) or not (with each element padded up
+to 32-bits). MMA accumulators (fp32 or fp16) are never packed, but if the left
+operand it passed in TMEM, it must always be packed:
+
+```python
+@functools.partial(pl.run_scoped,
+                   acc_ref=plgpu.TMEM((128, 128), jnp.float16, packed=False),
+                   lhs_ref=plgpu.TMEM((128, 128), jnp.float16, packed=True))
+def barrier_scope(acc_ref, lhs_ref):
+  plgpu.tcgen05_mma(acc_ref, lhs_ref, rhs_smem_ref, ...)
+  ...
+```
+
+Another interesting complication with TMEM is that all operations on it are asynchronous.
+For that reason, reads and writes using the Python subscript syntax that are normally
+used e.g. for SMEM are not allowed for TMEM.
+
+(tmem-loads)=
+##### Loads
+
+Loads can be performed using {py:func}`plgpu.async_load_tmem <jax.experimental.pallas.mosaic_gpu.async_load_tmem>` and awaited using {py:func}`plgpu.wait_load_tmem <jax.experimental.pallas.mosaic_gpu.wait_load_tmem>`:
+
+```python
+smem_ref[...] = plgpu.async_load_tmem(tmem_ref)
+plgpu.commit_smem()
+plgpu.copy_smem_to_gmem(smem_ref, gmem_ref)
+plgpu.wait_smem_to_gmem(0)
+plgpu.wait_load_tmem()  # Wait for the read to fully complete before we overwrite tmem_ref again.
+```
+
+The load semantics are quite confusing, in that the array returned from the load
+can be safely used without any additional synchronization. However, if the read
+TMEM region is ever overwritten again (e.g. by a store or an MMA operation), the
+thread that issued the load must first call `plgpu.wait_load_tmem()` to ensure
+the program remains race-free.
+
+```{note}
+One way to make peace with this seemingly causality-breaking behavior (data
+arrives in registers before it is fully read from TMEM) is to consider that it
+might be an effect of an interaction of a limitation and a convenience feature
+in the PTX compiler. We don't know if this is true, but at least it makes sense.
+
+The convenience feature is that the compiler can reliably track the usage of
+registers produced by TMEM loads and will insert the minimum number of delays
+necessary to ensure the data arrives from TMEM before it's used. The read
+operation is unrolled into many instructions, meaning that they don't have to
+all be awaited before we start consuming the registers filled in by the first load.
+This is why we don't need to guard the use of the result.
+
+The limitation is that the compiler cannot reliably perform alias analysis on
+TMEM loads and stores, which is why any load and store that is not separated
+by an explicit wait is considered safe to execute concurrently. The alternative
+would unnecessarily pessimize the performance of loads and stores that are truly
+unrelated. This is why we need to explicitly wait before we reuse TMEM again.
+```
+
+##### Stores
+
+Conversely, stores are performed using {py:func}`plgpu.async_store_tmem <jax.experimental.pallas.mosaic_gpu.async_store_tmem>` and awaited using {py:func}`plgpu.commit_tmem <jax.experimental.pallas.mosaic_gpu.commit_tmem>`:
+
+```python
+plgpu.async_store_tmem(tmem_ref, smem_ref[...])
+plgpu.commit_tmem()
+smem_ref2[...] = plgpu.async_load_tmem(tmem_ref)  # Safe to read from tmem_ref now
+```
+
+#### Preparing the `A` and `B` operands
+
+We recommend passing in `A` and `B` through shared memory. In this case the
+[correct tiling and swizzling transforms must be specified](#memory-space-a-b-mma).
+The `A` operand can be passed in as a TMEM reference as well, but it must be packed.
+
+#### Issuing the operation
+
+The supported **non-collective** MMA shapes are such that:
+* `M` is 64 or 128
+* `N` is divisible by 8 and not greater than 512
+* `K` is a multiple of `8 * swizzle` divided by the bitwidth of element type
+
+The supported [**collective** MMA](#collective-mma) shapes are such that:
+* `M` is 128 or 256 (half of that per block)
+* `N` is divisible by 8 and not greater than 256 (not greater than 128 in each block)
+* `K` is a multiple of `8 * swizzle` divided by the bitwidth of element type
+
+The currently supported floating-point data types are: `jnp.bfloat16`,
+`jnp.float16`, `jnp.float8_e5m2`, `jnp.float8_e4m3fn`. The accumulator can be
+a `jnp.float32` or `jnp.float16`, with the exception of `jnp.bfloat16` when it
+must be a `jnp.float32`.
+
+The only currently supported integer data type is `jnp.int8` with a `jnp.int32`
+accumulator.
+
+```{note}
+According to our benchmarks, here are some performance rules-of-thumb:
+
+* Non-collective MMA should always use M=128 and N >= 128.
+  - M=64 causes a significant performance drop.
+  - N=64 causes a noticeable performance drop, but not as significant as M=64.
+* Collective MMA is always reasonably fast, but not faster than non-collective MMA.
+  - The biggest benefit from collective MMA is not higher TensorCore throughput
+    but the ability to share data between SMs, allowing to increase the arithmetic
+    intensity of the kernel.
+* Swizzle and transposes do not seem to affect performance in a significant way.
+```
+
+#### Waiting for the operation to complete
+
+Awaiting the result of a {py:func}`plgpu.tcgen05_mma <jax.experimental.pallas.mosaic_gpu.tcgen05_mma>`
+call requires the use of a `Barrier`. We recommend reading through the reference
+documentation for [`Barrier`s](#barrier), and especially its
+[Blackwell-related subsection](#awaiting-tcgen05-instructions) for more information.
+
+If the barrier is passed in directly to
+the {py:func}`plgpu.tcgen05_mma <jax.experimental.pallas.mosaic_gpu.tcgen05_mma>`,
+completing a wait on that barrier will indicate that the final accumulator has
+been written to TMEM. For example:
+
+```python
+@functools.partial(pl.run_scoped, barrier_ref=plgpu.Barrier(orders_tensor_core=True))
+def barrier_scope(barrier_ref):
+  plgpu.tcgen05_mma(acc_tmem, lhs_ref, rhs_ref, barrier_ref, accumulate=False)
+  plgpu.barrier_wait(barrier_ref)
+  # We can read the result now.
+  result = plgpu.async_load_tmem(acc_tmem)
+  ...
+```
+
+If no barrier is given to {py:func}`plgpu.tcgen05_mma <jax.experimental.pallas.mosaic_gpu.tcgen05_mma>`,
+its completion will be tracked only once {py:func}`plgpu.tcgen05_commit <jax.experimental.pallas.mosaic_gpu.tcgen05_commit>` is called:
+
+```python
+@functools.partial(pl.run_scoped, barrier_ref=plgpu.Barrier(orders_tensor_core=True))
+def barrier_scope(barrier_ref):
+  plgpu.tcgen05_mma(acc_tmem, lhs_ref, rhs_ref, accumulate=False)
+  plgpu.tcgen05_mma(acc_tmem, lhs_ref2, rhs_ref2)
+  plgpu.tcgen05_commit(barrier_ref)
+  plgpu.barrier_wait(barrier_ref)
+  # We can read the result now. Both MMAs have completed.
+  result = plgpu.async_load_tmem(acc_tmem)
+  ...
+```
+
+(collective-mma)=
+#### Collective MMA
+
+The Blackwell generation gains a new way to perform MMA operations, where the
+TensorCores of 2 SMs in a cluster collaborate on a single MMA operation. The
+`B` operand from each SM is shared with the other. The `D` and `A` operands are
+local to each SM and not shared.
+
+<center><img alt="A diagram showing the partitioning of operands in a collective MMA" src="../../_static/pallas/gpu/collective_mma.svg" style="width:60%; min-width: 600px;"></center>
+
+This means that to perform a collective MMA with shape M, N, and K, the operands
+in each of the two Pallas threads should be of sizes: `(M // 2, K)` for `A`,
+`(K, N // 2)` for `B` and `(M // 2, N)` for `D` (the accumulator). Stacking the
+two accumulators on top would recover the result of performing a MxNxK matrix
+multiplication.
+
+To make loading of the `B` operand easier, {py:func}`plgpu.copy_gmem_to_smem <jax.experimental.pallas.mosaic_gpu.copy_gmem_to_smem>`
+can be used together with `collective_axes` and `partitioned_axis` to indicate
+that the two Pallas threads along the collective axis should load the same slice,
+but each will only obtain half of it. Unlike a copy with `collective_axes` alone
+it does not utilize TMA multicast (since each thread loads a distinct slice of
+data), but it can simplify the indexing logic a bit.
+
+```python
+plgpu.copy_gmem_to_smem(
+    b_gmem,  # [K, N]
+    b_smem,  # [K, N // 2]
+    b_tma_barrier,
+    collective_axes="x",
+    partitioned_axis=1,
+)
+```
 
 ## Using `core_map`
 
-TODO
+`pl.pallas_call` is suitable for kernels where a single Pallas thread can
+perform the whole computation for an entire CUDA block. The `pl.core_map`
+function relaxes this restriction, allowing for using multiple threads within a
+single block (e.g. for warp specialization) or across multiple blocks in a block
+cluster (e.g. to utilize multicast TMA).
+
+### Replacing `pl.pallas_call` with `pl.core_map` or `plgpu.kernel`
+
+Let us begin with a simple Pallas kernel that increments an array:
+
+```python
+@functools.partial(
+  pl.pallas_call,
+  grid=(2,),
+  in_specs=[pl.BlockSpec(block_shape=(128,), index_map=lambda i: (i,))],
+  out_specs=pl.BlockSpec(block_shape=(128,), index_map=lambda i: (i,)),
+  out_shape=jax.ShapeDtypeStruct((256,), jnp.float32), # Total output shape
+)
+def run_kernel(x_ref, y_ref):
+  # x_ref and y_ref are in SMEM!
+  y_ref[...] = x_ref[...] + 1
+
+x = jnp.arange(256, dtype=jnp.float32)
+y = run_kernel(x)
+np.testing.assert_array_equal(y, x + 1)
+```
+
+We can write a similar kernel using `pl.core_map`. One big difference is that
+unlike `pl.pallas_call`, no GMEM<->SMEM copies will be inserted automatically.
+If you want them, you can either insert them yourself or use the
+{py:func}`plgpu.emit_pipeline <jax.experimental.pallas.mosaic_gpu.emit_pipeline>`
+helper. We recommend reviewing the [software pipelining guide](./pipelining.md).
+
+```python
+@pl.run_state
+def run_kernel(refs):
+  x_ref, y_ref = refs
+  # Here, we're not in the kernel yet! pl.run_state simply changes the JAX
+  # immutable arrays into mutable GMEM (not SMEM!) references.
+
+  # Define the mesh: 2 CUDA blocks over 1 axis called "x"
+  mesh = plgpu.Mesh(grid=(2,), grid_names=("x",))
+
+  @pl.core_map(mesh)  # core_map executes the body
+  def kernel_body():
+    # Once we enter the pl.core_map scope, we are in the body of the kernel.
+    block_slice = pl.ds(jax.lax.axis_index("x") * 128, 128)
+    y_ref[block_slice] = x_ref[block_slice] + 1
+
+x = jnp.arange(256, dtype=jnp.float32)
+y_init = jnp.zeros_like(x)
+_, y = run_kernel((x, y_init))
+np.testing.assert_array_equal(y, x + 1)
+```
+
+While `pl.core_map` is a powerful API, it is also quite low-level and is pretty
+much always used in under `pl.run_state` (to make JAX arrays into refs) or
+`pl.run_scoped` (to allocate for scratch refs). For that reason, we also
+provide a convenience API `plgpu.kernel`:
+
+```python
+@functools.partial(
+    plgpu.kernel,
+    out_shape=jax.ShapeDtypeStruct((256,), jnp.float32),
+    grid=(2,),
+    grid_names=("x",),
+)
+def run_kernel(x_ref, y_ref):
+  # x_ref and y_ref are in GMEM!
+  block_slice = pl.ds(jax.lax.axis_index("x") * 128, 128)
+  y_ref[block_slice] = x_ref[block_slice] + 1
+
+x = jnp.arange(256, dtype=jnp.float32)
+y = run_kernel(x)  # No need to preallocate outputs as in pl.core_map.
+np.testing.assert_array_equal(y, x + 1)
+```
+
+```{note}
+The `plgpu.Mesh` used with `pl.core_map` defines a topology for computation
+*within a single GPU*, specifying how work is distributed across CUDA blocks
+(the `grid`), Pallas threads within a block (`num_threads`), and potentially
+CUDA block clusters (`cluster`). This is analogous to how `jax.sharding.Mesh`
+defines a topology for distributed computation *across multiple devices* in JAX.
+Both involve SPMD programs executing across the defined topology. Furthermore,
+you can run "collectives" over the Pallas threads and cluster (e.g., using
+`plgpu.ClusterBarrier` or collective async copies), similar to how JAX
+collectives (`psum`, `all_gather`, etc.) operate across devices in a JAX `Mesh`.
+Both also use named axes, and `jax.lax.axis_index(axis_name)` can be used to get
+a thread's or block's coordinate.
+```
+
+### Using multiple Pallas threads per CUDA block
+
+Below, you can find an example of two Pallas threads within a single block
+synchronizing through a barrier and even exchanging data through SMEM.
+
+```python
+x = jnp.arange(128, dtype=jnp.float32)
+
+@functools.partial(
+    plgpu.kernel,
+    out_shape=x,
+    scratch_shapes=dict(
+        smem_ref=plgpu.SMEM(x.shape, x.dtype),
+        barrier_ref=plgpu.Barrier(),
+    ),
+    num_threads=2,
+    thread_name="pallas_thread",
+)
+def run_kernel(x_ref, y_ref, smem_ref, barrier_ref):
+  thread_id = jax.lax.axis_index("pallas_thread")
+
+  @pl.when(thread_id == 0)
+  def producer_thread():
+    smem_ref[...] = x_ref[...] + 1
+    plgpu.barrier_arrive(barrier_ref)  # Signal the consumer thread
+
+  @pl.when(thread_id == 1)
+  def consumer_thread():
+    plgpu.barrier_wait(barrier_ref)  # Wait for the producer thread
+    out_ref[...] = smem_ref[...] + 1
+
+y = run_kernel(x)  # There's no need to preallocate the input anymore.
+np.testing.assert_array_equal(y, x + 2)
+```
+
+While this example is simple, you can find a more complicated example in the
+[synchronization section](#cross-thread-synchronization).
+
+Multiple threads are frequently used in high-performance kernels such as the
+latest flash attention variants or ping-pong matrix multiplication. In both of
+those, there are 2 compute threads in the program that use the SM's ALU
+and TensorCore in an alternating fashion to ensure no execution conflicts.
+
+Another common technique is to allocate one Pallas thread and devote it entirely
+to scheduling asynchronous copies for data consumed by other threads. While
+implementing this scheme from scratch can be complicated, we provide a
+convenient helper API: `plgpu.emit_pipeline_warp_specialized`.
+
+### Using CUDA block clusters
+
+The kernel below launches a single cluster of 2 CUDA blocks and uses the TMA
+multicast feature to collectively perform a copy of GMEM into SMEM of both
+blocks. All blocks participating in the collective copy must schedule the exact
+same copy for the program to be valid.
+
+```python
+@functools.partial(
+    plgpu.kernel,
+    out_shape=jax.ShapeDtypeStruct((2, 128), jnp.float32),
+    scratch_shapes=dict(
+        smem_ref=plgpu.SMEM((128,), jnp.float32),
+        barrier_ref=plgpu.Barrier(),
+    ),
+    cluster=(2,),
+    cluster_names=("cluster",),
+)
+def run_kernel(x_ref, y_ref, smem_ref, barrier_ref):
+  # Specifying collective_axes will enable TMA multicast automatically.
+  plgpu.copy_gmem_to_smem(x_ref, smem_ref, barrier_ref, collective_axes="cluster")
+  plgpu.barrier_wait(barrier_ref)
+  plgpu.copy_smem_to_gmem(smem_ref, o_ref.at[jax.lax.axis_index("cluster")])
+  plgpu.wait_smem_to_gmem(0)
+
+x = jnp.arange(128, dtype=jnp.float32)
+y = run_kernel(x)
+# Each block gets the same data and writes it out.
+np.testing.assert_array_equal(y, jnp.stack([x, x], axis=0))
+```
+
+### Collective allocations in `pl.run_scoped`
+
+When using `pl.core_map` with multiple Pallas threads (i.e., `num_threads > 1`
+in `plgpu.Mesh`), allocations made via `pl.run_scoped` (for SMEM or Barriers)
+must be performed _collectively by all threads_. This is indicated by specifying
+a `collective_axis` argument to the `run_scoped`, which has two effects:
+1. it promises that all threads will call the same allocation, and
+2. all threads will receive the exact same allocation.
+
+If collective_axes is not specified or does not include the Pallas thread axis,
+each thread would get its own private copy of the scratch variable. This is
+usually undesired and not supported at the moment.
 
 ## Synchronization structures and primitives
 
 In this section, we go over the most important functions and data structures
 used for synchronization between threads and also some asynchronous operations.
 
+(commit-smem)=
 ### `commit_smem`
 
 Regular reads/writes to references are guaranteed to produce values consistent
@@ -489,10 +871,19 @@ plgpu.commit_smem()
 plgpu.wgmma(smem_ref, ...)
 ```
 
+This explicit synchronization is also required in the other direction, for
+example:
+```python
+v = plgpu.load(smem_ref, ())
+plgpu.commit_smem()
+plgpu.copy_gmem_to_smem(..., smem_ref, ...)
+```
+
 Failing to call this function is likely to cause subtle data races, due to those asynchronous
 hardware units reading stale data from SMEM. Unfortunately, this function is relatively expensive,
 which is why we rely on you, the user, to insert it in the minimal number of places where it's necessary.
 
+(barrier)=
 ### `Barrier`
 
 This is essentially a thin wrapper around an array of PTX `mbarrier` types and is
@@ -506,8 +897,6 @@ To block a thread until a barrier completes, use the following function:
 ```python
 plgpu.barrier_wait(barrier)
 ```
-
-There are three operations that can complete a barrier:
 
 ```{warning}
 It is critical to ensure that the synchronization scheme makes it impossible for two
@@ -536,12 +925,15 @@ some thread, it must observe every single completion of that barrier (by waiting
 Note that the `Barrier` can receive arrivals from any source, without restrictions.
 ```
 
+There are three operations that can complete a barrier:
+
 #### Asynchronous GMEM-to-SMEM copies
 
 When an asynchronous GMEM-to-SMEM copy is being executed by the TMA engine, it will
 post progress updates to the barrier given to `plgpu.copy_gmem_to_smem`. Once the copy
 is complete, the barrier will complete one arrival as well.
 
+(cross-thread-synchronization)=
 #### Explicit arrival (cross-thread synchronization)
 
 Any thread can explicitly arrival on a barrier using the following function:
@@ -581,10 +973,42 @@ def thread1_body(i, _):
 pl.when(tid == 1)(lambda: jax.lax.fori_loop(0, steps, thread1_body, None))
 ```
 
+(awaiting-tcgen05-instructions)=
 #### Awaiting `tcgen05` TensorCore instructions
 
-While Mosaic GPU supports `tcgen05` MMA instructions, exposing this capability to Pallas
-is still work in progress. Stay tuned!
+Before we begin, an important warning:
+
+```{warning}
+On Blackwell generation of GPUs, `Barrier` operations by default have relaxed
+semantics with respect to the TensorCore operations. This means that by default
+any TensorCore-related operation (including TMEM operation) can be moved by the
+compiler _after a barrier signal_. Similarly, any TensorCore-related operation
+can be moved _before a barrier wait_.
+
+If you mean to use `Barrier`s to indicate to other threads that a TensorCore
+operation is complete, allocate the barrier with `orders_tensor_core=True`. This
+argument will insert the necessary instructions to prevent the problematic
+reordering mentioned above.
+```
+
+Unlike in older GPUs, the only way to observe the completion of
+Blackwell-generation TensorCore instructions is to pass in a `Barrier` reference
+to the {py:func}`plgpu.tcgen05_mma <jax.experimental.pallas.mosaic_gpu.tcgen05_mma>`
+function. Once the MMA is complete, the TensorCore will arrive on the barrier.
+
+Note that this use of `Barrier`s requires that they are created with
+`orders_tensor_core=True`, since they are used to synchronize with TensorCore
+operations.
+
+```python
+@functools.partial(pl.run_scoped, barrier_ref=plgpu.Barrier(orders_tensor_core=True))
+def barrier_scope(barrier_ref):
+  plgpu.tcgen05_mma(acc_tmem, lhs_ref, rhs_ref, barrier_ref, accumulate=False)
+  plgpu.barrier_wait(barrier_ref)
+  # We can read the result now
+  result = plgpu.async_load_tmem(acc_tmem)
+  ...
+```
 
 ### `ClusterBarrier`
 
@@ -593,6 +1017,88 @@ TODO
 ### `Semaphore`
 
 TODO
+
+## Cluster launch control
+
+[Cluster launch control](https://docs.nvidia.com/cutlass/media/docs/cpp/blackwell_cluster_launch_control.html#blackwell-cluster-launch-control)
+is a feature introduced in Blackwell GPUs (SM100A+) that enables work stealing
+or dynamic scheduling of the CUDA grid. This allows an SM
+(or cluster of SMs) that has finished its work to cancel the launch of block
+intended for another SM and execute the work for itself. The end result is
+that load balancing across SMs is improved and you should see better utilization
+of the GPU towards the tail end of a kernel. Mosaic GPU exposes both the
+low-level cluster launch control commands as well as a helper API that abstracts
+away most of the implementation details.
+
+### Directly using the cluster launch control API
+
+Mosaic GPU directly exposes the low-level cluster launch control API as two
+functions: {py:func}`plgpu.try_cluster_cancel <jax.experimental.pallas.mosaic_gpu.try_cluster_cancel>`
+and {py:func}`plgpu.query_cluster_cancel <jax.experimental.pallas.mosaic_gpu.query_cluster_cancel>`.
+`try_cluster_cancel` is an asynchronous operation that will atomically attempt
+to cancel the launch of an available block, and place the result in a Ref.
+The result Ref should be a scratch Ref allocated via
+`plgpu.TryClusterCancelResult()` (which under the hood is a 16-byte SMEM Ref).
+ `query_cluster_cancel` will read the result and return two
+values: a tuple containing the indices of the grid axes that were requested,
+and a boolean indicating whether the cancellation was successful. If
+`query_cluster_cancel` was not successful, then the result of the grid indices
+is undefined and should not be used.
+
+When used with clusters, all blocks within the same cluster will receive the
+same result from `query_cluster_cancel`.
+
+The following example demonstrates how to call these with a kernel:
+```python
+@functools.partial(
+    plgpu.kernel,
+    grid=grid,
+    grid_names=grid_names,
+    scratch_shapes=dict(
+        result_ref=plgpu.TryCancelResultRef(),
+        barrier_ref=plgpu.Barrier()
+    )
+)
+def kernel(result_ref, barrier_ref):
+  plgpu.try_cluster_cancel(result_ref, barrier_ref)
+  # ... do work
+  plgpu.barrier_wait(barrier_ref)
+  grid_idxs, success = plgpu.query_cluster_cancel(result_ref, grid_names)
+```
+```{warning}
+It is important to ensure proper synchronization on all threads throughout the
+cluster. In most cases when canceling multiple blocks, you may need to
+double-buffer the result and barrier to ensure no race conditions occur. For
+this reason we recommend using the {py:func}`plgpu.dynamic_scheduling_loop <jax.experimental.pallas.mosaic_gpu.dynamic_scheduling_loop>`
+helper function.
+```
+
+### Using the `plgpu.dynamic_scheduling_loop` helper
+
+A common pattern when using dynamic work scheduling is to continuously poll
+and execute work within the kernel body until there are no more work left, and
+then exit the kernel. The {py:func}`plgpu.dynamic_scheduling_loop <jax.experimental.pallas.mosaic_gpu.dynamic_scheduling_loop>`
+helper function implements exactly this pattern.
+
+```python
+@plgpu.dynamic_scheduling_loop(
+  grid_names=grid_names,
+  thread_axis=thread_name  # Required if using multiple threads in a kernel.
+)
+def body(loop_info):
+  grid_indices = loop_info.index
+  # ... do work
+```
+
+When using this pattern, the kernel should be instantiated with a grid
+equal to the logical amount of work to be done (as opposed to a persistent
+kernel where the grid is set to the number of cores). Each core running
+this loop will continuously query the next available block of work and
+the loop will terminate when the entire grid has been scheduled.
+The signature of the body function is identical to the one used in
+{py:func}`plgpu.nd_loop <jax.experimental.pallas.mosaic_gpu.nd_loop>` (which
+is used for normal persistent kernels) and takes in a `loop_info` dataclass
+that contains iteration info, and optionally supports carry values.
 
 ## Asynchronous copies
 
@@ -605,3 +1111,30 @@ TODO
 ## Compiler parameters
 
 TODO
+
+## Debugging
+
+Mosaic GPU exposes a number of environment variables to diagnose issues with the
+generated low-level code:
+
+* `MOSAIC_GPU_DUMP_PTXAS` allows dumping the compilation logs from `ptxas` to
+  standard output when set;
+* `MOSAIC_GPU_DUMP_PTX` allows dumping the PTX code generated during compilation
+  to standard output when set;
+* `MOSAIC_GPU_DUMP_MLIR_PASSES` allows dumping the IR after every MLIR pass
+  in the compilation pipeline to standard output;
+* `MOSAIC_GPU_DUMP_SASS` allows dumping the SASS code produced at the end of
+  compilation to standard output;
+* `MOSAIC_GPU_DUMP_SASS_CTRL` allows dumping the SASS control codes following
+  [NervanaSystems/maxas](https://github.com/NervanaSystems/maxas) to standard
+  output;
+* `MOSAIC_GPU_DUMP_TO` allows specifying a directory path (that must exist)
+  where all of the above will be dumped as files.
+* `MOSAIC_GPU_LLVM_DEBUG_ONLY` allows specifying a comma-separated list of
+  [LLVM debug types](https://llvm.org/docs/ProgrammersManual.html#fine-grained-debug-info-with-debug-type-and-the-debug-only-option),
+  in order to produce relevant LLVM debugging logs. This environment variable is
+  only available in debug builds (i.e. builds without `NDEBUG`).
+* `MOSAIC_GPU_DUMP_LLVM` allows dumping LLVM IR when set. It is equivalent to
+  setting `MOSAIC_GPU_LLVM_DEBUG_ONLY=serialize-to-llvm`, and both environment
+  variables compose. Like `MOSAIC_GPU_LLVM_DEBUG_ONLY`, this environment
+  variable is only available in debug builds.

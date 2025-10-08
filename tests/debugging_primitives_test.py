@@ -22,6 +22,7 @@ from jax import lax
 from jax.experimental import pjit
 from jax.interpreters import pxla
 from jax._src import ad_checkpoint
+from jax._src import config
 from jax._src import debugging
 from jax._src import dispatch
 from jax._src import test_util as jtu
@@ -90,9 +91,7 @@ class DebugCallbackTest(jtu.JaxTestCase):
 
     def mean(forest):
       norm = 1.0 / len(forest)
-      add = lambda a, b: a + b
-      m = norm * functools.reduce(add, forest)
-      return m
+      return norm * sum(forest)
 
     post_mean = mean(tuple(run(x) for x in inputs))
     jax.block_until_ready(post_mean)  # This shouldn't deadlock.
@@ -442,8 +441,6 @@ class DebugPrintTransformationTest(jtu.JaxTestCase):
     with jtu.capture_stdout() as output:
       jax.linear_transpose(f, 1.)(1.)
       jax.effects_barrier()
-    # `debug_print` should be dropped by `partial_eval` because of no
-    # output data-dependence.
     self.assertEqual(output(), "")
 
   @jtu.sample_product(ordered=[False, True])
@@ -786,6 +783,7 @@ class DebugPrintControlFlowTest(jtu.JaxTestCase):
       b3: 2
       """))
 
+
 @jtu.thread_unsafe_test_class()  # printing isn't thread-safe
 class DebugPrintParallelTest(jtu.JaxTestCase):
 
@@ -797,12 +795,20 @@ class DebugPrintParallelTest(jtu.JaxTestCase):
     self.assertDictEqual(_count(text1.split("\n")), _count(text2.split("\n")))
 
   def test_ordered_print_not_supported_in_pmap(self):
-
     @jax.pmap
     def f(x):
       debug_print("{}", x, ordered=True)
-    with self.assertRaisesRegex(
-        ValueError, "Ordered effects not supported in `pmap`."):
+    if config.pmap_shmap_merge.value:
+      if jax.device_count() == 1:
+        self.skipTest("This test won't raise with 1 device.")
+      if jtu.device_under_test() == "gpu":
+        self.skipTest("Test does not raise under GPU.")
+      if jtu.device_under_test() == "tpu" and jtu.get_tpu_version() > 3:
+        self.skipTest("Test does not raise under TPU v4+.")
+      regex = "The following ordered effects are not supported for more than 1 device:*"
+    else:
+      regex = "Ordered effects not supported in `pmap`."
+    with self.assertRaisesRegex(ValueError, regex):
       f(jnp.arange(jax.local_device_count()))
 
   def test_unordered_print_works_in_pmap(self):
