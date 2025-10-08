@@ -121,7 +121,7 @@ rich==14.0.0
     # via -r build/test-requirements.txt
 scipy==1.15.2
     # via -r build/requirements.in
-setuptools==80.0.0
+setuptools==78.1.1
     # via
     #   -r build/requirements.in
     #   -r build/test-requirements.txt
