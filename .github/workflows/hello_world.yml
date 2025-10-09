@@ -5,7 +5,7 @@ on:
       - main
 jobs:
   hello_world_job:
-    runs-on: linux-x86-n4-16
+    runs-on: linux-arm64-t2a-16
     steps:
     - name: Say hello
       run: echo "Hello, world!"
