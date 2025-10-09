@@ -3,6 +3,12 @@ on:
   pull_request:
     branches:
       - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+
+permissions: {}
+
 jobs:
   hello_world_job:
     runs-on: linux-arm64-t2a-16
