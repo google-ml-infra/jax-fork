@@ -1,0 +1,11 @@
+name: Hello World
+on:
+  pull_request:
+    branches:
+      - main
+jobs:
+  hello_world_job:
+    runs-on: linux-x86-n4-16
+    steps:
+    - name: Say hello
+      run: echo "Hello, world!"
