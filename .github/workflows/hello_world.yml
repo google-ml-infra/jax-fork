@@ -33,7 +33,7 @@ jobs:
         uses: actions/checkout@v4
       - name: Simulate testing
         run: |
-          echo "Running tests......"
+          echo "Running tests......."
           sleep 15
           echo "Tests complete."
           exit 1
