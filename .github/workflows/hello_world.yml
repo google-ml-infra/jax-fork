@@ -14,5 +14,5 @@ jobs:
     runs-on: linux-arm64-t2a-16
     container: 'us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build-arm64:latest'
     steps:
-    - name: Say hello
-      run: echo "Hello, world"
+- name: Say hello
+  run: echo "Hello, world"
