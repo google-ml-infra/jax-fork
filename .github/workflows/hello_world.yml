@@ -45,6 +45,6 @@ deploy:
       uses: actions/checkout@v4
     - name: Simulate deployment
       run: |
-        echo "Deploying to staging..."
+        echo "Deploying to staging...."
         sleep 5
         echo "Deployment complete."
