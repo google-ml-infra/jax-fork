@@ -4,6 +4,7 @@ on:
     branches:
       - main
   workflow_dispatch: # allows triggering the workflow run manually
+  workflow_call:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
@@ -31,6 +32,12 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+      - name: Intermediate step
+        run: |
+          echo "Running tests........"
+          sleep 15
+          echo "Tests complete."
+          exit 1
       - name: Simulate testing
         run: |
           echo "Running tests........"

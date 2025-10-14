@@ -1,0 +1,17 @@
+name: Culprit Finder Workflow
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+
+permissions: {}
+
+jobs:
+  bisect-step:
+    runs-on: linux-arm64-t2a-16
+    container: 'us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build-arm64:latest'
+    steps:
+      - name: Call the Reusable CI Workflow
+        uses: ./.github/workflows/hello_world.yml
