@@ -37,22 +37,8 @@ jobs:
           echo "Running tests........"
           sleep 15
           echo "Tests complete."
-          exit 1
       - name: Simulate testing
         run: |
           echo "Running tests........"
           sleep 15
           echo "Tests complete."
-          exit 1
-
-  deploy:
-    runs-on: linux-arm64-t2a-16
-    container: 'us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build-arm64:latest'
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      - name: Simulate deployment
-        run: |
-          echo "Deploying to staging........"
-          sleep 5
-          echo "Deployment complete."
