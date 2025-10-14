@@ -6,9 +6,6 @@ on:
   workflow_dispatch: # allows triggering the workflow run manually
   workflow_call:
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
-
 permissions: {}
 
 jobs:
