@@ -13,7 +13,7 @@ on:
         description: 'Should this workflow run wait for a remote connection?'
         type: choice
         required: true
-        default: 'no'
+        default: 'yes'
         options:
           - 'yes'
           - 'no'
