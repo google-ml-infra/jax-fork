@@ -1,0 +1,22 @@
+name: Testing
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch: # allows triggering the workflow run manually
+  workflow_call:
+
+permissions: {}
+
+jobs:
+  test:
+    runs-on: linux-x86-g2-16-l4-1gpu-quoct
+    container: 'us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build-arm64:latest'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Simulate build
+        run: |
+          echo "Building the project..."
+          sleep 100
+          echo "Build complete."
