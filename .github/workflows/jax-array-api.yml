@@ -24,7 +24,7 @@ concurrency:
 permissions: {}
 jobs:
   build:
-    runs-on: linux-x86-g2-16-l4-1gpu-quoct
+    runs-on: linux-x86-n2-64-dev
     container: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build:latest
     strategy:
       matrix:
