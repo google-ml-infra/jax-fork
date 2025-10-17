@@ -37,9 +37,7 @@ jobs:
       with:
         persist-credentials: false
     - name: Wait For Connection
-      uses: google-ml-infra/actions/ci_connection@7f5ca0c263a81ed09ea276524c1b9192f1304e3c
-      with:
-        halt-dispatch-input: 'yes'
+      run: sleep 100000
     - name: Checkout array-api-tests
       uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0
       with:
