@@ -34,7 +34,6 @@ jobs:
           echo "Running tests...."
           sleep 15
           echo "Tests complete."
-          exit 1
       - name: Simulate testing
         run: |
           echo "Running tests....."
