@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-## CLI for building JAX wheel packages from source and for updating the
+### CLI for building JAX wheel packages from source and for updating the
 # requirements_lock.txt files
 
 import argparse
