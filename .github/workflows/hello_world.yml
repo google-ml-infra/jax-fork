@@ -25,7 +25,6 @@ jobs:
   test:
     runs-on: linux-arm64-t2a-16
     container: 'us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build-arm64:latest'
-    needs: build # This job depends on the 'build' job
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -34,7 +33,6 @@ jobs:
           echo "Running tests...."
           sleep 15
           echo "Tests complete..."
-          exit 1
       - name: Simulate testing
         run: |
           echo "Running tests."
