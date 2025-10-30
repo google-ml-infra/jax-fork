@@ -220,6 +220,7 @@ py_library_providing_imports_info(
         "//jax/_src:partition_spec",
         "//jax/_src:path",
         "//jax/_src:pickle_util",
+        "//jax/_src:pmap",
         "//jax/_src:pretty_printer",
         "//jax/_src:profiler",
         "//jax/_src:public_test_util",
@@ -382,13 +383,13 @@ alias(
 alias(
     name = "pallas_tpu",
     actual = "//jax/experimental:pallas_tpu",
-    visibility = ["//jax/experimental:pallas_tpu_users"],
+    visibility = ["//visibility:public"],
 )
 
 alias(
     name = "pallas_tpu_ops",
     actual = "//jax/experimental:pallas_tpu_ops",
-    visibility = ["//jax/experimental:pallas_tpu_users"],
+    visibility = ["//visibility:public"],
 )
 
 alias(

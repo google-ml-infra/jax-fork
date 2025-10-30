@@ -38,7 +38,7 @@ from jax._src import dtypes
 from jax._src import config
 from jax._src import effects
 from jax._src import mesh as mesh_lib
-from jax._src.mesh import AxisType, get_concrete_mesh
+from jax._src.mesh import AxisType
 from jax._src.partition_spec import PartitionSpec as P
 from jax._src.errors import (
     ConcretizationTypeError, TracerArrayConversionError, TracerBoolConversionError,
@@ -50,7 +50,7 @@ from jax._src.util import (safe_zip, safe_map, curry, tuple_insert,
                            tuple_delete, cache,
                            HashableFunction, HashableWrapper, weakref_lru_cache,
                            partition_list, StrictABCMeta, foreach,
-                           weakref_cache_key_types)
+                           weakref_cache_key_types, set_module)
 import jax._src.pretty_printer as pp
 from jax._src.named_sharding import NamedSharding
 from jax._src.sharding import Sharding
@@ -1236,6 +1236,7 @@ no_axis_name = object()
 class AxisEnv:
   axis_sizes : dict[AxisName, int]
   spmd_axis_names : set[AxisName]
+  explicit_mesh_axis_names: frozenset[AxisName]
 
   def axis_size(self, axis_name):
     if axis_name not in self.axis_sizes:
@@ -1252,24 +1253,31 @@ class AxisEnv:
   def pop_pure(self, axis_name):
     new_sizes = self.axis_sizes.copy()
     new_sizes.pop(axis_name)
-    return AxisEnv(new_sizes, self.spmd_axis_names)
+    return AxisEnv(new_sizes, self.spmd_axis_names,
+                   self.explicit_mesh_axis_names)
 
   def extend_pure(self, name_size_pairs):
     new_sizes = self.axis_sizes.copy()
     new_sizes.update((name, size) for name, size in name_size_pairs
                     if name is not no_axis_name)
-    return AxisEnv(new_sizes, self.spmd_axis_names)
+    return AxisEnv(new_sizes, self.spmd_axis_names,
+                   self.explicit_mesh_axis_names)
 
   def add_spmd_axis_names(self, axis_names):
     new_spmd_axis_names = self.spmd_axis_names | set(axis_names)
-    return AxisEnv(self.axis_sizes, new_spmd_axis_names)
+    return AxisEnv(self.axis_sizes, new_spmd_axis_names,
+                   self.explicit_mesh_axis_names)
+
+  def add_explicit_mesh_axis_names(self, axis_names):
+    new_ema = self.explicit_mesh_axis_names | frozenset(axis_names)
+    return AxisEnv(self.axis_sizes, self.spmd_axis_names, new_ema)
 
   def as_hashable_key(self):
     return tuple((name, size) for (name, size) in self.axis_sizes.items()
                  if name is not no_axis_name)
 
 eval_trace = EvalTrace()
-top_axis_env = AxisEnv({}, set())
+top_axis_env = AxisEnv({}, set(), frozenset())
 
 class TracingContext(threading.local):
   trace: Trace | None
@@ -1373,6 +1381,24 @@ class AddSpmdAxisNamesContextManager:
     trace_ctx.set_axis_env(self.prev)
 
 add_spmd_axis_names = AddSpmdAxisNamesContextManager
+
+
+class AddExplicitMeshAxisNamesContextManager:
+  __slots__ = ['prev', 'axis_names']
+
+  def __init__(self, axis_names: AxisName | None):
+    self.axis_names = axis_names
+
+  def __enter__(self):
+    self.prev = trace_ctx.axis_env
+    if self.axis_names is not None:
+      trace_ctx.set_axis_env(self.prev.add_explicit_mesh_axis_names(
+          self.axis_names))
+
+  def __exit__(self, exc_type, exc_value, traceback):
+    trace_ctx.set_axis_env(self.prev)
+
+add_explicit_mesh_axis_names = AddExplicitMeshAxisNamesContextManager
 
 
 def get_axis_env():
@@ -1853,6 +1879,7 @@ class QuasiDynamicData:
 
 @dataclass(frozen=True)
 class AvalQDD:
+  is_high = True
   aval: AbstractValue
   qdd: QuasiDynamicData | None # immutable
 
@@ -2066,7 +2093,7 @@ def canonicalize_value(val):
   cur_mesh = mesh_lib.get_abstract_mesh()
   if cur_mesh == aval.sharding.mesh:
     return val
-  # TODO(yashkatariy): Casting to Explicit is not yet allowed. Maybe we need
+  # TODO(yashkatariya): Casting to Explicit is not yet allowed. Maybe we need
   # cast_and_slice_p for it since shape might change?
   # Atleast 1 mesh axis should be Manual and all other axes should be
   # Manual or Auto to allow casting.
@@ -2107,11 +2134,7 @@ def modify_spec_for_auto_manual(spec, mesh) -> P:
           p for p in s if mesh._name_to_type[p] == AxisType.Explicit))
     else:
       new_spec.append(s if mesh._name_to_type[s] == AxisType.Explicit else None)  # type: ignore
-  new_unreduced = {u for u in spec.unreduced
-                   if mesh._name_to_type[u] == AxisType.Explicit}
-  new_reduced = {u for u in spec.reduced
-                 if mesh._name_to_type[u] == AxisType.Explicit}
-  return P(*new_spec, unreduced=new_unreduced, reduced=new_reduced)
+  return P(*new_spec, unreduced=spec.unreduced, reduced=spec.reduced)
 
 def remove_size_one_mesh_axis(spec, mesh) -> P:
   new_spec = []  # type: ignore
@@ -2180,11 +2203,15 @@ def get_sharding(sharding, shape):
   return out_s
 
 
-@cache(max_size=4096, trace_context_in_key=False)
-def get_vma(vma, mesh):
+@cache(max_size=4096,
+       trace_context_in_key=lambda: config.remove_size_one_mesh_axis_from_type.value)
+def get_vma(vma, sharding):
+  mesh = sharding.mesh
+  spec = sharding.spec
   if mesh.empty:
     assert not vma, vma
     return vma
+
   axis_env = get_axis_env()
   for i in vma:
     if axis_env.axis_exists(i) and i not in mesh._name_to_type:
@@ -2193,6 +2220,17 @@ def get_vma(vma, mesh):
       raise ValueError(
           "Axes mentioned in `vma` field of ShapedArray should"
           f" be of type `Manual`. Got axis: {i} of type {mesh._name_to_type[i]}")
+  if config.remove_size_one_mesh_axis_from_type.value:
+    vma = frozenset(i for i in vma if mesh.shape[i] != 1)
+
+  if vma & spec.unreduced:
+    raise ValueError(
+        f"vma and unreduced cannot have common mesh axes. Got {vma=} and"
+        f" unreduced={spec.unreduced}")
+  if vma & spec.reduced:
+    raise ValueError(
+        f"vma and reduced cannot have common mesh axes. Got {vma=} and"
+        f" reduced={spec.reduced}")
   assert isinstance(vma, frozenset)
   return vma
 
@@ -2216,7 +2254,7 @@ class ShapedArray(UnshapedArray):
     self.sharding = get_sharding(sharding, self.shape)
     # short for varying_manual_axes. See docs at
     # https://docs.jax.dev/en/latest/notebooks/shard_map.html#tracking-how-values-vary-over-manual-mesh-axes-and-check-vma-true
-    self.vma = get_vma(vma, self.sharding.mesh)
+    self.vma = get_vma(vma, self.sharding)
     # See description of https://github.com/jax-ml/jax/pull/30556
     self.memory_space = get_memory_space(memory_space)
 
@@ -2324,10 +2362,8 @@ def str_short_aval(shape, dtype, mesh, spec, vma, memory_space,
             f"<{memory_space.name.lower()}>")
   return f'{dt_str}{ms_str}[{shapestr}]{vma_ur}{mesh_axes}'
 
-def _create_str(x, prefix=None):
+def _create_str(x, prefix):
   x_str = f"{','.join(i for i in x)}"
-  if prefix is None:
-    return x_str
   x_str = x_str if len(x) == 1 else f"({x_str})"
   return f"{prefix}:{x_str}, "
 
@@ -2337,12 +2373,11 @@ def order_wrt_mesh(mesh, x):
 def _vma_ur_str(vma, unreduced, reduced, mesh):
   if not vma and not unreduced and not reduced:
     return ''
-  vma_str = f"{{{_create_str(order_wrt_mesh(mesh, vma), None)}}}" if vma else ''
+  vma_str = _create_str(order_wrt_mesh(mesh, vma), 'V') if vma else ''
   ur_str = _create_str(unreduced, 'U') if unreduced else ''
   red_str = _create_str(reduced, 'R') if reduced else ''
-  m_str = f"{ur_str}{red_str}".rstrip(', ')
-  m_str = f"{{{m_str}}}" if m_str else ''
-  return f"{m_str}{vma_str}"
+  m_str = f"{vma_str}{ur_str}{red_str}".rstrip(', ')
+  return f"{{{m_str}}}"
 
 def primal_dtype_to_tangent_dtype(primal_dtype):
   if isinstance(primal_dtype, dtypes.ExtendedDType):
@@ -2359,9 +2394,9 @@ def primal_sharding_to_cotangent_sharding(sharding):
   return sharding.update(spec=primal_spec_to_cotangent_spec(sharding.spec))
 
 def pvary(x, axis_name):
+  axes = (axis_name,) if not isinstance(axis_name, tuple) else axis_name
   if not axis_name:
     return x
-  axes = (axis_name,) if not isinstance(axis_name, tuple) else axis_name
   xs, treedef = tree_flatten(x)
   ys = pvary_p.bind(*xs, axes=axes, axis_index_groups=None)
   return tree_unflatten(treedef, ys)
@@ -2373,23 +2408,32 @@ pvary_p.def_impl(lambda *args, axes, axis_index_groups: args)
 def _pvary_abstract_eval(*args, axes, axis_index_groups):
   if not config._check_vma.value:
     return args
-  if any(a.sharding.spec.unreduced for a in args):
-    raise NotImplementedError('unreduced rule for pvary is not implemented.')
+  check_unreduced_args(args, 'pvary')
   assert isinstance(axes, tuple)
   arg_vma = [a.vma for a in args]
-  # If there is intersection between arg_vma and axes, error
-  if any(set(axes) & a for a in arg_vma):
-    raise ValueError(
-        "Collective pvary must be applied to a "
-        f"non-device-varying type, but got {arg_vma} for collective acting "
-        f"over axis name {axes}. Please open an issue at "
-        "https://github.com/jax-ml/jax/issues, and as a temporary "
-        "workaround pass the check_vma=False argument to `jax.shard_map`")
+  for a in arg_vma:
+    # If there is intersection between arg_vma and axes, error
+    if set(axes) & a:
+      raise ValueError(
+          "pvary is a invariant->variant collective. This means that the axis"
+          " names mentioned in `axes` passed to `pvary` must not be present in"
+          f" `jax.typeof(inp).vma`. Got axes={axes} and"
+          f" jax.typeof(inp).vma={a}")
   return [a.update(sharding=a.sharding.update(mesh=mesh_lib.get_abstract_mesh()),
                    vma=a.vma.union(frozenset(axes)))
           for a in args]
 pvary_p.def_abstract_eval(_pvary_abstract_eval)
 
+def check_unreduced_args(args, name):
+  for a in args:
+    if a.sharding.spec.unreduced:
+      raise ValueError(
+          f"{name} cannot accept args which are unreduced. Got"
+          f" {a.str_short(True)}")
+    if a.sharding.spec.reduced:
+      raise ValueError(
+          f"{name} cannot accept args which are reduced. Got"
+          f" {a.str_short(True)}")
 
 def standard_insert_pvary(*args):
   if not config._check_vma.value:
@@ -2609,7 +2653,7 @@ class Ref(metaclass=RefMeta):
   # some attributes/methods only work for lojax refs
   sharding = property(lambda self: self._refs._buf.sharding)
   format = property(lambda self: self._refs._buf.format)
-  committed = _committed = property(lambda self: self._refs._buf._committed)
+  committed = _committed = property(lambda self: True)
   def unsafe_buffer_pointer(self): return self._refs._buf.unsafe_buffer_pointer()
 
   @property
@@ -2622,7 +2666,6 @@ class ArrayRefImpl:
   def __init__(self, aval, buf):
     from jax._src.state.types import AbstractRef  # pytype: disable=import-error
     assert isinstance(aval, AbstractRef) and isinstance(aval.inner_aval, ShapedArray)
-    assert isinstance(buf, Array)
     self._aval = aval
     self._buf = buf
 
@@ -3011,7 +3054,8 @@ class CallPrimitive(Primitive):
     return self._true_bind(*args, **params)
 
   def bind_with_trace(self, trace, fun_and_args, params):
-    fun, *args = fun_and_args
+    fun = fun_and_args[0]
+    args = fun_and_args[1:]
     return trace.process_call(self, fun, args, params)
 
   def get_bind_params(self, params):
@@ -3317,6 +3361,10 @@ class MutableTypecheckVal:
   aval : AbstractValue
   mutable_qdd : MutableQuasiDynamicData
 
+
+_ref_allocating_primitives = {ref_p}
+
+
 def _check_jaxpr(
     ctx_factory: Callable[[], tuple[JaxprPpContext, JaxprPpSettings]],
     jaxpr: Jaxpr
@@ -3406,7 +3454,7 @@ def _check_jaxpr(
       # Check the computed effect type matches the eqn's annotation, and is
       # included in the jaxpr's annotation.
       if prim.ref_primitive:
-        if prim is ref_p:
+        if prim in _ref_allocating_primitives:
           outvar, = eqn.outvars
           in_idx[outvar] = None  # type: ignore
           mut_arrays.add(outvar)
@@ -3605,6 +3653,7 @@ def _check_map(ctx_factory, prim, in_avals, params):
 
 # ------------------- ShapeDtypeStruct -------------------
 
+@set_module("jax")
 class ShapeDtypeStruct:
   """A container for the shape, dtype, and other static attributes of an array.
 
@@ -3615,7 +3664,7 @@ class ShapeDtypeStruct:
     dtype: a dtype-like object
     sharding: (optional) a :class:`jax.Sharding` object
   """
-  __slots__ = ["shape", "dtype", "sharding", "_dll", "weak_type", "vma",
+  __slots__ = ["shape", "dtype", "_sharding", "_dll", "weak_type", "vma",
                "is_ref"]
 
   def __init__(self, shape, dtype, *, sharding=None, weak_type=False,
@@ -3635,21 +3684,9 @@ class ShapeDtypeStruct:
       raise TypeError(
           "`Layout.AUTO` cannot be used in place of a device-local"
           f" layout in a `ShapeDtypeStruct`. Got {sharding}")
-    if isinstance(sharding, Format):
-      self.sharding = sharding.sharding
-    elif isinstance(sharding, P):
-      # TODO(yashkatariya): Should this be abstract mesh?
-      cur_mesh = get_concrete_mesh()
-      if cur_mesh.empty:
-        raise TypeError(
-            "When specifying PartitionSpec to `ShapeDtypeStruct`, the context"
-            " mesh cannot be empty. Please use `jax.set_mesh` to set"
-            " the mesh context.")
-      self.sharding = NamedSharding(cur_mesh, sharding)
-    else:
-      self.sharding = sharding
-    self._dll = (sharding.layout if isinstance(sharding, Format)
-                 else None)
+    self._sharding = (sharding.sharding if isinstance(sharding, Format)
+                      else sharding)
+    self._dll = sharding.layout if isinstance(sharding, Format) else None
     self.weak_type = weak_type
     if vma is not None and not isinstance(vma, (set, frozenset)):
       raise TypeError(
@@ -3660,6 +3697,21 @@ class ShapeDtypeStruct:
 
   size = property(lambda self: math.prod(self.shape))
   ndim = property(lambda self: len(self.shape))
+
+  @property
+  def sharding(self):
+    if isinstance(self._sharding, P):
+      # TODO(yashkatariya): Maybe use `get_abstract_mesh()` here but switch
+      # on `core.trace_state_clean()`?
+      cur_mesh = mesh_lib.get_concrete_mesh()
+      if cur_mesh.empty:
+        raise TypeError(
+            "When specifying PartitionSpec to `ShapeDtypeStruct`, the context"
+            " mesh cannot be empty. Please use `jax.set_mesh` to set"
+            " the mesh context.")
+      return NamedSharding(cur_mesh, self._sharding)
+    else:
+      return self._sharding
 
   @property
   def format(self):

@@ -165,6 +165,7 @@ pytype_strict_library(
     visibility = ["//jax/experimental:pallas_sc_users"],
     deps = [
         ":core",
+        ":tpu_info",
         "//jax",
         "//jax/_src:core",
         "//jax/_src:lax",
@@ -231,18 +232,12 @@ py_library(
     ],
 )
 
-py_library(
-    name = "interpret",
-    srcs = ["interpret.py"],
+pytype_strict_library(
+    name = "tpu_info",
+    srcs = ["tpu_info.py"],
     deps = [
         ":core",
-        ":primitives",
-        ":verification",
         "//jax",
-        "//jax/_src:core",
-        "//jax/_src:source_info_util",
-        "//jax/_src:util",
-        "//jax/_src/lib",
-        "//jax/_src/pallas",
-    ] + py_deps("numpy"),
+        "//jax/_src:dtypes",
+    ],
 )

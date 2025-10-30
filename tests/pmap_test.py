@@ -559,9 +559,6 @@ class PythonPmapTest(jtu.JaxTestCase):
     assert_allclose(jax_f(lax.pmean)(x), np_f(np.mean)(x))
 
   def testComplexPsum(self):
-    if not jtu.if_cloud_tpu_at_least(2025, 9, 19):
-      raise SkipTest("Test requires cloud TPU fix from 2025-09-18.")
-
     f = self.pmap(lambda x: x - lax.psum(x, 'i'), axis_name='i')
 
     shape = (jax.device_count(), 4 * 2)
@@ -599,6 +596,8 @@ class PythonPmapTest(jtu.JaxTestCase):
   def testAllToAllSplitAxis(self, split_axis, concat_axis):
     if jax.device_count() < 4:
       raise SkipTest("test requires at least four devices")
+    if jtu.device_under_test() == "gpu":
+      raise SkipTest("TODO(b/456133538): Disable on GPUs until we figure out.")
     if config.pmap_shmap_merge.value:
       raise SkipTest("Ignore nested pmap when `pmap_shmap_merge=True`.")
 
@@ -2204,10 +2203,7 @@ class PythonPmapTest(jtu.JaxTestCase):
     save_cos = lambda prim, *_, **__: str(prim) == 'cos'
     f = remat(g, policy=save_cos)
     _, f_vjp = jax.vjp(f, x)
-    if config.vjp3.value:
-      jaxpr = f_vjp.jaxpr
-    else:
-      jaxpr = f_vjp.args[0].func.args[1]
+    jaxpr = f_vjp.jaxpr
     jaxpr_text = str(jaxpr)
     self.assertEqual(jaxpr_text.count(' sin '), 0)
     self.assertEqual(jaxpr_text.count(' cos '), 0)
@@ -2215,10 +2211,7 @@ class PythonPmapTest(jtu.JaxTestCase):
     save_sin = lambda prim, *_, **__: str(prim) == 'sin'
     f = remat(g, policy=save_sin)
     _, f_vjp = jax.vjp(f, x)
-    if config.vjp3.value:
-      jaxpr = f_vjp.jaxpr
-    else:
-      jaxpr = f_vjp.args[0].func.args[1]
+    jaxpr = f_vjp.jaxpr
     jaxpr_text = str(jaxpr)
     self.assertEqual(jaxpr_text.count(' sin '), 0)
     self.assertEqual(jaxpr_text.count(' cos '), 2)
@@ -2226,10 +2219,7 @@ class PythonPmapTest(jtu.JaxTestCase):
     save_nothing = lambda prim, *_, **__: False
     f = remat(g, policy=save_nothing)
     _, f_vjp = jax.vjp(f, x)
-    if config.vjp3.value:
-      jaxpr = f_vjp.jaxpr
-    else:
-      jaxpr = f_vjp.args[0].func.args[1]
+    jaxpr = f_vjp.jaxpr
     jaxpr_text = str(jaxpr)
     self.assertEqual(jaxpr_text.count(' sin '), 1)
     self.assertEqual(jaxpr_text.count(' cos '), 2)
@@ -2324,6 +2314,13 @@ class PmapShmapMergeTest(jtu.JaxTestCase):
     aval = core.ShapedArray((1,), jnp.float32)
     expected_args_info = (((stages.ArgInfo(aval, donated=False), (),),),{},)
     self.assertEqual(shmap_lowered.args_info, expected_args_info)  # doesn't crash
+
+  @config.pmap_shmap_merge(True)
+  def test_wrapped(self):
+    f = lambda x: x
+    g = jax.pmap(f)
+    self.assertTrue(hasattr(g, '__wrapped__'))
+    self.assertEqual(g.__wrapped__, f)
 
 
 @jtu.pytest_mark_if_available('multiaccelerator')

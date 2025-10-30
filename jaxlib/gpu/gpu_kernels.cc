@@ -44,6 +44,8 @@ XLA_FFI_REGISTER_HANDLER(XLA_FFI_GetApi(), "cusolver_csrlsvqr_ffi", "CUDA",
                          CsrlsvqrFfi);
 XLA_FFI_REGISTER_HANDLER(XLA_FFI_GetApi(), "cusolver_orgqr_ffi", "CUDA",
                          OrgqrFfi);
+XLA_FFI_REGISTER_HANDLER(XLA_FFI_GetApi(), "cusolver_potrf_ffi", "CUDA",
+                         PotrfFfi);
 XLA_FFI_REGISTER_HANDLER(XLA_FFI_GetApi(), "cusolver_syevd_ffi", "CUDA",
                          SyevdFfi);
 XLA_FFI_REGISTER_HANDLER(XLA_FFI_GetApi(), "cusolver_sytrd_ffi", "CUDA",
@@ -52,6 +54,8 @@ XLA_FFI_REGISTER_HANDLER(XLA_FFI_GetApi(), "cusolver_gesvd_ffi", "CUDA",
                          GesvdFfi);
 XLA_FFI_REGISTER_HANDLER(XLA_FFI_GetApi(), "cusolver_gesvdj_ffi", "CUDA",
                          GesvdjFfi);
+XLA_FFI_REGISTER_HANDLER(XLA_FFI_GetApi(), "cusolver_gesvdp_ffi", "CUDA",
+                         GesvdpFfi);
 
 XLA_FFI_REGISTER_HANDLER(XLA_FFI_GetApi(), "cu_cholesky_update_ffi", "CUDA",
                          CholeskyUpdateFfi);

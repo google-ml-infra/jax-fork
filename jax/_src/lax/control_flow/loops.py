@@ -191,11 +191,12 @@ def scan(f: Callable[[Carry, X], tuple[Carry, Y]],
     reverse: optional boolean specifying whether to run the scan iteration
       forward (the default) or in reverse, equivalent to reversing the leading
       axes of the arrays in both ``xs`` and in ``ys``.
-    unroll: optional positive int or bool specifying, in the underlying
+    unroll: optional non-negative int or bool specifying, in the underlying
       operation of the scan primitive, how many scan iterations to unroll within
       a single iteration of a loop. If an integer is provided, it determines how
       many unrolled loop iterations to run within a single rolled iteration of
-      the loop. If a boolean is provided, it will determine if the loop is
+      the loop. `unroll=0` unrolls the entire loop.
+      If a boolean is provided, it will determine if the loop is
       completely unrolled (i.e. `unroll=True`) or left completely rolled (i.e.
       `unroll=False`).
     _split_transpose: experimental optional bool specifying whether to further
@@ -320,8 +321,8 @@ def scan(f: Callable[[Carry, X], tuple[Carry, Y]],
       "value.")
   if isinstance(unroll, bool):
     unroll = max(length, 1) if unroll else 1
-  if unroll < 1:
-    raise ValueError("`unroll` must be a `bool` or a positive `int`.")
+  if unroll < 0:
+    raise ValueError("`unroll` must be a `bool` or a non-negative `int`.")
 
   # If the body forwards an input carry to an output carry, that input is
   # read-only and can be moved to be a const. Doing so can lead to efficiency
@@ -465,7 +466,10 @@ def _scan_impl(*args, reverse, length, num_consts, num_carry, jaxpr, linear,
   del _split_transpose
   consts, carry, xs_ = split_list(args, [num_consts, num_carry])
   _, y_avals = split_list(jaxpr.out_avals, [num_carry])
-  num_trips, remainder = divmod(length, unroll)
+  if unroll == 0:
+    num_trips, remainder = 0, length
+  else:
+    num_trips, remainder = divmod(length, unroll)
 
   if unroll != 1 and num_trips == 1 and remainder == 0:
     # In that case, we explicitly want to fully unroll the loop. Put everything
@@ -1452,7 +1456,7 @@ def _scan_typecheck(bind_time, *in_atoms, reverse, length, num_consts,
   tc(jaxpr, 'jaxpr', 'ClosedJaxpr', type(jaxpr) is ClosedJaxpr)
   tc(linear, 'linear', 'tuple of bool',
      type(linear) is tuple and all(type(x) is bool for x in linear))
-  tc(unroll, 'unroll', 'positive int', type(unroll) is int and unroll > 0)
+  tc(unroll, 'unroll', 'non-negative int', type(unroll) is int and unroll >= 0)
 
   tc(length, 'length', 'non-negative int', length >= 0)
 
@@ -1505,8 +1509,9 @@ def _scan_state_partial_discharge_rule(
   dus = partial(slicing.dynamic_update_index_in_dim, axis=0, allow_negative_indices=False)
 
   def body(*consts_carry_xs):
-    pure_consts, [i], const_refvals, carry, xs_refvals_, pure_xs = split_list(
+    pure_consts, [i_], const_refvals, carry, xs_refvals_, pure_xs = split_list(
         consts_carry_xs, [num_pure_consts, 1, num_const_refs, num_carry, num_xs_refs])
+    i = length - i_ - 1 if reverse else i_
     xs_refvals = [ds(x, i) for x in xs_refvals_]
     consts = merge_lists(is_ref_const, pure_consts, const_refvals)
     xs = merge_lists(is_ref_xs, pure_xs, xs_refvals)
@@ -1514,7 +1519,7 @@ def _scan_state_partial_discharge_rule(
     carry, ys, const_refvals, xs_updates = split_list_checked(
         outs, [num_carry, num_ys, num_const_refs, num_xs_refs])
     xs_refvals = [dus(x, u, i) for x, u in zip(xs_refvals_, xs_updates)]
-    return [i + 1, *const_refvals, *carry, *xs_refvals, *ys]
+    return [i_ + 1, *const_refvals, *carry, *xs_refvals, *ys]
 
   def rearrange(lst):
     consts, carry, xs = split_list_checked(lst, [num_consts, num_carry, num_xs])

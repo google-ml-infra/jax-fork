@@ -105,6 +105,7 @@ class CompilerParams(pallas_core.CompilerParams):
   disable_bounds_checks: bool = False
   skip_device_barrier: bool = False
   allow_collective_id_without_custom_barrier: bool = False
+  shape_invariant_numerics: bool = True
 
   def __init__(
       self,
@@ -120,6 +121,7 @@ class CompilerParams(pallas_core.CompilerParams):
       disable_bounds_checks: bool = False,
       skip_device_barrier: bool = False,
       allow_collective_id_without_custom_barrier: bool = False,
+      shape_invariant_numerics: bool = True,
   ):
     object.__setattr__(
         self,
@@ -148,6 +150,9 @@ class CompilerParams(pallas_core.CompilerParams):
         self,
         "allow_collective_id_without_custom_barrier",
         allow_collective_id_without_custom_barrier,
+    )
+    object.__setattr__(
+        self, "shape_invariant_numerics", shape_invariant_numerics
     )
 
   # Replace is a method, not a field.
@@ -333,6 +338,7 @@ def _tensorcore_mesh_discharge_rule(
       cost_estimate=cost_estimate,
       name=name,
       metadata=metadata,
+      scratch_shapes=[],
   )
 
 pallas_core._core_map_mesh_rules[TensorCoreMesh] = (
@@ -355,3 +361,8 @@ def get_device_kind() -> str:
   if abstract_device := jax.sharding.get_abstract_mesh().abstract_device:
     return abstract_device.device_kind
   return jex_backend.get_default_device().device_kind
+
+def get_num_device_cores() -> int:
+  if abstract_device := jax.sharding.get_abstract_mesh().abstract_device:
+    return abstract_device.num_cores
+  return jex_backend.get_default_device().num_cores

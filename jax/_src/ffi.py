@@ -19,7 +19,7 @@ import ctypes
 import dataclasses
 import functools
 import os
-from typing import Any, overload
+from typing import Any, TypedDict, NotRequired, overload, TYPE_CHECKING
 
 import numpy as np
 
@@ -29,6 +29,8 @@ from jax._src import effects
 from jax._src import util
 from jax._src import xla_bridge
 from jax._src.hashable_array import HashableArray
+from jax._src.frozen_dict import FrozenDict
+from jax._src.lib import jaxlib_extension_version
 from jax._src.interpreters import ad
 from jax._src.interpreters import batching
 from jax._src.interpreters import mlir
@@ -68,6 +70,20 @@ def register_ffi_target(
                                                 **kwargs)
 
 
+class TypeRegistration(TypedDict):
+  """A dictionary type for registering FFI types.
+
+  Attributes:
+    type_id: A ``PyCapsule`` object containing a pointer to the
+      ``XLA_FFI_TypeId``.
+    type_info: An optional ``PyCapsule`` object containing a pointer to the type
+      ``XLA_FFI_TypeInfo``.
+  """
+
+  type_id: Any
+  type_info: NotRequired[Any]
+
+
 def register_ffi_type_id(
     name: str,
     obj: Any,
@@ -80,7 +96,28 @@ def register_ffi_type_id(
     obj: a ``PyCapsule`` object encapsulating a pointer to the type ID.
     platform: the target platform.
   """
-  return xla_client.register_custom_type_id(name, obj, platform=platform)
+  if TYPE_CHECKING or jaxlib_extension_version >= 381:
+    raise ValueError(
+        "register_ffi_type_id is not supported after jaxlib version 381."
+    )
+  else:
+    return xla_client.register_custom_type_id(name, obj, platform=platform)
+
+def register_ffi_type(
+    name: str,
+    type_registration: TypeRegistration,
+    platform: str = "cpu",
+) -> None:
+  """Registers a custom type for a FFI target.
+
+  Args:
+    name: the name of the type. This name must be unique within the process.
+    type_registration: a ``TypeRegistration`` defining the external type.
+    platform: the target platform.
+  """
+  return xla_client.register_custom_type(
+      name, type_registration, platform=platform
+  )
 
 
 def register_ffi_target_as_batch_partitionable(name: str) -> None:
@@ -549,7 +586,7 @@ def _wrap_kwargs_hashable(kwargs: dict[str, Any]) -> Sequence[tuple[str, Any]]:
     if isinstance(v, np.ndarray):
       hashable_kwargs.append((k, HashableArray(v)))
     elif isinstance(v, dict):
-      hashable_kwargs.append((k, HashableDict(v)))
+      hashable_kwargs.append((k, FrozenDict(v)))
     else:
       try:
         hash(v)
@@ -566,28 +603,11 @@ def _unwrap_kwargs_hashable(kwargs: Sequence[tuple[str, Any]]) -> dict[str, Any]
   for k, v in kwargs:
     if isinstance(v, HashableArray):
       unwrapped_kwargs[k] = v.val
-    elif isinstance(v, HashableDict):
-      unwrapped_kwargs[k] = dict(v.val)
+    elif isinstance(v, FrozenDict):
+      unwrapped_kwargs[k] = v._d
     else:
       unwrapped_kwargs[k] = v
   return unwrapped_kwargs
-
-
-class HashableDict:
-  __slots__ = ["val"]
-
-  def __init__(self, val):
-    assert isinstance(val, dict)
-    self.val = tuple(sorted(val.items()))
-
-  def __repr__(self):
-    return f"HashableDict({dict(self.val)})"
-
-  def __hash__(self):
-    return hash(self.val)
-
-  def __eq__(self, other):
-    return isinstance(other, HashableDict) and self.val == other.val
 
 
 @dataclasses.dataclass(frozen=True)

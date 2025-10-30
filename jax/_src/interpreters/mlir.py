@@ -77,9 +77,6 @@ Value = Any  # = ir.Value
 # mypy implicitly sets this variable to true when type checking.
 MYPY = False
 
-lowerable_effects: effects_lib.EffectTypeSet = effects_lib.lowerable_effects
-
-
 # IR Helpers
 
 IrValues = Union[ir.Value, tuple[ir.Value, ...]]
@@ -88,7 +85,6 @@ IrValues = Union[ir.Value, tuple[ir.Value, ...]]
 def _is_not_block_argument(x: IrValues) -> bool:
   return not isinstance(x, ir.BlockArgument)
 
-
 def dense_int_elements(xs) -> ir.DenseIntElementsAttr:
   return ir.DenseIntElementsAttr.get(np.asarray(xs, np.int64))
 
@@ -96,15 +92,8 @@ dense_int_array = ir.DenseI64ArrayAttr.get
 
 def dense_bool_elements(xs: Sequence[bool]) -> ir.DenseElementsAttr:
   a = np.packbits(np.array(xs, np.bool_), bitorder='little')
-  # TODO(b/209005197): Work around for MLIR crash for non-splat single element
-  # buffers.
-  if len(xs) == 1:
-    a = np.array(0 if a.item() == 0 else 0xff, np.uint8)
   return ir.DenseElementsAttr.get(
       a, type=ir.IntegerType.get_signless(1), shape=[len(xs)])
-
-def dense_bool_array(xs: Sequence[bool]) -> ir.DenseBoolArrayAttr:
-  return ir.DenseBoolArrayAttr.get(xs)
 
 def i32_attr(i): return ir.IntegerAttr.get(ir.IntegerType.get_signless(32), i)
 def i64_attr(i): return ir.IntegerAttr.get(ir.IntegerType.get_signless(64), i)
@@ -572,12 +561,17 @@ def make_ir_context() -> ir.Context:
 
   context.set_thread_pool(global_thread_pool)
   dialects.sdy.register_dialect(context)
-  # TODO(joelwee): Remove this once jaxlib 0.8 is the minimum.
-  if dialects.mpmd:
-    dialects.mpmd.register_dialect(context)
+  dialects.mpmd.register_dialect(context)
   dialects.mhlo.register_mhlo_dialect(context)
   dialects.chlo.register_dialect(context)
   dialects.hlo.register_dialect(context)
+  # If built in debug mode, and MLIR is in a multithreaded context, enabling
+  # multi threaded execution aborts the process if we try to register a new
+  # dialect after this point. The dialect registry in a context is not thread
+  # safe, and a fatal error is much better than a data race.
+  # jax_mlir_ext.enter_multi_threaded_execution(context)
+  # TODO(phawkins): clean up users who add their own dialects to JAX's contexts
+  # and enable this.
   return context
 
 
@@ -1193,6 +1187,12 @@ def check_jaxpr_constants(closed_jaxpr: core.ClosedJaxpr):
   except Exception as exc:
     warnings.warn(message + f" Exception raised while generating report: {exc}")
 
+# TODO(phawkins): it is my firm belief that:
+# a) channel IDs have only a vestigal function when applied to collectives, and
+# b) their identity does not matter. The presence or absence of a channel
+#    changes whether XLA considers collectives to be inter-replica or
+#    inter-partition, but beyond that we believe they have little effect.
+COLLECTIVE_CHANNEL_ID = 1
 
 def lower_jaxpr_to_module(
     module_name: str,
@@ -1228,7 +1228,6 @@ def lower_jaxpr_to_module(
   See https://docs.jax.dev/en/latest/internals/constants.html
   """
   util.test_event("lower_jaxpr_to_module")
-  assert not jaxpr.is_high
   platforms = tuple(map(xb.canonicalize_platform, platforms))
 
   sharded_in_avals = (in_avals if arg_shardings is None else
@@ -1280,12 +1279,13 @@ def lower_jaxpr_to_module(
   # Delete donated_args by default here, since it's not needed beyond this point
   del donated_args
 
-  unlowerable_effects = lowerable_effects.filter_not_in(jaxpr.effects)
+  unlowerable_effects = effects_lib.lowerable_effects.filter_not_in(
+      jaxpr.effects)
   if unlowerable_effects:
     raise ValueError(f'Cannot lower jaxpr with effects: {jaxpr.effects}')
 
-  # HLO channels need to start at 1
-  channel_iter = itertools.count(1)
+  # HLO channels need to start at 1. We reserve 1 for collectives.
+  channel_iter = itertools.count(COLLECTIVE_CHANNEL_ID + 1)
   # Create a keepalives list that will be mutated during the lowering.
   keepalives: list[Any] = []
   host_callbacks: list[Any] = []
@@ -1574,7 +1574,6 @@ def lower_jaxpr_to_fun(
     MLIR func op
   """
   util.test_event("lower_jaxpr_to_fun", name)
-  assert not jaxpr.is_high
   if not config.use_simplified_jaxpr_constants.value:
     check_jaxpr_constants(jaxpr)
 
@@ -2013,7 +2012,6 @@ def jaxpr_subcomp(ctx: ModuleContext, jaxpr: core.Jaxpr,
     See https://docs.jax.dev/en/latest/internals/constants.html
   """
   assert "gpu" not in ctx.platforms
-  assert not jaxpr.is_high
 
   def read(v: core.Atom) -> IrValues:
     if type(v) is core.Literal:
@@ -2488,15 +2486,14 @@ def lower_fun(fun: Callable, multiple_results: bool = True) -> Callable:
         wrapped_fun = lu.annotate(wrapped_fun, (*implicit_args, *explicit_args))
         jaxpr, _, consts_for_constvars = pe.trace_to_jaxpr_dynamic2(wrapped_fun)
       else:
-        jaxpr, _, consts_for_constvars = pe.trace_to_jaxpr_dynamic(
-            wrapped_fun, ctx.avals_in, lower=True)
+        jaxpr, _, consts_for_constvars = pe.trace_to_jaxpr_dynamic(wrapped_fun,
+                                                                   ctx.avals_in)
         # TODO(frostig,mattjj): check ctx.avals_out against jaxpr avals out?
 
       if ctx.platforms is not None:
         sub_context = ctx.module_context.replace(platforms=ctx.platforms)
       else:
         sub_context = ctx.module_context
-      assert not jaxpr.is_high
       out, tokens = jaxpr_subcomp(
           sub_context, jaxpr, ctx.name_stack, ctx.tokens_in,
           ir_consts(consts_for_constvars, [v.aval for v in jaxpr.constvars]),
@@ -2678,8 +2675,8 @@ def wrap_xla_metadata_in_place(ctx: LoweringRuleContext, op: ir.Operation) -> No
     if isinstance(op, ir.Operation):
       # combine with existing mhlo.frontend_attributes
       for attr in op.attributes:
-        if attr.name == "mhlo.frontend_attributes":
-          for a in attr.attr:
+        if attr == "mhlo.frontend_attributes":
+          for a in op.attributes[attr]:
             existing_attributes[a.name] = a.attr
       op.attributes["mhlo.frontend_attributes"] = ir.DictAttr.get(
           ctx_attributes | existing_attributes
@@ -3113,7 +3110,8 @@ def build_mlir_module_helper(
     backend: xb.XlaBackend | None,
     axis_context: AxisContext) -> ir.Module:
   """Helper to generate pmap-style XLA computations for custom partitioners."""
-  unlowerable_effects = lowerable_effects.filter_not_in(closed_jaxpr.effects)
+  unlowerable_effects = effects_lib.lowerable_effects.filter_not_in(
+      closed_jaxpr.effects)
   if unlowerable_effects:
     raise ValueError(f'Cannot lower jaxpr with effects: {closed_jaxpr.effects}')
   lowering_result = lower_jaxpr_to_module(name, closed_jaxpr,

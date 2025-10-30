@@ -36,6 +36,7 @@ import numpy as np
 
 from . import utils
 
+
 T = TypeVar("T")
 WARPGROUP_SIZE = utils.WARPGROUP_SIZE
 WARP_SIZE = 32
@@ -981,7 +982,9 @@ class FragmentedArray:
       case WGSplatFragLayout():
         pass
       case WGStridedFragLayout() | TiledLayout():
-        value = vector.splat(layout.registers_element_type(value.type), value)
+        value = vector.broadcast(
+            layout.registers_element_type(value.type), value
+        )
       case _:
         raise NotImplementedError(layout)
 
@@ -1847,7 +1850,7 @@ class FragmentedArray:
             for part in range(max(group_size // 4, 1))
         ]
         out_vec_int = utils.vector_concat([
-            vector.splat(ir.VectorType.get((1,), i32), out_i32_reg)
+            vector.broadcast(ir.VectorType.get((1,), i32), out_i32_reg)
             for out_i32_reg in out_i32_regs
         ])
         out_vector_len = len(out_i32_regs) * 4
@@ -1933,7 +1936,7 @@ class FragmentedArray:
             offset += group_size
         assert offset == vector_len
         out_vec_int = utils.vector_concat([
-            vector.splat(ir.VectorType.get((1,), i32), reg)
+            vector.broadcast(ir.VectorType.get((1,), i32), reg)
             for reg in out_int_regs
         ])
         new_registers[idx] = utils.bitcast(out_vec_int, out_vec_ty)
@@ -2262,7 +2265,7 @@ class FragmentedArray:
           scalar_out_reg = (
               scalar if scalar_out_reg is None else op(scalar_out_reg, scalar)
           )
-        out_reg = vector.splat(
+        out_reg = vector.broadcast(
             ir.VectorType.get((1,), out_reg.type.element_type), scalar_out_reg
         )
       # Reduce across warp lanes, if necessary (using warp shuffles).
@@ -2701,7 +2704,7 @@ class FragmentedArray:
     tiling = Tiling((tiled_shape[len(tiled_shape) // 2 :],))
     shape = tiling.untile_shape(tiled_shape)
     reg_ty = ir.VectorType.get((layout.vector_length,), dtype)
-    zero = vector.splat(reg_ty, c(0, dtype))
+    zero = vector.broadcast(reg_ty, c(0, dtype))
     registers = np.full(layout.registers_shape(shape), zero, dtype=object)
     is_f8 = ir.FloatType.isinstance(dtype) and utils.bitwidth(dtype) == 8
     i8 = ir.IntegerType.get_signless(8)
@@ -2728,12 +2731,19 @@ class FragmentedArray:
       # flattening won't work.
       ref = mgpu.memref_fold(ref, 0, len(ref_ty.shape))
     except ValueError:
-      strides, _ = ref_ty.get_strides_and_offset()
       if vec_size > 1:
-        # TODO(apaszke): We could fold all the pairs of dims that are contiguous
-        # This check is a too strict if we don't do that.
+        ref_ty = ir.MemRefType(ref.type)
+        shape = ref_ty.shape
+        strides, _ = ref_ty.get_strides_and_offset()
+        # Try to fold contiguous dimension pairs.
+        for i in reversed(range(len(shape) - 1)):
+          if strides[i] == shape[i+1] * strides[i+1]:
+            ref = mgpu.memref_fold(ref, i, 2)
+        ref_ty = ir.MemRefType(ref.type)
+        shape = ref_ty.shape
+        strides, _ = ref_ty.get_strides_and_offset()
         has_contiguous_dim = False
-        for size, stride in zip(ref_ty.shape, strides):
+        for size, stride in zip(shape, strides):
           if stride == 1:
             has_contiguous_dim = True
             if size % vec_size != 0:
@@ -2753,6 +2763,7 @@ class FragmentedArray:
           raise ValueError(
               "The reference must have a contiguous dimension when vec_size > 1"
           )
+      layout = WGStridedFragLayout(shape=tuple(ref_ty.shape), vec_size=vec_size)
       idx_gen = layout.thread_idxs(tuple(ref_ty.shape))
     else:
       idx_gen = map(lambda x: [x], layout.linear_thread_idxs())

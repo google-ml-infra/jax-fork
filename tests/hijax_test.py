@@ -37,7 +37,8 @@ from jax._src.util import safe_zip, safe_map
 from jax._src.state.discharge import run_state
 
 from jax._src.hijax import (HiPrimitive, HiType, Box, new_box, box_set, box_get,
-                            box_effect, register_hitype, ShapedArray, Ty)
+                            box_effect, register_hitype, ShapedArray, Ty,
+                            NewstyleHiPrimitive)
 
 config.parse_flags_with_absl()
 
@@ -169,7 +170,7 @@ class HiTup:
 
 @dataclass(frozen=True)
 class TupTy(HiType):
-  tys: tuple[Ty, ...]
+  tys: tuple[Ty]
   def __repr__(self):
     return 'Tup{' + ','.join(a.str_short() for a in self.tys) + '}'
 
@@ -409,6 +410,9 @@ class HijaxTest(jtu.JaxTestCase):
     q = ArrayTuple(jnp.zeros((4, 4), 'int8'), jnp.ones(4, 'float32'))
     jax.jit(lambda x: x).lower(q).as_text()  # don't crash
 
+    compiled = jax.jit(lambda x: x).lower(q).compile()
+    compiled(q)  # don't crash
+
   @parameterized.parameters([False, True])
   def test_while_loop(self, jit):
     q = to_qarray(jnp.ones((2, 2), 'float32'))
@@ -476,26 +480,102 @@ class HijaxTest(jtu.JaxTestCase):
     ans = f()
     self.assertEqual(ans, 2)
 
-  def test_closed_over_hitype(self):
-    if not config.vmap_primitive.value:
-      raise unittest.SkipTest("requires vmap_primitive enabled")
+  @parameterized.parameters([False, True])
+  def test_newstyle_hiprimitive(self, jit):
 
-    tup = make_tup(1, 2)
+    class RaiseToStaticPower(NewstyleHiPrimitive):
+      def __init__(self, in_aval, *, power):
+        super().__init__((in_aval,), in_aval, power=power)
 
-    @jax.custom_vjp
-    def inner(tup):
-      return get_tuple_element(tup, 1)
-    def fwd(tup):
-      assert False
-    def bwd(*_):
-      assert False
-    inner.defvjp(fwd, bwd)
+      def expand(self, x):
+        return x ** self.power
 
-    @jax.jit
-    def f():
-      return inner(tup)
+      def vjp_fwd(self, x):
+        ans = self(x)
+        return (ans, x)
 
-    self.assertEqual(f(), 2)
+      def vjp_bwd(self, res, t):
+        return (t * self.power * raise_to_static_power(res, self.power-1),)
+
+      def batch(self, _axis_data, args, in_dims):
+        in_dim, = in_dims
+        x, = args
+        return raise_to_static_power(x, self.power), in_dim
+
+    def raise_to_static_power(x, power):
+      x_aval = jax.typeof(x)
+      return RaiseToStaticPower(x_aval, power=power)(x)
+
+    def f(x):
+      return raise_to_static_power(x, power=3)
+
+    if jit:
+      f = jax.jit(f)
+
+    self.assertEqual(f(2.0), 8.0)
+    xs = jnp.arange(3.0)
+    self.assertAllClose(jax.vmap(f)(xs), xs**3)
+    self.assertEqual(jax.grad(f)(2.0), 12.0)
+
+  @config.numpy_dtype_promotion('standard')
+  def test_newstyle_hiprimitive_qarray(self):
+
+    @dataclass(frozen=True)  # not NamedTuple, which is a pytree
+    class QArray:
+      qvalue: jax.Array
+      scale: jax.Array
+
+    @dataclass(frozen=True)
+    class QArrayTy(HiType):
+      shape: tuple[int, int]
+
+      def to_tangent_aval(self):
+        return ShapedArray(self.shape, jnp.dtype('float32'))
+
+    register_hitype(QArray, lambda q: QArrayTy(q.qvalue.shape))
+
+    def q(x):
+      return Q(jax.typeof(x))(x)
+
+    def dq(qx):
+      return DQ(jax.typeof(qx))(qx)
+
+    class Q(NewstyleHiPrimitive):
+      def __init__(self, unquantized_aval):
+        if unquantized_aval.dtype != jnp.dtype('float32'): raise TypeError
+        quantized_aval = QArrayTy(unquantized_aval.shape)
+        super().__init__((unquantized_aval,), quantized_aval)
+
+      def expand(self, x):
+        scale = jnp.max(jnp.abs(x)) / 127
+        qvalue = jnp.round(x / scale).astype(jnp.int8)
+        return QArray(qvalue, scale)
+
+      def vjp_fwd(self, x):
+        return self(x), None
+
+      def vjp_bwd(self, _, g):
+        return g,
+
+    class DQ(NewstyleHiPrimitive):
+      def __init__(self, quantized_aval):
+        unquantized_aval = ShapedArray(quantized_aval.shape, jnp.dtype('float32'))
+        super().__init__((quantized_aval,), unquantized_aval)
+
+      def expand(self, qx):
+        return qx.qvalue * qx.scale
+
+      def vjp_fwd(self, qx):
+        return self(qx), None
+
+      def vjp_bwd(self, _, g):
+        return g,
+
+    def f(x):
+      return jnp.sum(dq(q(x)))
+
+    x = jax.random.normal(jax.random.key(0), (3, 3), dtype='float32')
+    g = jax.grad(f)(x)
 
 
 class BoxTest(jtu.JaxTestCase):
@@ -1024,6 +1104,21 @@ class BoxTest(jtu.JaxTestCase):
 
     out_type = jax.eval_shape(f)
     self.assertEqual(out_type, QArrayTy((2, 2)))
+
+  def test_stages_mutable(self):
+    box = Box(1.0)
+
+    @jax.jit
+    def f(box):
+      box.set(box.get() + 1.)
+
+    f.lower(box).as_text()  # don't crash
+    compiled = f.lower(box).compile()
+    compiled(box)
+    compiled(box)
+    compiled(box)
+    self.assertAllClose(box.get(), 4.)
+
 
 class RefTest(jtu.JaxTestCase):
 

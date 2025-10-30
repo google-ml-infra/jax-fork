@@ -17,12 +17,9 @@
 from absl.testing import parameterized
 from jax._src import config
 from jax._src import test_util as jtu
-from jax._src.interpreters import mlir as mlir_interpreter
-from jax._src.lib.mlir import ir
-from jax._src.lib.mlir.dialects import arith
-from jax._src.lib.mlir.dialects import llvm
 import jax.experimental.mosaic.gpu as mgpu
 from jax.experimental.mosaic.gpu import equations
+from jax.experimental.mosaic.gpu import fragmented_array as fa
 from jax.experimental.mosaic.gpu import launch_context as lc
 
 config.parse_flags_with_absl()
@@ -30,21 +27,6 @@ config.parse_flags_with_absl()
 RL = equations.RegisterLayout
 Eq = equations.Equation
 V = equations.Variable
-
-
-def _make_ir_context():
-  context = ir.Context()
-  context.append_dialect_registry(mlir_interpreter.upstream_dialects)
-  context.load_all_available_dialects()
-  mgpu.dialect.register_dialect(context)
-  return context
-
-
-def nested_tuple(nested_list):
-  """Recursively convert a nested list to a nested tuple."""
-  if isinstance(nested_list, list):
-    return tuple(nested_tuple(x) for x in nested_list)
-  return nested_list
 
 
 class EquationSystemTest(parameterized.TestCase):
@@ -82,27 +64,29 @@ class EquationSystemTest(parameterized.TestCase):
         ).holds()
     )
 
-  def test_distinct_constraint_does_not_hold_for_identical_expressions(self):
-    self.assertFalse(equations.Distinct(V(1), V(1)).holds())
+  def test_not_of_type_constraint_holds_for_different_types(self):
+    layout = RL(mgpu.WGMMA_LAYOUT)
+    self.assertTrue(equations.NotOfType(layout, mgpu.WGSplatFragLayout).holds())
 
-  def test_distinct_constraint_holds_for_unequal_constants(self):
-    layout0, layout1 = mgpu.WGMMA_LAYOUT, mgpu.WGMMA_ROW_LAYOUT
-    self.assertTrue(equations.Distinct(RL(layout0), RL(layout1)).holds())
+  def test_not_of_type_constraint_does_not_holds_for_same_types(self):
+    layout = RL(mgpu.WGSplatFragLayout((1, 128)))
+    self.assertFalse(
+        equations.NotOfType(layout, mgpu.WGSplatFragLayout).holds()
+    )
 
-  def test_distinct_constraint_is_unknown_for_unreduced_unequal_expressions(self):
-    self.assertIsNone(equations.Distinct(RL(1), V(0)).holds())
+  def test_not_of_type_constraint_is_unknown_for_unreduced_expression(self):
+    self.assertIsNone(equations.NotOfType(V(0), mgpu.WGSplatFragLayout).holds())
 
   def test_reduce_equation_system_removes_tautological_equations_and_constraints(
       self,
   ):
     v0, v1 = V(0), V(1)
-    layout0, layout1 = mgpu.WGMMA_LAYOUT, mgpu.WGMMA_ROW_LAYOUT
     system = equations.EquationSystem(
         equations=[Eq(v0, v1), Eq(v0, v0)],
         constraints=[
             equations.Relayout(v0, v0),
-            equations.Distinct(RL(layout0), RL(layout1)),
-            equations.Distinct(v0, v1),
+            equations.NotOfType(RL(mgpu.WGMMA_LAYOUT), mgpu.WGSplatFragLayout),
+            equations.NotOfType(v1, mgpu.WGSplatFragLayout),
         ],
     )
     self.assertLen(equations.reduce(system).equations, 1)
@@ -379,7 +363,7 @@ class EquationSystemTest(parameterized.TestCase):
     system = equations.EquationSystem(
         assignments={v1: splat_layout},
         constraints=[
-            equations.Distinct(v0, splat_layout),
+            equations.NotOfType(v0, mgpu.WGSplatFragLayout),
             equations.Relayout(v0, v1),
         ],
     )
@@ -388,25 +372,25 @@ class EquationSystemTest(parameterized.TestCase):
   def test_saturate_distinct_from_splat_does_not_create_duplicate_constraints(
       self,
   ):
-    splat_layout = RL(mgpu.WGSplatFragLayout((128,)))
     v0, v1, v2 = V(0), V(1), V(2)
-    system = equations.EquationSystem(constraints = [
-          equations.Distinct(v0, splat_layout),
-          equations.Distinct(v1, splat_layout),
-          equations.Relayout(v0, v2),
-          equations.Relayout(v1, v2),
-      ],
+    system = equations.EquationSystem(
+        constraints=[
+            equations.NotOfType(v0, mgpu.WGSplatFragLayout),
+            equations.NotOfType(v1, mgpu.WGSplatFragLayout),
+            equations.Relayout(v0, v2),
+            equations.Relayout(v1, v2),
+        ],
     )
 
     self.assertEqual(
         equations.saturate_distinct_from_splat(system),
         equations.EquationSystem(
             constraints=[
-                equations.Distinct(v0, splat_layout),
-                equations.Distinct(v1, splat_layout),
+                equations.NotOfType(v0, mgpu.WGSplatFragLayout),
+                equations.NotOfType(v1, mgpu.WGSplatFragLayout),
                 equations.Relayout(v0, v2),
                 equations.Relayout(v1, v2),
-                equations.Distinct(v2, splat_layout),
+                equations.NotOfType(v2, mgpu.WGSplatFragLayout),
             ],
         ),
     )
@@ -414,28 +398,27 @@ class EquationSystemTest(parameterized.TestCase):
   def test_saturate_distinct_from_splat_does_not_affect_non_splat(
       self,
   ):
-    splat_layout = RL(mgpu.WGSplatFragLayout((128,)))
-    wgmma_layout = RL(mgpu.WGMMA_LAYOUT)
     v0, v1, v2, v3, v4 = V(0), V(1), V(2), V(3), V(4)
-    system = equations.EquationSystem(constraints = [
-          equations.Distinct(v0, splat_layout),
-          equations.Distinct(v1, wgmma_layout),
-          equations.Relayout(v0, v2),
-          equations.Relayout(v1, v3),
-          equations.Relayout(v4, v0),
-      ],
+    system = equations.EquationSystem(
+        constraints=[
+            equations.NotOfType(v0, mgpu.WGSplatFragLayout),
+            equations.NotOfType(v1, mgpu.WGStridedFragLayout),
+            equations.Relayout(v0, v2),
+            equations.Relayout(v1, v3),
+            equations.Relayout(v4, v0),
+        ],
     )
 
     self.assertEqual(
         equations.saturate_distinct_from_splat(system),
         equations.EquationSystem(
             constraints=[
-                equations.Distinct(v0, splat_layout),
-                equations.Distinct(v1, wgmma_layout),
+                equations.NotOfType(v0, mgpu.WGSplatFragLayout),
+                equations.NotOfType(v1, mgpu.WGStridedFragLayout),
                 equations.Relayout(v0, v2),
                 equations.Relayout(v1, v3),
                 equations.Relayout(v4, v0),
-                equations.Distinct(v2, splat_layout),
+                equations.NotOfType(v2, mgpu.WGSplatFragLayout),
             ],
         ),
     )
@@ -476,113 +459,56 @@ class EquationSystemTest(parameterized.TestCase):
         equations.SMEMTiling(lc.TileTransform((3, 2))),
     )
 
-  def test_divides_constraint(self):
-    def divides(tiling, dims):
-      tiling = None if tiling is None else lc.TileTransform(tiling)
-      return equations.Divides(equations.SMEMTiling(tiling), nested_tuple(dims))
+  def test_divides_constraint_are_satisfied_by_empty_tiling(self):
+    self.assertTrue(equations.Divides(equations.SMEMTiling(None), (1, 2)).holds())
 
-    with self.subTest("empty_tiling"):
-      self.assertTrue(divides(None, []).holds())
-      self.assertTrue(divides(None, [[5, 15], [16]]).holds())
+  def test_divides_constraints_are_satisfied_by_divisor_tiling(self):
+    with self.subTest("SMEMTiling"):
+      tiling = equations.SMEMTiling(lc.TileTransform((2, 2)))
+      self.assertTrue(equations.Divides(tiling, (4, 6)).holds())
+    with self.subTest("RegisterLayout"):
+      tiling = equations.RegisterLayout(fa.WGMMA_LAYOUT)
+      self.assertTrue(equations.Divides(tiling, (0, 64)).holds())
 
-    with self.subTest("static_dimensions"):
-      self.assertTrue(divides((5, 8), [[3], [5], [8]]).holds())
-      self.assertTrue(divides((5, 8), [[3], [5, 10], [8, 0, 16]]).holds())
-      self.assertFalse(divides((1, 3, 5, 8), [[3], [5, 10], [8, 0, 16]]).holds())
+  def test_divides_constraints_are_not_satisfied_by_non_divisor_tiling(self):
+    with self.subTest("SMEMTiling"):
+      tiling = equations.SMEMTiling(lc.TileTransform((2, 2)))
+      self.assertFalse(equations.Divides(tiling, (4, 3)).holds())
+    with self.subTest("RegisterLayout"):
+      tiling = equations.RegisterLayout(fa.WGMMA_LAYOUT)
+      self.assertFalse(equations.Divides(tiling, (3, 64)).holds())
 
-    self.enter_context(_make_ir_context())
-    self.enter_context(ir.Location.unknown())
-    ir.Module.create()
+  def test_reduce_merges_divides_constraints_on_same_variable(self):
+    v0, v1 = equations.Variable(0), equations.Variable(1)
+    constraints = [
+        equations.Divides(v0, (18, 17)),
+        equations.Divides(v0, (3, 19)),
+        equations.Divides(v1, (6, 1, 3)),
+    ]
+    self.assertEqual(
+        equations.reduce(equations.EquationSystem(constraints=constraints)).constraints,
+        [
+            equations.Divides(v0, (3, 1)),
+            equations.Divides(v1, (6, 1, 3)),
+        ],
+    )
 
-    c = lambda x: arith.constant(ir.IntegerType.get_signless(32), x)
-
-    with self.subTest("dynamic_dimensions_known_divisible"):
-      self.assertTrue(divides((5, 8), [[c(3)], [c(5)], [c(8)]]).holds())
-      self.assertTrue(divides((5, 8), [[c(3)], [c(5), 10], [c(8), 16]]).holds())
-      self.assertTrue(divides((5, 8), [[c(3)], [5, c(10)], [8]]).holds())
-      self.assertFalse(divides((5, 8), [[c(3)], [5, c(4)], [8]]).holds())
-
-    with self.subTest("dynamic_dimensions_not_known_divisible"):
-      u = llvm.mlir_undef(ir.IntegerType.get_signless(32))
-      self.assertTrue(divides((5, 8), [[u], [c(5)], [c(8)]]).holds())
-      self.assertFalse(divides((5, 8), [[10], [8, u]]).holds())
-
-  def test_reduce_merges_divides_constraints(self):
-    def divides(var, dims):
-      return equations.Divides(var, nested_tuple(dims))
-    def reduce(constraints):
-      system = equations.EquationSystem(constraints=constraints)
-      system = equations.reduce(system)
-      return system.constraints
-
-    v0 = equations.Variable(0)
-    v1 = equations.Variable(1)
-
-    # Constraints should not be merged if they apply to different vars.
-    self.assertEqual(reduce([
-        divides(v0, [[16]]),
-        divides(v1, [[8]]),
-    ]), [
-        divides(v0, [[16]]),
-        divides(v1, [[8]]),
-    ])
-
-    # Merging of constraints - one var.
-    self.assertEqual(reduce([
-        divides(v0, [[16]]),
-        divides(v0, [[8]]),
-    ]), [divides(v0, [[8]])])
-
-    self.assertEqual(reduce([
-        divides(v0, [[16, 10]]),
-        divides(v0, [[8]]),
-    ]), [divides(v0, [[2]])])
-
-    self.assertEqual(reduce([
-        divides(v0, [[16, 10]]),
-        divides(v0, [[5],[8]]),
-    ]), [divides(v0, [[5], [2]])])
-
-    # Merging of constraints - multiple vars.
-    self.assertEqual(reduce([
-        divides(v0, [[16, 10]]),
-        divides(v0, [[5],[8]]),
-        divides(v1, [[1], [2, 4], [5, 10]]),
-        divides(v1, [[9], [20]]),
-    ]), [
-        divides(v0, [[5], [2]]),
-        divides(v1, [[1], [1], [5]]),
-    ])
-
-  def test_canonicalize_dimensions_to_tile(self):
-    def canonicalized(dims):
-      v = equations.Variable(0)
-      divides = equations.Divides(v, dims)
-      system = equations.EquationSystem(constraints=[divides])
-      system = equations.reduce(system)
-      [canonical] = system.constraints
-      return canonical.dimensions_to_tile
-
-    with self.subTest("static_dimensions"):
-      self.assertEqual(canonicalized(((1, 2, 3),)), ((1,),))
-      self.assertEqual(canonicalized(((4, 8, 16),)), ((4,),))
-      self.assertEqual(canonicalized(((20, 32, 0),)), ((4,),))
-
-    self.enter_context(_make_ir_context())
-    self.enter_context(ir.Location.unknown())
-    ir.Module.create()
-    c = lambda x: arith.constant(ir.IntegerType.get_signless(32), x)
-    c0 = c(0)
-    c1 = c(1)
-
-    with self.subTest("dynamic_dimensions"):
-      self.assertEqual(canonicalized(((c0, 1, 2, c1, c1),)), ((1, c0, c1),))
-      self.assertEqual(canonicalized(((4, c1, c0, 8, 16),)), ((4, c0, c1),))
-      self.assertEqual(canonicalized(((c1, 20, c0, 32, 0, c1, c0),)), ((4, c0, c1),))
+    # Check that merging constraints with different lenghts yields a constraint
+    # whose length matches the one of the shorter tiling_multiple.
+    constraints = [
+        equations.Divides(v0, (16, 10)),
+        equations.Divides(v0, (8,)),
+    ]
+    self.assertEqual(
+        equations.reduce(equations.EquationSystem(constraints=constraints)).constraints,
+        [
+            equations.Divides(v0, (2,)),
+        ],
+    )
 
   def test_saturate_divides_constraints_for_equal_vars(self):
     def divides(var, dims):
-      return equations.Divides(equations.Variable(var), nested_tuple(dims))
+      return equations.Divides(equations.Variable(var), dims)
     def system(equal_vars, constraints):
       return equations.EquationSystem(
           equations=[
@@ -593,24 +519,24 @@ class EquationSystemTest(parameterized.TestCase):
       )
 
     # One equality
-    s = system([(0, 1)], [divides(0, [[1]])])
+    s = system([(0, 1)], [divides(0, (1,))])
     got = equations.saturate_divides_constraints_for_equal_vars(s)
-    want = [divides(0, [[1]]), divides(1, [[1]])]
+    want = [divides(0, (1,)), divides(1, (1,))]
     self.assertEqual(got.equations, s.equations)
     self.assertEqual(got.constraints, want)
 
     # Five transitively equal variables and one disconnected one.
     s = system(
-        [(0, 1), (2, 3), (2, 4), (1, 4)], [divides(0, [[1]]), divides(5, [[1]])]
+        [(0, 1), (2, 3), (2, 4), (1, 4)], [divides(0, (1,)), divides(5, (1,))]
     )
     got = equations.saturate_divides_constraints_for_equal_vars(s)
     want = [
-        divides(0, [[1]]),
-        divides(1, [[1]]),
-        divides(2, [[1]]),
-        divides(3, [[1]]),
-        divides(4, [[1]]),
-        divides(5, [[1]]),
+        divides(0, (1,)),
+        divides(1, (1,)),
+        divides(2, (1,)),
+        divides(3, (1,)),
+        divides(4, (1,)),
+        divides(5, (1,)),
     ]
     self.assertEqual(got.equations, s.equations)
     self.assertEqual(got.constraints, want)

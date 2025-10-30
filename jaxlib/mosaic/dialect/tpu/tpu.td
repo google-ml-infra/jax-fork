@@ -593,15 +593,40 @@ def TPU_BroadcastInSublanesOp : TPU_Op<"broadcast_in_sublanes", [Pure]> {
 }
 
 // Integer unpacks are always signed at the moment.
+//
+// When unpacking integers to integers, setting `sign_extended` to false will
+// leave bits higher than source bitwidth as undefined.
+//
+// Take int4 to int16 interleaved unpacking and `index = 1` as an example:
+//
+// Source:
+//
+// Bits    28  24  20  16  12   8   4   0
+//       --------abcd------------efgh----
+//
+// where "a" and "e" are the sign bits of the values to be unpacked, and "-" are
+// bits to be ignored.
+//
+// Unpacked, sign_extend = true:
+//
+// Bits    28  24  20  16  12   8   4   0
+//       aaaaaaaaaaaaabcdeeeeeeeeeeeeefgh
+//
+// Unpacked, sign_extend = false:
+//
+// Bits    28  24  20  16  12   8   4   0
+//       ------------abcd------------efgh
 def TPU_UnpackSubelementsOp : TPU_Op<"unpack_subelements", [Pure]> {
   let arguments = (ins
     AnyVectorOfNonZeroRank:$source,
     I32Attr:$index,
-    TPU_PackFormatEnum:$pack_format
+    TPU_PackFormatEnum:$pack_format,
+    DefaultValuedAttr<BoolAttr, "true">:$sign_extended
   );
   let results = (outs AnyVectorOfNonZeroRank:$output);
   let assemblyFormat = [{ $source `,` $index attr-dict `:` type($source) `->` type($output) }];
   let hasVerifier = 1;
+  let hasCanonicalizeMethod = 1;
 }
 
 // Integer packs are always signed at the moment.
@@ -834,6 +859,7 @@ def TPU_BitcastVregOp : TPU_Op<"bitcast_vreg", [Pure]> {
   let arguments = (ins TPU_Vreg:$input);
   let results = (outs TPU_Vreg:$output);
   let assemblyFormat = [{ $input attr-dict `:` type($input) `->` type($output) }];
+  let hasFolder = 1;
 }
 
 def TPU_WeirdOp : TPU_Op<"weird", [Pure, ElementwiseMappable]> {
@@ -850,6 +876,28 @@ def TPU_ReciprocalOp : TPU_Op<"reciprocal", [Pure, SameOperandsAndResultType, El
   );
   let results = (outs AnyVectorOfNonZeroRank:$output);
   let assemblyFormat = [{ $input attr-dict `:` type($input) `->` type($output) }];
+  let hasVerifier = 1;
+}
+
+def TPU_StochasticConvertOp : TPU_Op<"stochastic_convert", [Pure, SameOperandsAndResultShape]> {
+  let arguments = (ins
+    VectorOfNonZeroRankOf<[F32]>:$input,
+    VectorOfNonZeroRankOf<[I32]>:$random
+  );
+  let results = (outs AnyVectorOfNonZeroRank:$output);
+  let assemblyFormat = [{ $input `,` $random attr-dict `:` type($input) `,` type($random) `->` type($output) }];
+}
+
+def TPU_StochasticConvertElementwiseOp : TPU_Op<"stochastic_convert_elementwise", [Pure, ElementwiseMappable]> {
+  // Stochastically converts the input to the target dtype based on the mode.
+  // When the target dtype is less than 32 bits, the result occupies the lowest {bitwidth} bits in the I32 output.
+  let arguments = (ins
+    VectorOfNonZeroRankOf<[F32]>:$input,
+    VectorOfNonZeroRankOf<[I32]>:$random,
+    TypeAttr:$dst_type
+  );
+  let results = (outs VectorOfNonZeroRankOf<[I32]>:$output);
+  let assemblyFormat = [{ $input `,` $random attr-dict `:` type($input) `,` type($random) `->` type($output) }];
   let hasVerifier = 1;
 }
 
@@ -918,11 +966,26 @@ def TPU_CreateSubelementMaskOp : TPU_Op<"create_subelement_mask", [Pure]> {
 }
 
 def TPU_AssumeMultipleOp : TPU_Op<"assume_multiple", [Pure, SameOperandsAndResultType]> {
+  let summary = "Assumes that a value is a multiple of a given integer.";
+  let description = [{
+    This operation is a hint to the compiler that the input `value` is guaranteed
+    to be a multiple of `multiple`. This can be used to satisfy divisibility checks
+    in some compiler passes.
+
+    The result is the same as the input `value`.
+
+    Example:
+
+    ```mlir
+    %val = tpu.assume_multiple %arg0, 16 : index
+    ```
+  }];
   let arguments = (ins
     AnyTypeOf<[Index, AnyInteger]>:$value,
     I32Attr:$multiple
   );
   let results = (outs AnyTypeOf<[Index, AnyInteger]>:$result);
+  let assemblyFormat = [{$value `,` $multiple attr-dict `:` type($result)}];
   let hasVerifier = 1;
 }
 
@@ -1432,6 +1495,7 @@ def InferVectorLayoutPass : Pass<"tpu-infer-vector-layout", "::mlir::func::FuncO
     Option<"hardware_generation", "hardware-generation", "int", /*default=*/"-1", "">,
     Option<"lane_count", "lane-count", "int", /*default=*/"128", "">,
     Option<"sublane_count", "sublane-count", "int", /*default=*/"8", "">,
+    Option<"shape_invariant_numerics", "shape-invariant-numerics", "bool", /*default=*/"false", "">
   ];
 }
 
@@ -1470,6 +1534,7 @@ def ApplyVectorLayoutPass : Pass<"tpu-apply-vector-layout", "::mlir::func::FuncO
     Option<"max_sublanes_in_scratch", "max-sublanes-in-scratch", "int", /*default=*/"0", "">,
     Option<"vmem_banks", "vmem-banks", "int", /*default=*/"-1", "">,
     Option<"max_shuffle_sublane_offset", "max-shuffle-sublane-offset", "int", /*default=*/"-1", "Max sublane offset per shuffled load/store">,
+    Option<"shape_invariant_numerics", "shape-invariant-numerics", "bool", /*default=*/"false", "">
   ];
 }
 
@@ -1486,6 +1551,20 @@ def LinalgVectorizationPass : Pass<"linalg-vectorization", "::mlir::func::FuncOp
   let options = [
     Option<"supports_bf16_alu_instructions", "supports-bf16-alu-instructions", "bool", "", "">,
     Option<"supports_bf16_matmul", "supports-bf16-matmul", "bool", "", "">,
+  ];
+}
+
+def PreCanonicalizationOptimizationPass : Pass<"pre-canonicalization-optimization", "::mlir::func::FuncOp"> {
+  let summary = "Fold matmul rhs tranpose into the op before layout inference";
+  let constructor = "::mlir::tpu::createPreCanonicalizationOptimizationPass()";
+  let dependentDialects = [
+    "::mlir::vector::VectorDialect",
+    "::mlir::tpu::TPUDialect",
+  ];
+  let options = [
+    Option<"hardware_generation", "hardware-generation", "int", /*default=*/"6", "">,
+    Option<"lane_count", "lane-count", "int", /*default=*/"128", "">,
+    Option<"sublane_count", "sublane-count", "int", /*default=*/"8", "">,
   ];
 }
 

@@ -65,51 +65,6 @@ intx = dtypes.default_int_dtype()
 floatx = dtypes.default_float_dtype()
 
 
-@functools.partial(jax.jit, static_argnames=["bm", "bn", "gm", "bk",
-                                             "interpret", "debug"])
-def matmul(x, y, *, bm, bn, gm, bk, interpret, debug=False):
-  m, n, k = x.shape[0], y.shape[1], x.shape[1]
-  @functools.partial(
-      pl.pallas_call, out_shape=jax.ShapeDtypeStruct((m, n), jnp.float32),
-      interpret=interpret,
-      debug=debug,
-      grid=pl.cdiv(m, bm) * pl.cdiv(n, bn))
-  def matmul_kernel(x_ref, y_ref, o_ref):
-    pid = pl.program_id(axis=0).astype(intx)
-    num_pid_m = m // bm
-    num_pid_n = n // bn
-    num_pid_in_group = gm * num_pid_n
-    group_id = lax.div(pid, num_pid_in_group)
-    first_pid_m = group_id * gm
-    group_size_m = jnp.minimum(num_pid_m - first_pid_m, gm)
-    pid_m = first_pid_m + lax.rem(pid, group_size_m)
-    pid_n = lax.div(lax.rem(pid, num_pid_in_group), group_size_m)
-    idx_m = pid_m * bm + jnp.arange(bm)
-    idx_n = pid_n * bn + jnp.arange(bn)
-    idx_m = pl.max_contiguous(pl.multiple_of(idx_m, bm), bm)
-    idx_n = pl.max_contiguous(pl.multiple_of(idx_n, bn), bn)
-    acc = jnp.zeros((bm, bn), dtype=jnp.float32)
-    def body(i, acc):
-      idx_k = i * bk + jnp.arange(bk)
-      x_idx = (
-          jax.lax.broadcast_in_dim(idx_m, (bm, bk), (0,)),
-          jax.lax.broadcast_in_dim(idx_k, (bm, bk), (1,)))
-      y_idx = (
-          jax.lax.broadcast_in_dim(idx_k, (bk, bn), (0,)),
-          jax.lax.broadcast_in_dim(idx_n, (bk, bn), (1,)))
-      x_block, y_block = x_ref[x_idx], y_ref[y_idx]
-      out = pl.dot(x_block, y_block)
-      return acc + out
-
-    acc = lax.fori_loop(0, k // bk, body, acc).astype(o_ref.dtype)
-    o_idx = (
-        jax.lax.broadcast_in_dim(idx_m, (bm, bn), (0,)),
-        jax.lax.broadcast_in_dim(idx_n, (bm, bn), (1,)),
-        )
-    o_ref[o_idx] = acc
-  return matmul_kernel(x, y)
-
-
 @functools.partial(jax.jit, static_argnames=["bm", "bn", "bk",
                                              "interpret", "debug"])
 def matmul_block_spec(x, y, *, bm, bn, bk, interpret, debug=False):
@@ -536,32 +491,6 @@ class PallasCallTest(PallasBaseTest):
 
   @parameterized.named_parameters(*[
     (f"m_{m}_n_{n}_k_{k}_dtype_{dtype}_bm_{block_size_m}_"
-     f"bn_{block_size_n}_bk_{block_size_k}_gm_{group_size_m}", m, n, k, dtype,
-     block_size_m, block_size_n, block_size_k, group_size_m)
-      for m in [512, 1024]
-      for k in [512]
-      for n in [512, 1024]
-      for dtype in ["float32", "float16"]
-      for block_size_m in [64, 128]
-      for block_size_n in [64, 128]
-      for block_size_k in [32]
-      for group_size_m in [8]
-      if block_size_m <= m and block_size_n <= n and block_size_k <= k
-    ])
-  def test_matmul(self, m, n, k, dtype, bm, bn, bk, gm):
-    if jtu.test_device_matches(["tpu"]) and not self.INTERPRET:
-      self.skipTest("On TPU the test works only in interpret mode")
-    k1, k2 = random.split(random.key(0))
-    x = random.normal(k1, (m, k), dtype=dtype)
-    y = random.normal(k2, (k, n), dtype=dtype)
-    out = matmul(x, y, bm=bm, bn=bn, bk=bk, gm=gm,
-                 interpret=self.INTERPRET)
-    expected = jnp.matmul(
-            x, y, preferred_element_type=jnp.float32).astype(dtype)
-    np.testing.assert_allclose(out, expected, atol=0.05, rtol=0.05)
-
-  @parameterized.named_parameters(*[
-    (f"m_{m}_n_{n}_k_{k}_dtype_{dtype}_bm_{block_size_m}_"
      f"bn_{block_size_n}_bk_{block_size_k}", m, n, k, dtype,
      block_size_m, block_size_n, block_size_k)
       for m in [512, 1024]
@@ -782,6 +711,8 @@ class PallasCallTest(PallasBaseTest):
   def test_float8_e4m3b11fnuz_dot(self, transpose):
     if not jtu.test_device_matches(["tpu"]) or not jtu.is_device_tpu_at_least(5):
       self.skipTest("`float8_e4m3b11fnuz` dot only supported on TPU.")
+    if jtu.is_device_tpu(7, "x"):
+      self.skipTest("Unsupported type for matmul.")
 
     dtype = jnp.float8_e4m3b11fnuz
     x = jax.random.normal(jax.random.key(0), (2048, 1024), dtype=jnp.bfloat16)

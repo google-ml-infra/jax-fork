@@ -901,6 +901,55 @@ class MutableArrayTest(jtu.JaxTestCase):
     arr = jnp.ones(3)
     self.assertNotIsInstance(arr, jax.Ref)
 
+  def test_scan_vjp3_reverse(self):
+    # https://github.com/jax-ml/jax/issues/32411
+    def f(xs):
+      ys = jnp.arange(5.)
+
+      def body(_, xy):
+        x, y = xy
+        return (), x * y
+      (), z = jax.lax.scan(body, (), (xs, ys))
+      return z.sum()
+
+    grad_accum = jax.new_ref(jnp.zeros(5))
+    _, f_vjp = vjp3(f, jnp.ones(5))
+    _, = f_vjp.with_refs(grad_accum)(1.)
+    self.assertAllClose(grad_accum[...], jnp.arange(5.))
+
+  def test_vmap_with_vjp3(self):
+    # https://github.com/jax-ml/jax/issues/32479
+    def grad_via_ref(f):
+      def wrapper(*args):
+        grad_accum = jax.tree.map(lambda x: jax.new_ref(jnp.zeros_like(x)), args)
+        out, f_vjp = vjp3(f, *args)
+        f_vjp.with_refs(*grad_accum)(jnp.ones_like(out))
+        return jax.tree.map(lambda x: jax.freeze(x), grad_accum)
+      return wrapper
+
+    def issue_vmap1():
+      def f(x):
+        return x + 1
+      x = jnp.ones((4,))
+      # g = grad_via_ref(jax.vmap(f))  # good
+      g = jax.vmap(grad_via_ref(f))    # bad
+      g(x)  # crash
+
+    def issue_vmap1_minimized():
+      def f(x):
+        x.addupdate(1.0)  # bad (assumes non-empty list of indexers)
+      jax.vmap(f)(jax.new_ref(jnp.zeros((4,))))  # crash
+
+    def issue_vmap2():
+      def f(x):
+        x[...] = 1.0  # bad (mismatched shapes)
+      jax.vmap(f)(jax.new_ref(jnp.zeros((4,))))  # crash
+
+    # don't crash
+    issue_vmap1()
+    issue_vmap1_minimized()
+    issue_vmap2()
+
 
 @jtu.with_config(jax_mutable_array_checks=True)
 class MutableArrayErrorsTest(jtu.JaxTestCase):

@@ -28,7 +28,6 @@ from absl.testing import parameterized
 import numpy as np
 
 import jax
-from jax._src import core
 from jax import export
 from jax import jvp, grad
 from jax import lax
@@ -38,6 +37,8 @@ from jax.test_util import check_grads
 from jax.interpreters import batching
 from jax._src import array
 from jax._src import config
+from jax._src import core
+from jax._src import deprecations
 from jax._src import dtypes
 from jax._src import lax_reference
 from jax._src import test_util as jtu
@@ -1106,17 +1107,24 @@ class LaxTest(jtu.JaxTestCase):
     lhs = jnp.arange(5.0)
     rhs = jnp.arange(5.0)
     msg = "jax.lax.dot: passing precision or preferred_element_type by position"
+    multiple_args_msg = "jax.lax.dot got multiple values for argument"
 
-    with self.assertWarnsRegex(DeprecationWarning, msg):
+    with self.assertDeprecationWarnsOrRaises("jax-lax-dot-positional-args", msg):
       lax.dot(lhs, rhs, lax.Precision.DEFAULT, jnp.float32)
 
-    with self.assertWarnsRegex(DeprecationWarning, msg):
+    with self.assertDeprecationWarnsOrRaises("jax-lax-dot-positional-args", msg):
       with self.assertRaises(TypeError):
         lax.dot(lhs, rhs, lax.Precision.DEFAULT, precision=lax.Precision.DEFAULT)
 
-    with self.assertWarnsRegex(DeprecationWarning, msg):
-      with self.assertRaises(TypeError):
-        lax.dot(lhs, rhs, lax.Precision.DEFAULT, jnp.float32, preferred_element_type=jnp.float32)
+    if deprecations.is_accelerated("jax-lax-dot-positional-args"):
+      with self.assertRaisesRegex(ValueError, msg):
+        lax.dot(lhs, rhs, lax.Precision.DEFAULT, jnp.float32,
+                preferred_element_type=jnp.float32)
+    else:
+      with self.assertWarnsRegex(DeprecationWarning, msg):
+        with self.assertRaisesRegex(TypeError, multiple_args_msg):
+          lax.dot(lhs, rhs, lax.Precision.DEFAULT, jnp.float32,
+                  preferred_element_type=jnp.float32)
 
   @parameterized.parameters([
       (algorithm, dtype)
@@ -2748,7 +2756,12 @@ class LaxTest(jtu.JaxTestCase):
                offset_dims=(2,), collapsed_slice_dims=(),
                start_index_map=(2,), operand_batching_dims=(0, 1),
                start_indices_batching_dims=(1, 0)),
-           (1, 1, 3))
+           (1, 1, 3)),
+          # This test verifies that we allow slice sizes that would not fit in
+          # the operand if indices were empty. This is a useful base case.
+          ((0,), np.zeros((0, 1), dtype=np.int32), lax.GatherDimensionNumbers(
+            offset_dims=(), collapsed_slice_dims=(0,), start_index_map=(0,)),
+            (1,)),
     ]],
     dtype=lax_test_util.all_dtypes,
   )
@@ -4508,7 +4521,7 @@ class FunctionAccuracyTest(jtu.JaxTestCase):
     # return values) to (i) workaround numpy 1.x assert_allclose bug
     # in comparing complex infinities, and (ii) expose more details
     # about failing cases:
-    s_dict_parts = dict()
+    s_dict_parts = {}
     for k, v in s_dict.items():
       s_dict_parts[k + '.real'] = v
       s_dict_parts[k + '.imag'] = v
@@ -4720,7 +4733,7 @@ class CompositeTest(jtu.JaxTestCase):
   def test_composite_with_attributes(self):
     # The static_argnames is required here since k is a constant that should
     # come out of a larger context, but we unit test one op (composite) here.
-    @partial(jax.jit, static_argnames=['k'])
+    @jax.jit(static_argnames=['k'])
     @partial(lax.composite, name="my.top_k")
     def my_top_k(x, *, k):
       return lax.top_k(x, k)
@@ -4965,11 +4978,14 @@ class RaggedTest(jtu.JaxTestCase):
         )
 
   @parameterized.parameters(
-        { "m": 5, "k": 4, "n": 3, "num_groups": 1},
-        { "m": 10, "k": 9, "n": 8, "num_groups": 2},
+      {"m": 5, "k": 4, "n": 3, "num_groups": 1},
+      {"m": 5, "k": 4, "n": 3, "num_groups": 2},
+      {"m": 9, "k": 4, "n": 3, "num_groups": 1},
+      {"m": 10, "k": 9, "n": 8, "num_groups": 2},
   )
-  def test_ragged_dot_unsupported(
-      self, m, k, n, num_groups):
+  def test_ragged_dot_small_m(self, m, k, n, num_groups):
+    if not jtu.if_cloud_tpu_at_least(2025, 10, 14):
+      self.skipTest("Requires libtpu built after 2025-10-14")
     lhs_shape = (m, k)
     rhs_shape = (num_groups, k, n)
     group_sizes_shape = (num_groups,)
@@ -4979,9 +4995,7 @@ class RaggedTest(jtu.JaxTestCase):
         jnp.ones(rhs_shape, dtype=jnp.float32),
         jnp.ones(group_sizes_shape, dtype=jnp.int32),
     ]
-    if jtu.test_device_matches(["tpu"]):
-      with self.assertRaises(jax.errors.JaxRuntimeError):
-        self._CompileAndCheck(lax.ragged_dot, args_maker)
+    self._CompileAndCheck(lax.ragged_dot, args_maker)
 
   @parameterized.parameters(
       {

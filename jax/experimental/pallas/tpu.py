@@ -26,10 +26,10 @@ from jax._src.pallas.mosaic.core import CompilerParams as CompilerParams
 from jax._src.pallas.mosaic.helpers import sync_copy as sync_copy
 from jax._src.pallas.mosaic.helpers import core_barrier as core_barrier
 from jax._src.pallas.mosaic.helpers import run_on_first_core as run_on_first_core
-from jax._src.pallas.mosaic.interpret import InterpretParams as InterpretParams
-from jax._src.pallas.mosaic.interpret import force_tpu_interpret_mode as force_tpu_interpret_mode
-from jax._src.pallas.mosaic.interpret import reset_tpu_interpret_mode_state as reset_tpu_interpret_mode_state
-from jax._src.pallas.mosaic.interpret import set_tpu_interpret_mode as set_tpu_interpret_mode
+from jax._src.pallas.mosaic.interpret.interpret_pallas_call import InterpretParams as InterpretParams
+from jax._src.pallas.mosaic.interpret.interpret_pallas_call import force_tpu_interpret_mode as force_tpu_interpret_mode
+from jax._src.pallas.mosaic.interpret.interpret_pallas_call import reset_tpu_interpret_mode_state as reset_tpu_interpret_mode_state
+from jax._src.pallas.mosaic.interpret.interpret_pallas_call import set_tpu_interpret_mode as set_tpu_interpret_mode
 from jax._src.pallas.mosaic.lowering import LoweringException as LoweringException
 from jax._src.pallas.mosaic.pipeline import BufferedRef as BufferedRef
 from jax._src.pallas.mosaic.pipeline import BufferedRefBase as BufferedRefBase
@@ -49,15 +49,20 @@ from jax._src.pallas.mosaic.primitives import prng_random_bits as prng_random_bi
 from jax._src.pallas.mosaic.primitives import prng_seed as prng_seed
 from jax._src.pallas.mosaic.primitives import repeat as repeat
 from jax._src.pallas.mosaic.primitives import roll as roll
+from jax._src.pallas.mosaic.primitives import stochastic_round as stochastic_round
 from jax._src.pallas.mosaic.primitives import store as store
 from jax._src.pallas.mosaic.primitives import touch as touch
 from jax._src.pallas.mosaic.primitives import with_memory_space_constraint as with_memory_space_constraint
+from jax._src.pallas.mosaic.random import sample_block as sample_block
 from jax._src.pallas.mosaic.random import stateful_bernoulli as stateful_bernoulli
 from jax._src.pallas.mosaic.random import stateful_bits as stateful_bits
 from jax._src.pallas.mosaic.random import stateful_normal as stateful_normal
 from jax._src.pallas.mosaic.random import stateful_uniform as stateful_uniform
-from jax._src.pallas.mosaic.random import sample_block as sample_block
 from jax._src.pallas.mosaic.random import to_pallas_key as to_pallas_key
+from jax._src.pallas.mosaic.tpu_info import ChipVersion as ChipVersion
+from jax._src.pallas.mosaic.tpu_info import get_tpu_info as get_tpu_info
+from jax._src.pallas.mosaic.tpu_info import is_tpu_device as is_tpu_device
+from jax._src.pallas.mosaic.tpu_info import TpuInfo as TpuInfo
 
 # Those primitives got moved to Pallas core. Keeping the updated imports
 # here for backward compatibility.

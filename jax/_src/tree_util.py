@@ -123,7 +123,7 @@ def treedef_tuple(treedefs: Iterable[PyTreeDef]) -> PyTreeDef:
   See Also:
     - :func:`jax.tree_util.treedef_children`
   """
-  return pytree.tuple(default_registry, list(treedefs))
+  return pytree.treedef_tuple(default_registry, list(treedefs))
 
 
 @export

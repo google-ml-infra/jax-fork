@@ -111,6 +111,10 @@ jax_py_test(
 jax_py_test(
     name = "array_extensibility_test",
     srcs = ["array_extensibility_test.py"],
+    shard_count = 3,
+    tags = [
+        "notsan",  # Times out
+    ],
     deps = [
         "//jax",
         "//jax/_src:test_util",
@@ -123,6 +127,11 @@ jax_py_test(
 jax_multiplatform_test(
     name = "array_interoperability_test",
     srcs = ["array_interoperability_test.py"],
+    backend_tags = {
+        "gpu": [
+            "noasan",  # Forge OOM
+        ],
+    },
     enable_backends = [
         "cpu",
         "gpu",
@@ -132,6 +141,7 @@ jax_multiplatform_test(
     ],
     tags = [
         "multiaccelerator",
+        "notsan",  # Times out
     ],
     deps = py_deps([
         "absl/testing",
@@ -1095,6 +1105,44 @@ jax_multiplatform_test(
 )
 
 jax_multiplatform_test(
+    name = "pmap_without_shmap_test",
+    srcs = ["pmap_test.py"],
+    args = ["--jax_pmap_shmap_merge=false"],
+    backend_tags = {
+        "tpu": [
+            "noasan",  # Times out under asan.
+            "requires-mem:16g",  # Under tsan on 2x2 this test exceeds the default 12G memory limit.
+        ],
+        "gpu": [
+            "noasan",  # Times out under asan.
+        ],
+    },
+    disable_configs = [
+        "tpu_v6e",  # Forge OOM.
+    ],
+    enable_configs = [
+        "gpu_v100",
+        "tpu_v3_x4",
+    ],
+    minimal_shard_count = {
+        "tpu": 8,
+    },
+    shard_count = {
+        "cpu": 20,
+        "gpu": 10,
+        "tpu": 20,
+    },
+    tags = ["multiaccelerator"],
+    deps = [
+        "//jax/_src:internal_test_util",
+    ] + py_deps([
+        "absl/testing",
+        "disable_pmap_shmap_merge",
+        "numpy",
+    ]),
+)
+
+jax_multiplatform_test(
     name = "pmap_test",
     srcs = ["pmap_test.py"],
     backend_tags = {
@@ -1207,6 +1255,9 @@ jax_multiplatform_test(
             "nomsan",  # Times out
             "notsan",  # Times out
         ],
+    },
+    env = {
+        "XLA_FLAGS": "--xla_cpu_use_xnnpack=false",  # TODO(b/454581761): Reenable once we switch to YNNPACK.
     },
     shard_count = 4,
     deps = py_deps([
@@ -1437,6 +1488,7 @@ jax_multiplatform_test(
     },
     disable_configs = [
         "gpu_b200",  # Times out
+        "tpu_7x",  # Times out
     ],
     minimal_shard_count = {
         "tpu": 8,
@@ -1706,7 +1758,10 @@ jax_multiplatform_test(
     name = "ann_test",
     srcs = ["ann_test.py"],
     backend_tags = {
-        "tpu": ["noasan"],  # Times out.
+        "tpu": [
+            "noasan",  # Times out.
+            "notsan",  # Times out.
+        ],
     },
     deps = py_deps([
         "numpy",
@@ -1804,9 +1859,6 @@ jax_multiplatform_test(
     args = [
         "--jax_num_generated_cases=5",
     ],
-    backend_variant_args = {
-        "tpu_pjrt_c_api": ["--jax_num_generated_cases=1"],
-    },
     enable_configs = [
         "gpu_h100",
         "cpu",
@@ -1833,9 +1885,6 @@ jax_multiplatform_test(
 jax_multiplatform_test(
     name = "ragged_collective_test",
     srcs = ["ragged_collective_test.py"],
-    disable_configs = [
-        "tpu_pjrt_c_api",
-    ],
     enable_backends = [
         "gpu",
         "tpu",
@@ -2059,9 +2108,6 @@ jax_multiplatform_test(
 jax_multiplatform_test(
     name = "unary_ops_accuracy_test",
     srcs = ["unary_ops_accuracy_test.py"],
-    disable_configs = [
-        "tpu_pjrt_c_api",
-    ],
     enable_backends = [
         "tpu",
     ],

@@ -1282,8 +1282,9 @@ class DialectLoweringTest(MosaicGpuTest):
     with ir.InsertionPoint(self.module.body):
       i1 = arith.constant(ir.IndexType.get(), 1)
       c1 = arith.constant(i32, 1)
-      splat = vector.SplatOp(
-          ir.VectorType.get(shape, i32), arith.constant(i32, 1234),
+      splat = vector.BroadcastOp(
+          ir.VectorType.get(shape, i32),
+          arith.constant(i32, 1234),
       )
       splat.attributes["out_layouts"] = ir.ArrayAttr.get([
           splat_layout_attr
@@ -1395,9 +1396,14 @@ class DialectLoweringTest(MosaicGpuTest):
           (4, 32), ir.BF16Type.get(), memory_space=mgpu_utils.smem()
       )
       vec1, vec2, ref = undefs(vec_ty, vec_ty, ref_ty)
-      mgpu.dialect.custom_primitive(
+      op = mgpu.dialect.CustomPrimitiveOp(
           [vec_ty], [vec1, vec2, ref], in_layouts, in_transforms, out_layouts
       )
+      args_ty = [arg.type for arg in op.operands_]
+      block = op.body.blocks.append(*args_ty)
+      with ir.InsertionPoint(block):
+        out = undefs(vec_ty)
+        mgpu.dialect.ReturnOp(out)
 
     if omit_in_layouts:
       error = "layout for each vector operand"

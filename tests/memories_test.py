@@ -38,7 +38,6 @@ from jax._src.xla_metadata import set_xla_metadata
 from jax.experimental.compute_on import compute_on
 from jax._src.compute_on import compute_on2
 from jax._src.shard_map import shard_map
-from jax._src.lib import ifrt_version
 import numpy as np
 
 config.parse_flags_with_absl()
@@ -748,12 +747,8 @@ class DevicePutTest(jtu.JaxTestCase):
 class ComputeOffload(jtu.BufferDonationTestCase):
 
   def setUp(self):
-    if ifrt_version >= 31:
-      if not jtu.test_device_matches(["tpu", "gpu"]):
-        self.skipTest("Memories do not work on CPU backends yet.")
-    else:
-      if not jtu.test_device_matches(["tpu"]):
-        self.skipTest("Memories do not work on CPU or GPU backends yet.")
+    if not jtu.test_device_matches(["tpu", "gpu"]):
+      self.skipTest("Memories do not work on CPU backends yet.")
     super().setUp()
 
   def _check_mem_kind(self, executable_kind, out_sharding, expected_kind):
@@ -1133,7 +1128,7 @@ class ComputeOffload(jtu.BufferDonationTestCase):
     g = jax.jit(jax.grad(lambda x: f(x).sum()))
 
     arr = jax.device_put(jnp.ones(4) * 4, s)
-    all_true = jnp.ones(4)
+    all_true = jnp.ones(4, dtype=jnp.float32)
     self.assertArraysEqual(g(arr), all_true)
 
   def test_scan_offload(self):
@@ -1287,15 +1282,15 @@ class ComputeOffload(jtu.BufferDonationTestCase):
     with self.assertRaisesRegex(
         ValueError,
         "Memory kinds passed to jax.jit does not match memory kind on the"
-        " respective arg. Got pjit memory kind: pinned_host, arg memory kind:"
-        " device for arg shape.*"):
+        " respective arg. Got jit memory kind: pinned_host, arg memory kind:"
+        " device for arg.*"):
       f(jnp.arange(16).reshape(8, 2))  # uncommitted inp also raises error
 
     with self.assertRaisesRegex(
         ValueError,
         "Memory kinds passed to jax.jit does not match memory kind on the"
-        " respective arg. Got pjit memory kind: pinned_host, arg memory kind:"
-        " device for arg shape.*"):
+        " respective arg. Got jit memory kind: pinned_host, arg memory kind:"
+        " device for arg.*"):
       f(inp)  # committed inp raises error.
 
     @functools.partial(jax.jit, in_shardings=s.with_memory_kind("device"))

@@ -131,6 +131,22 @@ LogicalResult BitcastOp::verify() {
   return success();
 }
 
+OpFoldResult BitcastVregOp::fold(FoldAdaptor adaptor) {
+  // Bitcast from X -> X is a no-op.
+  if (getType() == getInput().getType()) {
+    return getInput();
+  }
+  // Bitcast from X -> Y -> ... -> Z -> X is a no-op.
+  Value input = getInput();
+  while (auto op = dyn_cast<BitcastVregOp>(input.getDefiningOp())) {
+    input = op.getInput();
+    if (getType() == input.getType()) {
+      return input;
+    }
+  }
+  return nullptr;
+}
+
 LogicalResult MemRefSliceOp::verify() {
   auto source_type = getMemRefType(getMemRef());
   auto target_type = getType();
@@ -839,12 +855,9 @@ LogicalResult VectorStoreIdxOp::verify() {
                "memref with dimension: ")
            << ref_ty.getRank() << ". Got: " << llvm::size(getIndices()) << ".";
   }
-  if (llvm::size(getIndices()) != value_ty.getRank()) {
-    return emitOpError(
-               "Expected one index vector for each dimension of the value "
-               "to store with dimension: ")
-           << value_ty.getRank() << ". Got: " << llvm::size(getIndices())
-           << ".";
+  if (value_ty.getRank() != 1) {
+    return emitOpError("Expected value to have rank 1. Got: ")
+           << value_ty.getRank() << ".";
   }
   for (const auto [i, index] : llvm::enumerate(getIndices())) {
     VectorType index_ty = llvm::cast<VectorType>(index.getType());
@@ -1811,6 +1824,45 @@ LogicalResult UnpackSubelementsOp::verify() {
   return success();
 }
 
+LogicalResult UnpackSubelementsOp::canonicalize(UnpackSubelementsOp op,
+                                                PatternRewriter& rewriter) {
+  auto src_elem_ty = op.getSource().getType().getElementType();
+  auto dst_elem_ty = op.getType().getElementType();
+  if (!src_elem_ty.isSignlessInteger() || !dst_elem_ty.isSignlessInteger()) {
+    return failure();
+  }
+  if (!op.getSignExtended()) {
+    // Unpack of pack with the same format is reversible if not sign extended.
+    if (auto pack = dyn_cast<PackSubelementsOp>(op.getSource().getDefiningOp());
+        pack && pack.getPackFormat() == op.getPackFormat() &&
+        pack.getSources().front().getType() == op.getType()) {
+      rewriter.replaceAllOpUsesWith(
+          op, pack.getPaddedSources(
+                  pack.getSources(), pack.getPositions(),
+                  op.getType().getElementTypeBitWidth() /
+                      pack.getType().getElementTypeBitWidth())[op.getIndex()]);
+      return success();
+    }
+    return failure();
+  }
+  // Set `sign_extended` to false if it's used by pack that reduces the source
+  // bitwidth.
+  for (auto user : op->getUsers()) {
+    auto pack = dyn_cast<PackSubelementsOp>(user);
+    if (!pack) {
+      return failure();
+    }
+    auto packed_elem_ty = pack.getType().getElementType();
+    if (!packed_elem_ty.isSignlessInteger() ||
+        packed_elem_ty.getIntOrFloatBitWidth() >
+            src_elem_ty.getIntOrFloatBitWidth()) {
+      return failure();
+    }
+  }
+  rewriter.modifyOpInPlace(op, [&]() { op.setSignExtended(false); });
+  return success();
+}
+
 void PackSubelementsOp::build(OpBuilder &builder, OperationState &state,
                               const VectorType output_type,
                               const ArrayRef<Value> padded_sources,
@@ -2003,22 +2055,13 @@ LogicalResult ReduceIndexOp::verify() {
 }
 
 LogicalResult AssumeMultipleOp::verify() {
-  auto operand_value = getValue();
-  auto divisor = getMultiple();
-  if (auto cst_op = operand_value.getDefiningOp<arith::ConstantOp>()) {
-    auto int_attr = dyn_cast<IntegerAttr>(cst_op.getValue());
-    // Illegal usage of AssumeMultipleOp.
-    if (!int_attr) {
-      return emitOpError(
-                 "Illegal user annotation, expected an integer, but got ")
-             << cst_op.getValue();
-    }
-    if (int_attr.getInt() % divisor != 0) {
-      return emitOpError(
-                 "Illegal user annotation, expected an integer that is "
-                 "divisible by the multiple, but got ")
-             << int_attr.getInt() << " % " << divisor;
-    }
+  if (getMultiple() < 1) {
+    return emitError("Multiple must be >= 1, got ") << getMultiple();
+  }
+  if (auto value = mlir::getConstantIntValue(getValue());
+      value.has_value() && (*value % getMultiple() != 0)) {
+    return emitError("Operand is a constant ")
+           << *value << " that is not a multiple of " << getMultiple();
   }
   return success();
 }
@@ -2129,6 +2172,18 @@ OpFoldResult ReshapeOp::fold(FoldAdaptor adaptor) {
     return cst.reshape(getType());
   }
   return nullptr;
+}
+
+LogicalResult StochasticConvertElementwiseOp::verify() {
+  auto dst_ty = getDstType();
+  if (!dst_ty.isBF16() &&
+      !llvm::isa<mlir::Float8E5M2Type, mlir::Float8E4M3FNType,
+                 mlir::Float8E4M3B11FNUZType>(dst_ty)) {
+    return emitOpError(
+        "Only bf16, f8e5m2, f8e4m3fn, and f8e4m3b11fnuz are supported as "
+        "destination types.");
+  }
+  return success();
 }
 
 }  // namespace tpu

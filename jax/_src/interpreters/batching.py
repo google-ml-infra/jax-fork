@@ -30,75 +30,17 @@ from jax._src.sharding_impls import NamedSharding
 from jax._src import mesh as mesh_lib
 from jax._src.ad_util import Zero, SymbolicZero, add_jaxvals, add_jaxvals_p
 from jax._src.core import Trace, Tracer, TraceTag, AxisName
-from jax._src.interpreters import ad
 from jax._src.interpreters import partial_eval as pe
 from jax._src.tree_util import (tree_unflatten, tree_flatten,
                                 register_pytree_node, PyTreeDef)
 from jax._src.typing import Array
-from jax._src.util import (
-    unzip2, safe_map, safe_zip, split_list, canonicalize_axis, moveaxis, curry,
-    memoize, as_hashable_function, weakref_lru_cache, tuple_insert,
-    HashableFunction)
+from jax._src.util import (unzip2, safe_map, safe_zip, split_list,
+                           canonicalize_axis, moveaxis, as_hashable_function,
+                           curry, memoize, weakref_lru_cache, tuple_insert)
+
 
 map, unsafe_map = safe_map, map
 zip, unsafe_zip = safe_zip, zip
-
-class VmapPrimitive(core.Primitive):
-  multiple_results = True
-  skip_canonicalization = True
-
-  def bind_with_trace(self, trace, fun_and_args, params):
-    fun, *args = fun_and_args
-    if trace.requires_low:
-      with core.set_current_trace(trace):
-        return batch(fun, params['axis_data'], params['in_axes'],
-                     params['out_axes_thunk']).call_wrapped(*args)
-    else:
-      return trace.process_vmap(vmap_p, fun, args, **params)
-
-  def get_bind_params(self, params):
-    # TODO(mattjj,dougalm): could be round-tripping jaxprs here
-    new_params = dict(params)
-    jaxpr = new_params.pop('jaxpr')
-    subfun = lu.hashable_partial(
-        lu.wrap_init(core.eval_jaxpr, debug_info=jaxpr.debug_info), jaxpr, ())
-    axes = new_params.pop('out_axes')
-    new_params['out_axes_thunk'] = HashableFunction(lambda: axes, closure=axes)
-    return [subfun], new_params
-vmap_p = VmapPrimitive('vmap')
-
-def _vmap_transpose(ct, *args, jaxpr, axis_data, in_axes, out_axes):
-  all_args, in_tree_def = tree_flatten(((), args, ct))  # empty consts
-  dbg = jaxpr.debug_info.with_unknown_names()
-  fun = lu.hashable_partial(lu.wrap_init(ad.backward_pass, debug_info=dbg),
-                            jaxpr, False)
-  fun, nz_arg_cts = ad.nonzero_outputs(fun)
-  fun, out_tree = ad.flatten_fun_nokwargs(fun, in_tree_def)
-  res_axes = [a for a, x in zip(in_axes, args) if not ad.is_undefined_primal(x)]
-  ct_axes = [a for a, x in zip(out_axes, ct) if type(x) is not Zero]
-
-  @as_hashable_function(closure=(in_axes, tuple(type(c) is Zero for c in ct)))
-  def out_axes_thunk():
-    return tuple(axis or 0 for axis, nz in zip(in_axes, nz_arg_cts()) if nz)
-
-  out = vmap_p.bind(fun, *all_args, axis_data=axis_data,
-                    in_axes=(*res_axes, *ct_axes), out_axes_thunk=out_axes_thunk)
-  arg_cts = tree_unflatten(out_tree(), out)
-
-  def unmap_zero(zero, in_axis):
-    return (zero if in_axis is None else
-            Zero(core.unmapped_aval(axis_data.size, in_axis, zero.aval)))
-  return [unmap_zero(arg_ct, in_axis) if type(arg_ct) is Zero else
-          arg_ct if in_axis is not None else arg_ct.sum(0)
-          for arg_ct, in_axis in zip(arg_cts, in_axes)]
-ad.primitive_transposes[vmap_p] = _vmap_transpose
-
-def _vmap_typecheck(ctx_factory, *in_atoms, jaxpr, axis_data, in_axes, out_axes):
-  out_avals = map(partial(core.unmapped_aval, axis_data.size),
-                  out_axes, jaxpr.out_avals)
-  effs = core.filter_named_axis_effects(jaxpr.effects, {axis_data.name})
-  return out_avals, effs
-core.custom_typechecks[vmap_p] = _vmap_typecheck
 
 
 # Jumbles
@@ -558,6 +500,7 @@ class BatchTrace(Trace):
     assert isinstance(axis_data, AxisData)
     self.axis_data = axis_data
     self.tag = tag
+    self.requires_low = False
 
   def to_batch_info(self, val):
     if isinstance(val, BatchTracer) and val._trace.tag is self.tag:
@@ -712,9 +655,12 @@ def _batch_inner(f: Callable, axis_data, out_dim_dests, tag, in_dims, *in_vals):
                                       source_info_util.current()))
     with core.set_current_trace(parent_trace):
       in_tracers = map(partial(to_elt, trace, idx), in_vals, in_dims)
+    # TODO(yashkatariya): Instead of `add_explicit_mesh_axis_names`, we should
+    # create a new mesh by removing the axis_data.explicit_mesh_axis from it.
     with (core.set_current_trace(trace),
           core.extend_axis_env_nd([(axis_data.name, axis_data.size)]),
-          core.add_spmd_axis_names(axis_data.spmd_name)):
+          core.add_spmd_axis_names(axis_data.spmd_name),
+          core.add_explicit_mesh_axis_names(axis_data.explicit_mesh_axis)):
       outs = f(*in_tracers)
       out_dim_dests = out_dim_dests() if callable(out_dim_dests) else out_dim_dests
       out_vals = map(partial(from_elt, trace, axis_data.size, axis_data.explicit_mesh_axis),
@@ -920,9 +866,12 @@ def _batch_jaxpr_inner(f, store, axis_data, tag, in_axes, *in_vals):
     _, in_axes = resolve_ragged_axes(in_vals, in_axes)
     in_tracers = [BatchTracer(trace, val, dim) if dim is not None else val
                   for val, dim in zip(in_vals, in_axes)]
+    # TODO(yashkatariya): Instead of `add_explicit_mesh_axis_names`, we should
+    # create a new mesh by removing the axis_data.explicit_mesh_axis from it.
     with (core.set_current_trace(trace),
           core.extend_axis_env_nd([(axis_data.name, axis_data.size)]),
-          core.add_spmd_axis_names(axis_data.spmd_name)):
+          core.add_spmd_axis_names(axis_data.spmd_name),
+          core.add_explicit_mesh_axis_names(axis_data.explicit_mesh_axis)):
       outs = f(*in_tracers)
     out_vals, out_axes = unzip2(map(trace.to_batch_info, outs))
     new_out_axes = indirectify_ragged_axes_against_inputs_outputs(
@@ -1219,6 +1168,10 @@ def broadcast(x, sz, axis, mesh_axis):
       if spmd_names:
         x = core.pvary(x, tuple(spmd_names))
     return x
+
+def matchaxis2(axis_data, src, dst, x, sum_match=False):
+  return matchaxis(axis_data.name, axis_data.size, axis_data.explicit_mesh_axis,
+                   src, dst, x, sum_match)
 
 def matchaxis(axis_name, sz, mesh_axis, src, dst, x, sum_match=False):
   if dst == jumble_axis:

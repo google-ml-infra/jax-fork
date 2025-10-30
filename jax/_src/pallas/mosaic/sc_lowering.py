@@ -14,6 +14,7 @@
 """Lowering for Pallas TPU SparseCore."""
 
 from collections.abc import Sequence
+import contextlib
 import dataclasses
 import functools
 from typing import Any, NoReturn, cast
@@ -49,7 +50,36 @@ map, unsafe_map = util.safe_map, map
 zip, unsafe_zip = util.safe_zip, zip
 
 
-LoweringContext = tc_lowering.LoweringContext
+class GlobalAllocations:
+  """Hands out global allocations sequentially during lowering."""
+  def __init__(self, allocations: dict[pallas_core.MemoryRef, list[Any]]):
+    self._allocations = {k: list(v) for k, v in allocations.items()}
+
+  def next_allocation(self, what: state.AbstractRef | pallas_core.TransformedRef) -> Any:
+    """Returns the next available allocation for the given shape."""
+    what = pallas_core.MemoryRef(what.inner_aval, what.memory_space)
+    if what not in self._allocations:
+      raise LookupError(f"No allocations are available for {what}.")
+    if not self._allocations[what]:
+      raise LookupError(f"No more allocations available for {what}.")
+    return self._allocations[what].pop()
+
+  @contextlib.contextmanager
+  def verify_usage(self):
+    """Scope that verifies all allocations are used."""
+    try:
+      yield
+    finally:
+      unused = [k for k, v in self._allocations.items() if v]
+      if unused:
+        raise AssertionError(f"Some allocations unused ({unused}).")
+
+
+@dataclasses.dataclass
+class ScLoweringContext(tc_lowering.LoweringContext):
+  """Lowering context for SparseCore."""
+  global_allocations: GlobalAllocations
+
 LoweringRuleContext = tc_lowering.LoweringRuleContext
 
 _transform_ref = tc_lowering._transform_ref
@@ -83,16 +113,19 @@ def lower_jaxpr_to_module(
     new_block_mappings = []
     for bm in grid_mapping.block_mappings:
 
-      def new_index_map(*args):  # Has a leading grid index
+      def new_index_map(*args, bm=bm):
         return jax_core.eval_jaxpr(
+            # Discard the leading grid index.
             bm.index_map_jaxpr.jaxpr, bm.index_map_jaxpr.consts, *args[1:]
         )
 
+      debug_info = bm.index_map_jaxpr.jaxpr.debug_info
+      if debug_info.arg_names is not None:
+        debug_info = debug_info._replace(
+            arg_names=("idx", *debug_info.arg_names)
+        )
       flat_fun, _ = api_util.flatten_fun(
-          lu.wrap_init(
-              new_index_map, debug_info=bm.index_map_jaxpr.jaxpr.debug_info
-          ),
-          index_map_tree,
+          lu.wrap_init(new_index_map, debug_info=debug_info), index_map_tree
       )
       with pallas_core.tracing_grid_env(new_grid, grid_mapping.vmapped_dims):
         index_map_jaxpr, _, index_map_jaxpr_consts = pe.trace_to_jaxpr_dynamic(
@@ -195,8 +228,8 @@ class MosaicGridMapping(tc_lowering.MosaicGridMapping):
     ):
       # TODO(slebedev): Support tiling annotations for kernel operands.
       raise NotImplementedError(
-          "``plsc.MemoryRef``s are not supported as scratch operands to the"
-          " kernel. Allocate them in the kernel body via ``pl.run_scoped``."
+          "`plsc.MemoryRef`s are not supported as scratch operands to the"
+          " kernel. Allocate them in the kernel body via `pl.run_scoped`."
       )
     super().__init__(
         jaxpr,
@@ -246,7 +279,13 @@ def lower_jaxpr_to_func(
         for i, idx in enumerate(grid_indices)
         if i not in mosaic_grid_mapping.vmapped_dims
     )
-    lowering_context = LoweringContext(
+
+    allocations = sc_core.gather_global_allocations(jaxpr)
+    flat_allocations, allocations_tree = jax.tree.flatten(allocations)
+    allocation_operands = operands_and_scratch[
+        len(operands_and_scratch) - len(flat_allocations):]
+    allocations = allocations_tree.unflatten(allocation_operands)
+    lowering_context = ScLoweringContext(
         mosaic_grid_mapping.grid,  # type: ignore
         mosaic_grid_mapping.grid_names,
         mosaic_grid_mapping.vmapped_dims,
@@ -260,10 +299,12 @@ def lower_jaxpr_to_func(
         forward_compatible=forward_compatible,
         backend=backend,
         dynamic_shape_replacement_fn=dynamic_shape_replacement_fn,
+        global_allocations=GlobalAllocations(allocations),
     )
-    return tc_lowering.jaxpr_subcomp(
-        lowering_context, jaxpr, *scalar_prefetch, *operands_and_scratch
-    )
+    with lowering_context.global_allocations.verify_usage():
+      return tc_lowering.jaxpr_subcomp(
+          lowering_context, jaxpr, *scalar_prefetch, *operands_and_scratch
+      )
 
   body = func.FuncOp.from_py_func(*arg_types, name=name)(body_func)
   func_op = cast(func.FuncOp, body.func_op)
@@ -307,6 +348,12 @@ register_lowering_rule = functools.partial(
     ),
 )
 
+@register_lowering_rule(pallas_primitives.get_global_p)
+def _lower_get_global(ctx: LoweringRuleContext, *, what):
+  lctx = ctx.lowering_context
+  assert isinstance(lctx, ScLoweringContext)
+  return lctx.global_allocations.next_allocation(what)
+
 
 @register_lowering_rule(state_primitives.get_p)
 def _get_lowering_rule(ctx: LoweringRuleContext, ref, *flat_transforms, tree):
@@ -320,12 +367,16 @@ def _load_lowering_rule(
   assert isinstance(ref_aval, state.AbstractRef)
   [out_aval] = ctx.avals_out
   assert isinstance(out_aval, jax_core.ShapedArray)
-  in_smem = ref_aval.memory_space is tpu_core.MemorySpace.SMEM
-  if in_smem:
-    if out_aval.ndim:
-      raise NotImplementedError("Get can only load scalars from SMEM")
-  else:
-    _check_aval_is_supported("Get", out_aval)
+
+  if (
+      (ref_memory_space := ref_aval.memory_space) is tpu_core.MemorySpace.HBM
+      or ref_memory_space is tpu_core.MemorySpace.VMEM_SHARED
+  ):
+    raise NotImplementedError(
+        f"Get does not support loading from {ref_memory_space.name}."
+        " Copy the data to a core-local memory space, e.g. VMEM,"
+        " via `pltpu.async_copy`."
+    )
 
   transforms = list(jax.tree.unflatten(tree, flat_transforms))
   if not transforms or not isinstance(transforms[-1], indexing.NDIndexer):
@@ -337,9 +388,7 @@ def _load_lowering_rule(
       ref, ref_aval.dtype, ref_block_shape, prev_transforms
   )
   starts, sizes, strides, _, _ = tc_lowering._indexer_to_start_size_stride(
-      indexer,
-      ref_block_shape,
-      cast_to_index=True,
+      indexer, ref_block_shape, cast_to_index=True
   )
   del sizes  # Currently unused.
   if not all(s == 1 for s in strides):
@@ -347,10 +396,15 @@ def _load_lowering_rule(
         "Get only supports slices with stride 1, got {strides}"
     )
 
-  if in_smem:
+  if not out_aval.ndim:
     if mask is not None:
-      raise NotImplementedError("Get does not support masked loads from SMEM")
+      raise NotImplementedError("Get does not support masked scalar loads")
     return memref.load(ref, starts)
+
+  if ref_memory_space is tpu_core.MemorySpace.SMEM:
+    raise NotImplementedError("Get can only load scalars from SMEM")
+  else:
+    _check_aval_is_supported("Get", out_aval)
 
   vec_type = ir.VectorType.get(
       out_aval.shape, _dtype_to_ir_type(ref_aval.dtype)
@@ -375,20 +429,19 @@ def _store_lowering_rule(
   [out_aval] = ctx.avals_out
   assert isinstance(out_aval, jax_core.ShapedArray)
 
-  in_smem = ref_aval.memory_space is tpu_core.MemorySpace.SMEM
-  if in_smem:
-    if out_aval.ndim:
-      raise NotImplementedError("Swap can only store scalars to SMEM")
-  else:
-    _check_aval_is_supported("Swap", out_aval)
+  if (
+      (ref_memory_space := ref_aval.memory_space) is tpu_core.MemorySpace.HBM
+      or ref_memory_space is tpu_core.MemorySpace.VMEM_SHARED
+  ):
+    raise NotImplementedError(
+        f"Swap does not support storing to {ref_memory_space.name}."
+        " Copy the data to a core-local memory space, e.g. VMEM,"
+        " via `pltpu.async_copy`."
+    )
 
   transforms = list(jax.tree.unflatten(tree, flat_transforms))
   if not transforms or not isinstance(transforms[-1], indexing.NDIndexer):
-    ref_shape = (
-        ref_aval.shape
-        if not transforms
-        else state.get_transform_shape(transforms[-1])
-    )
+    ref_shape = state.get_transforms_shape(transforms, ref_aval.shape)
     transforms.append(indexing.NDIndexer.make_trivial_indexer(ref_shape))
   *prev_transforms, indexer = transforms
   ref_block_shape, *_ = ctx.block_shapes
@@ -396,9 +449,7 @@ def _store_lowering_rule(
       ref, ref_aval.dtype, ref_block_shape, prev_transforms
   )
   starts, sizes, strides, _, _ = tc_lowering._indexer_to_start_size_stride(
-      indexer,
-      ref_block_shape,
-      cast_to_index=True,
+      indexer, ref_block_shape, cast_to_index=True
   )
   del sizes  # Currently unused.
   if not all(s == 1 for s in strides):
@@ -406,16 +457,21 @@ def _store_lowering_rule(
         "Swap only supports slices with stride 1, got {strides}"
     )
 
-  if in_smem:
+  if not out_aval.ndim:
     if mask is not None:
-      raise NotImplementedError("Swap does not support masked stores to SMEM")
+      raise NotImplementedError("Swap does not support masked scalar stores")
     if add:
       # TODO(slebedev): We can use memref.atomic_rmw here, but the SC compiler
       # doesn't support it yet.
-      raise NotImplementedError("Swap does not support atomic adds to SMEM")
+      raise NotImplementedError("Swap does not support atomic scalar adds")
     old_val = memref.load(ref, starts)
     memref.store(val, ref, starts)
     return old_val
+
+  if ref_memory_space is tpu_core.MemorySpace.SMEM:
+    raise NotImplementedError("Swap can only store scalars to SMEM")
+  else:
+    _check_aval_is_supported("Swap", out_aval)
 
   vec_type = ir.VectorType.get(
       out_aval.shape, _dtype_to_ir_type(ref_aval.dtype)
@@ -429,13 +485,16 @@ def _store_lowering_rule(
                         kernel_types=[tpu_core.KernelType.SC_VECTOR_SUBCORE])
 def _iota_lowering_rule_sc(ctx: LoweringRuleContext, dtype, shape, dimension,
                            sharding):
-  if shape != (sc_core._vector_dimension(),):
+  sc_info = sc_core.get_sparse_core_info()
+  if shape != (sc_info.num_lanes,):
     raise ValueError(
         f"Unsupported iota shape for SC vector subcore. Got {shape}, supported "
-        f"shape is {(sc_core._vector_dimension(),)}.")
+        f"shape is {(sc_info.num_lanes,)}."
+    )
   [out_aval] = ctx.avals_out
   out_type = ir.VectorType.get(
-      [sc_core._vector_dimension()], _dtype_to_ir_type(out_aval.dtype))
+      [sc_info.num_lanes], _dtype_to_ir_type(out_aval.dtype)
+  )
   return tpu.iota(out_type, dimensions=[dimension])
 
 
@@ -489,6 +548,74 @@ def _debug_print_lowering_rule(
   return []
 
 
+def _prepare_dma_refs(
+    src_ref,
+    src_transforms,
+    dst_ref,
+    dst_transforms,
+    src_aval,
+    dst_aval,
+    is_add: bool = False,
+):
+  """Prepares the DMA source and destination references."""
+  match (str(ir.MemRefType(src_ref.type).memory_space),
+         str(ir.MemRefType(dst_ref.type).memory_space)):
+    case (
+        "#tpu.memory_space<hbm>" | "#tpu.memory_space<vmem_shared>",
+        "#tpu.memory_space<vmem>",
+    ):
+      dst_ref, _ = _transform_ref(
+          dst_ref, dst_aval.dtype, dst_aval.shape, dst_transforms
+      )
+      dst_ref_shape = ir.MemRefType(dst_ref.type).shape
+      indirect_offsets, src_transforms = _extract_indirect_offsets(
+          src_transforms, tuple(dst_ref_shape)
+      )
+      src_ref, _ = _transform_ref(
+          src_ref, src_aval.dtype, src_aval.shape, src_transforms
+      )
+      indirect_offsets_ref_str = "src_ref"
+    case (
+        "#tpu.memory_space<vmem>",
+        "#tpu.memory_space<hbm>" | "#tpu.memory_space<vmem_shared>",
+    ):
+      src_ref, _ = _transform_ref(
+          src_ref, src_aval.dtype, src_aval.shape, src_transforms
+      )
+      src_ref_shape = ir.MemRefType(src_ref.type).shape
+      indirect_offsets, dst_transforms = _extract_indirect_offsets(
+          dst_transforms, tuple(src_ref_shape)
+      )
+      dst_ref, _ = _transform_ref(
+          dst_ref, dst_aval.dtype, dst_aval.shape, dst_transforms
+      )
+      indirect_offsets_ref_str = "dst_ref"
+    case _:  # Indirect DMA is not supported.
+      if is_add:
+        raise ValueError(
+            "DMAs with `add=True` are only supported between VMEM and "
+            f"HBM/VMEM_SHARED. "
+            f"Got (src, dst)={(src_aval.memory_space, dst_aval.memory_space)}"
+        )
+      src_ref, _ = _transform_ref(
+          src_ref, src_aval.dtype, src_aval.shape, src_transforms
+      )
+      dst_ref, _ = _transform_ref(
+          dst_ref, dst_aval.dtype, dst_aval.shape, dst_transforms
+      )
+      indirect_offsets = None
+      indirect_offsets_ref_str = ""
+  if is_add and indirect_offsets is None:
+    raise NotImplementedError(
+        "DMAs with `add=True` must (for now) specify offsets of the"
+        " majormost dimension. You can do this by writing"
+        " `pltpu.async_copy(..., {ref}={ref}.at[jnp.arange(vec_dim)], ...)`"
+        " or `pltpu.async_copy(..., {ref}={ref}.at[indices_ref],"
+        " ...)`.".format(ref=indirect_offsets_ref_str)
+    )
+  return src_ref, dst_ref, indirect_offsets
+
+
 # TODO(slebedev): Use the TC rule once we align the ``LoweringRuleContext``
 # with the TC lowering.
 @register_lowering_rule(tpu_primitives.dma_start_p)
@@ -498,6 +625,7 @@ def _dma_start_lowering_rule(
     tree,
     device_id_type: pallas_primitives.DeviceIdType,
     priority: int,
+    add: bool,
 ):
   (
       src_ref,
@@ -509,42 +637,29 @@ def _dma_start_lowering_rule(
       src_sem,
       src_sem_transforms,
       device_id,
-  ) = jax.tree.unflatten(tree, args)
+  ) = tpu_primitives._dma_unflatten(tree, args)
   src_aval, _, dst_aval, _, sem_aval, _, src_sem_aval, _, _ = (
-      jax.tree.unflatten(tree, ctx.avals_in)
+      tpu_primitives._dma_unflatten(tree, ctx.avals_in)
   )
 
-  # If not ``None``, we lower to an indirect stream instead of a DMA.
-  indirect_offsets: ir.Value | None = None
-  # The number of elements moved by each scatter/gather operation.
-  match src_aval.memory_space, dst_aval.memory_space:
-    case (
-        tpu_core.MemorySpace.HBM | tpu_core.MemorySpace.VMEM_SHARED,
-        tpu_core.MemorySpace.VMEM | None,
-    ):
-      indirect_offsets, src_transforms = _extract_indirect_offsets(
-          src_transforms, dst_aval.shape
-      )
-    case (
-        tpu_core.MemorySpace.VMEM | None,
-        tpu_core.MemorySpace.HBM | tpu_core.MemorySpace.VMEM_SHARED,
-    ):
-      indirect_offsets, dst_transforms = _extract_indirect_offsets(
-          dst_transforms, src_aval.shape
-      )
-
-  src_ref, _ = _transform_ref(
-      src_ref, src_aval.dtype, src_aval.shape, src_transforms
+  src_ref, dst_ref, indirect_offsets = _prepare_dma_refs(
+      src_ref, src_transforms, dst_ref, dst_transforms, src_aval, dst_aval, add
   )
-  dst_ref, _ = _transform_ref(
-      dst_ref, dst_aval.dtype, dst_aval.shape, dst_transforms
-  )
+  if add and indirect_offsets is None:
+    # TODO: Support regular DMA with add=True.
+    raise NotImplementedError(
+        "DMAs with `add=True` must (for now) specify offsets of the majormost "
+        "dimension. You can do this by writing "
+        "`pltpu.async_copy(..., dst_ref=ref.at[jnp.arange(vec_dim)], ...)` or "
+        "`pltpu.async_copy(..., dst_ref=ref.at[iota_ref], ...)`."
+    )
   sem, _ = _transform_ref(sem, sem_aval.dtype, sem_aval.shape, sem_transforms)
   if src_sem is not None:
     src_sem, _ = _transform_ref(
         src_sem, src_sem_aval.dtype, src_sem_aval.shape, src_sem_transforms
     )
 
+  # If not ``None``, we lower to an indirect DMA instead.
   if indirect_offsets is None:
     if device_id is not None:
       device_id, _ = tc_lowering._device_id_to_logical(
@@ -565,7 +680,7 @@ def _dma_start_lowering_rule(
         "Indirect DMAs to or from a remote device are not supported"
     )
   del priority  # Unused by indirect DMAs.
-  tpu.enqueue_indirect_dma(src_ref, dst_ref, indirect_offsets, sem)
+  tpu.enqueue_indirect_dma(src_ref, dst_ref, indirect_offsets, sem, add=add)
   return []
 
 
@@ -588,37 +703,17 @@ def _dma_wait_lowering_rule(
       _,
       _,
       device_id,
-  ) = jax.tree.unflatten(tree, args)
-  src_aval, _, dst_aval, _, sem_aval, _, _, _, _ = jax.tree.unflatten(
-      tree, ctx.avals_in
+  ) = tpu_primitives._dma_unflatten(tree, args)
+  src_aval, _, dst_aval, _, sem_aval, _, _, _, _ = (
+      tpu_primitives._dma_unflatten(tree, ctx.avals_in)
   )
 
-  # If not ``None``, we lower to an indirect stream instead of a DMA.
-  indirect_offsets: ir.Value | None = None
-  match src_aval.memory_space, dst_aval.memory_space:
-    case (
-        tpu_core.MemorySpace.HBM | tpu_core.MemorySpace.VMEM_SHARED,
-        tpu_core.MemorySpace.VMEM | None,
-    ):
-      indirect_offsets, src_transforms = _extract_indirect_offsets(
-          src_transforms, dst_aval.shape
-      )
-    case (
-        tpu_core.MemorySpace.VMEM | None,
-        tpu_core.MemorySpace.HBM | tpu_core.MemorySpace.VMEM_SHARED,
-    ):
-      indirect_offsets, dst_transforms = _extract_indirect_offsets(
-          dst_transforms, src_aval.shape
-      )
-
-  src_ref, _ = _transform_ref(
-      src_ref, src_aval.dtype, src_aval.shape, src_transforms
-  )
-  dst_ref, _ = _transform_ref(
-      dst_ref, dst_aval.dtype, dst_aval.shape, dst_transforms
+  src_ref, dst_ref, indirect_offsets = _prepare_dma_refs(
+      src_ref, src_transforms, dst_ref, dst_transforms, src_aval, dst_aval,
   )
   sem, _ = _transform_ref(sem, sem_aval.dtype, sem_aval.shape, sem_transforms)
 
+  # If not ``None``, we lower to an indirect DMA instead of a regular DMA.
   if indirect_offsets is None:
     if device_id is not None:
       device_id, _ = tc_lowering._device_id_to_logical(
@@ -659,7 +754,7 @@ def _extract_indirect_offsets(
         # TODO(slebedev): Consider lifting this restriction.
         raise NotImplementedError(
             "Only indexing along the major dimension is supported in"
-            " async_copy()"
+            " `pltpu.async_copy`"
         )
       return offsets, transforms[:-1]
     case [
@@ -668,13 +763,13 @@ def _extract_indirect_offsets(
       offsets_type = ir.MemRefType(offsets_ref.ref.type)
       if offsets_type.element_type != ir.IntegerType.get_signless(32):
         raise NotImplementedError(
-            "Only int32 indices are supported in async_copy() with a"
+            "Only int32 indices are supported in `pltpu.async_copy` with a"
             " dynamically-shaped indexer"
         )
       offsets_ref, _ = _transform_ref(
           offsets_ref.ref,
-          jnp.int32,  # Just a placeholder.
-          offsets_ref.shape,
+          jnp.int32,
+          offsets_type.shape,  # The shape before the indexing.
           offsets_ref.transforms,
       )
       if not state_discharge._is_trivial_indexer(
@@ -683,7 +778,7 @@ def _extract_indirect_offsets(
         # TODO(slebedev): Consider lifting this restriction.
         raise NotImplementedError(
             "Only indexing along the major dimension is supported in"
-            " async_copy()"
+            " `pltpu.async_copy`"
         )
       return offsets_ref, transforms[:-1]
     case _:

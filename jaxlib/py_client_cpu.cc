@@ -57,7 +57,8 @@ struct CpuTransposePlanCache {
 ffi::TypeId CpuTransposePlanCache::id = {};
 
 XLA_FFI_REGISTER_TYPE(ffi::GetXlaFfiApi(), "CpuTransposePlanCache",
-                      &CpuTransposePlanCache::id);
+                      &CpuTransposePlanCache::id,
+                      ffi::TypeInfo<CpuTransposePlanCache>());
 
 static ffi::ErrorOr<std::unique_ptr<CpuTransposePlanCache>>
 CpuTransposePlanCacheInstantiate(uint64_t index) {
@@ -115,18 +116,19 @@ ffi::Error XlaFfiPythonCpuCallback(xla::FfiLoadedHostCallbacks* callbacks,
     PyTuple_SET_ITEM(nb_args.ptr(), i, array.release().ptr());
   }
 
-  xla::EnterHostCallback();
   // TODO(dsuo): Change this to use the Python vectorcall protocol, which allows
   // you to avoid constructing a tuple for the arguments.
   nb::tuple result_tuple;
-  try {
-    auto result_object = callback(*nb::borrow<nb::args>(nb_args));
-    result_tuple = nb::cast<nb::tuple>(result_object);
-  } catch (nb::python_error& e) {
-    return ffi::Error::Internal(
-        absl::StrFormat("CpuCallback error calling callback: %s", e.what()));
+  {
+    xla::HostCallbackScope scope;
+    try {
+      auto result_object = callback(*nb::borrow<nb::args>(nb_args));
+      result_tuple = nb::cast<nb::tuple>(result_object);
+    } catch (nb::python_error& e) {
+      return ffi::Error::Internal(
+          absl::StrFormat("CpuCallback error calling callback: %s", e.what()));
+    }
   }
-  xla::LeaveHostCallback();
 
   for (size_t i = 0; i < rets.size(); ++i) {
     auto ret = rets.get<ffi::AnyBuffer>(i).value();
@@ -229,9 +231,8 @@ XLA_FFI_REGISTER_HANDLER(ffi::GetXlaFfiApi(),
 XLA_FFI_DEFINE_HANDLER_SYMBOL(
     kXlaBufferPythonCpuCallback, (XlaBufferCallback<kDLCPU>),
     ffi::Ffi::Bind()
+        .Ctx<ffi::Context>()
         .Ctx<ffi::DeviceOrdinal>()
-        .Ctx<ffi::FfiApi>()
-        .Ctx<ffi::FfiExecutionContext>()
         .Ctx<ffi::UserData<xla::FfiLoadedHostCallbacks>>()
         .Attr<uint64_t>("index")
         .RemainingArgs()

@@ -44,6 +44,7 @@ input_shardings = [
     ((None, "dp", "tp"), (None, "dp", "tp")),
     ((None, "tp", None), (None, "tp", None)),
     ((None, None, "tp"), (None, "tp", None)),
+    ((None, ("dp", "tp"), None), (None, ("dp"), None)),
 ]
 c_name = "__cudnn$blockScaledDot"
 expected_hlos = [
@@ -55,6 +56,7 @@ expected_hlos = [
     (c_name,),
     ("all-gather", "f8e4m3fn[2,512,1024]", "replica_groups=[2,2]<=[4]", c_name),
     ("all-gather", "f8e4m3fn[2,512,512]", "replica_groups=[2,2]<=[4]", c_name),
+    ("all-gather", "f8e4m3fn[2,256,1024]", "replica_groups=[2,2]<=[2,2]", c_name,),
 ]
 expected_output_spec = [
     PartitionSpec('dp',),
@@ -65,6 +67,7 @@ expected_output_spec = [
     PartitionSpec(None, 'dp'),
     PartitionSpec(None, 'tp', None),
     PartitionSpec(None, None, 'tp'),
+    PartitionSpec(None, ('dp', 'tp'), None),
 ]
 
 # The GSPMD sharding logic inserts additional reduce-scatters which don't exist
@@ -270,12 +273,9 @@ class ScaledMatmulTest(jtu.JaxTestCase):
   def setUp(self):
     super().setUp()
     try:
-      cudnn_version = check_cudnn_version()
+      check_cudnn_version()
     except RuntimeError as e:
       self.skipTest(str(e))
-      return
-    if cudnn_version < 90700:
-      self.skipTest("Requires >= cuDNN 9.7.0")
     if not jtu.is_cuda_compute_capability_at_least("10.0"):
       self.skipTest("Requires at least Blackwell arch")
 
@@ -459,12 +459,9 @@ class ScaledDotGeneralTest(jtu.JaxTestCase):
   def setUp(self):
     super().setUp()
     try:
-      cudnn_version = check_cudnn_version()
+      check_cudnn_version()
     except RuntimeError as e:
       self.skipTest(str(e))
-      return
-    if cudnn_version < 90700:
-      self.skipTest("Requires >= cuDNN 9.7.0")
     if not jtu.is_cuda_compute_capability_at_least("10.0"):
       self.skipTest("Requires at least Blackwell arch")
 
@@ -856,7 +853,7 @@ class ScaledDotGeneralTest(jtu.JaxTestCase):
     nothing_saved_f = jax.ad_checkpoint.checkpoint(
         f, policy=jax.checkpoint_policies.nothing_saveable)
     _, nothing_saved_f_vjp = jax.vjp(nothing_saved_f, input)
-    jaxpr = str(nothing_saved_f_vjp.args[0].func.args[1])
+    jaxpr = str(nothing_saved_f_vjp.jaxpr)
     self.assertEqual(jaxpr.count(' scaled_matmul_wrapper'), 1)
     # Check that the custom backward for scaled_matmul is used.
     self.assertEqual(jaxpr.count('bwd=scaled_dot_bwd'), 1)
@@ -866,7 +863,7 @@ class ScaledDotGeneralTest(jtu.JaxTestCase):
     saved_dots_f = jax.ad_checkpoint.checkpoint(
         f, policy=jax.checkpoint_policies.checkpoint_dots)
     _, saved_dots_f_vjp = jax.vjp(saved_dots_f, input)
-    jaxpr = str(saved_dots_f_vjp.args[0].func.args[1])
+    jaxpr = str(saved_dots_f_vjp.jaxpr)
     self.assertEqual(jaxpr.count(' scaled_matmul_wrapper'), 0)
     # Check that the custom backward for scaled_matmul is used.
     self.assertEqual(jaxpr.count('bwd=scaled_dot_bwd'), 1)
@@ -892,7 +889,7 @@ class ScaledDotGeneralTest(jtu.JaxTestCase):
     checkpointed_f = jax.ad_checkpoint.checkpoint(
         f, policy=jax.checkpoint_policies.dots_with_no_batch_dims_saveable)
     _, dot_saved_f_vjp = jax.vjp(checkpointed_f, input)
-    jaxpr = str(dot_saved_f_vjp.args[0].func.args[1])
+    jaxpr = str(dot_saved_f_vjp.jaxpr)
     self.assertEqual(jaxpr.count(' scaled_matmul_wrapper'), 0)
     # Check that the custom backward for scaled_matmul is used.
     self.assertEqual(jaxpr.count('bwd=scaled_dot_bwd'), 1)
@@ -900,7 +897,7 @@ class ScaledDotGeneralTest(jtu.JaxTestCase):
     # Scaled matmuls with batch dimensions will be recomputed
     # on backward pass. Let's verify that here.
     _, dot_not_saved_f_vjp = jax.vjp(checkpointed_f, batched_input)
-    jaxpr = str(dot_not_saved_f_vjp.args[0].func.args[1])
+    jaxpr = str(dot_not_saved_f_vjp.jaxpr)
     self.assertEqual(jaxpr.count(' scaled_matmul_wrapper'), 1)
     # Check that the custom backward for scaled_matmul is used.
     self.assertEqual(jaxpr.count('bwd=scaled_dot_bwd'), 1)

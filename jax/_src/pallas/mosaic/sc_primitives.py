@@ -439,14 +439,52 @@ def bitcast(x: jax.Array, dtype: jax.typing.DTypeLike) -> jax.Array:
   return bitcast_p.bind(x, dtype=jnp.dtype(dtype))
 
 
+class MemoryEffect(jax_core.Effect):
+  pass
+
+
+effects.control_flow_allowed_effects.add_type(MemoryEffect)
+_memory_effect = MemoryEffect()
+
+barrier_p = jax_core.Primitive("barrier")
+barrier_p.multiple_results = True
+
+@barrier_p.def_effectful_abstract_eval
+def _barrier_abstract_eval():
+  return (), {_memory_effect}
+
+
+@sc_lowering.register_lowering_rule(barrier_p)
+def _barrier_lowering_rule(ctx: sc_lowering.LoweringRuleContext):
+  ix = ir.IndexType.get()
+  tpu.barrier(arith.constant(ix, ir.IntegerAttr.get(ix, 0)))
+  return ()
+
+
+def subcore_barrier():
+  """Blocks until all subcores on the same core reach this instruction.
+
+  The barrier must be used with the vector subcore, either via
+  :class:jax.experimental.pallas.tpu_sc.VectorSubcoreMesh or by specifying
+  ```
+  pltpu.CompilerParams(
+      kernel_type=pltpu.KernelType.SC_VECTOR_SUBCORE,
+      dimension_semantics[..., "subcore_parallel", ...])
+  ```
+  to ``pallas_call``.
+  """
+  barrier_p.bind()
+
+
 scan_count_p = jax_core.Primitive("unique")
 scan_count_p.multiple_results = True
 
 
 @scan_count_p.def_abstract_eval
 def _scan_count_abstract_eval(x, mask):
-  if x.dtype != jnp.int32 and x.dtype != jnp.float32:
-    raise NotImplementedError(f"x.dtype={x.dtype} must be int32 or float32")
+  if x.dtype not in (jnp.uint32, jnp.int32, jnp.float32):
+    raise NotImplementedError(
+        f"x.dtype={x.dtype} must be uint32, int32 or float32")
   if not jnp.issubdtype(mask.dtype, jnp.bool):
     raise TypeError(f"mask.dtype={mask.dtype} is not a boolean dtype")
   if x.shape != mask.shape:
@@ -511,7 +549,7 @@ def _lax_cumsum_lowering_rule(ctx: sc_lowering.LoweringRuleContext, x, axis,
     raise NotImplementedError("SC cumsum: reverse=True is not yet supported")
   i1t = ir.IntegerType.get_signless(1)
   c1 = arith.constant(i1t, ir.IntegerAttr.get(i1t, 1))
-  c1v = vector.splat(ir.VectorType.get(x.type.shape, c1.type), c1)
+  c1v = vector.broadcast(ir.VectorType.get(x.type.shape, c1.type), c1)
   return tpu.scan(
       x.type, x, ir.Attribute.parse("#tpu.reduction_kind<sum>"), mask=c1v)
 
@@ -679,14 +717,28 @@ def parallel_loop(lower, upper, step=1, *, unroll=1, carry=None):
       if carry is None:
         body(idx)
         return []
-      return jax.tree.leaves(body(idx, carry_tree.unflatten(carries)))
+      result = body(idx, carry_tree.unflatten(carries))
+      result, result_tree = jax.tree.flatten(result)
+      if result_tree != carry_tree:
+        raise ValueError(
+            "parallel_loop: body result should have same structure as carry:"
+            f" {result_tree} != {carry_tree}"
+        )
+      return result
+    flat_avals = [
+        pallas_core.index_map_grid_aval,
+        *(c.aval for c in flat_carries),
+    ]
     jaxpr, _, consts = pe.trace_to_jaxpr_dynamic(
         lu.wrap_init(
             wrapped,
-            debug_info=api_util.debug_info("parallel_loop", body, (), {}),
+            debug_info=api_util.debug_info(
+                "parallel_loop", body, flat_avals, {}
+            ),
         ),
-        [pallas_core.index_map_grid_aval, *(c.aval for c in flat_carries)],
+        flat_avals,
     )
+    carry_tree.unflatten(jaxpr.outvars)  # Verify same structure.
     disallowed_effects = effects.control_flow_allowed_effects.filter_not_in(
         jaxpr.effects
     )

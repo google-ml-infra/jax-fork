@@ -27,6 +27,7 @@ from jax._src.pallas.mosaic_gpu.core import layout_cast as layout_cast
 from jax._src.pallas.mosaic_gpu.core import MemoryRefTransform as MemoryRefTransform
 from jax._src.pallas.mosaic_gpu.core import MemorySpace as MemorySpace
 from jax._src.pallas.mosaic_gpu.core import Mesh as Mesh
+from jax._src.pallas.mosaic_gpu.core import multicast_ref as multicast_ref
 from jax._src.pallas.mosaic_gpu.core import PeerMemRef as PeerMemRef
 from jax._src.pallas.mosaic_gpu.core import RefUnion as RefUnion
 from jax._src.pallas.mosaic_gpu.core import remote_ref as remote_ref
@@ -72,6 +73,7 @@ from jax._src.pallas.mosaic_gpu.primitives import multimem_load_reduce as multim
 from jax._src.pallas.mosaic_gpu.primitives import print_layout as print_layout
 from jax._src.pallas.mosaic_gpu.primitives import query_cluster_cancel as query_cluster_cancel
 from jax._src.pallas.mosaic_gpu.primitives import RefType as RefType
+from jax._src.pallas.mosaic_gpu.primitives import semaphore_signal_multicast as semaphore_signal_multicast
 from jax._src.pallas.mosaic_gpu.primitives import semaphore_signal_parallel as semaphore_signal_parallel
 from jax._src.pallas.mosaic_gpu.primitives import SemaphoreSignal as SemaphoreSignal
 from jax._src.pallas.mosaic_gpu.primitives import set_max_registers as set_max_registers
@@ -83,6 +85,7 @@ from jax._src.pallas.mosaic_gpu.primitives import wait_load_tmem as wait_load_tm
 from jax._src.pallas.mosaic_gpu.primitives import wait_smem_to_gmem as wait_smem_to_gmem
 from jax._src.pallas.mosaic_gpu.primitives import wgmma as wgmma
 from jax._src.pallas.mosaic_gpu.primitives import wgmma_wait as wgmma_wait
+from jax._src.pallas.mosaic_gpu.torch import as_torch_kernel as as_torch_kernel
 from jax.experimental.mosaic.gpu.core import LoweringSemantics as LoweringSemantics
 from jax.experimental.mosaic.gpu.fragmented_array import Tiling as Tiling
 

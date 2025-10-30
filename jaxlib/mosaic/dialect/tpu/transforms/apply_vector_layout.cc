@@ -30,8 +30,6 @@ limitations under the License.
 
 #include "absl/algorithm/container.h"
 #include "absl/log/check.h"
-#include "absl/log/log.h"
-#include "absl/status/status.h"
 #include "absl/types/span.h"
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/ArrayRef.h"
@@ -77,7 +75,6 @@ limitations under the License.
 #include "jaxlib/mosaic/dialect/tpu/vreg_util.h"
 #include "xla/array.h"
 #include "xla/layout.h"
-#include "xla/tsl/platform/errors.h"
 #include "xla/util.h"
 
 // TODO(tlongeri): Prefer returning failure over CHECKs. In particular, be more
@@ -1352,8 +1349,52 @@ FailureOr<xla::Array<Value>> unpackVregs(RewriteContext &ctx,
     // The vreg_part is computed under the assumption that vregs are packed
     // across rows first and then columns.
     const int64_t vreg_part = col % vreg_cols * vreg_rows + row % vreg_rows;
-    *v = builder.create<UnpackSubelementsOp>(
-        loc, res_vreg_ty, input_vregs(input_idxs), vreg_part, pack_format);
+    if (pack_format == PackFormat::kCompressed) {
+      *v = builder.create<UnpackSubelementsOp>(
+          loc, res_vreg_ty, input_vregs(input_idxs), vreg_part, pack_format);
+    } else {
+      CHECK_EQ(pack_format, PackFormat::kInterleaved);
+      // What we really want to do here is to unpack "consecutive" subelements
+      // in a 32-bit word to desired bitwidth. For example, unpack 4 bit to 16
+      // bit with `vreg_part = 2`. "-" means bits to ignore.
+      //
+      //           bits to unpack
+      //
+      //   28  24  20  16  12   8   4   0   bit index
+      // --------yyyyxxxx----------------
+      //
+      //           result
+      //
+      //   28  24  20  16  12   8   4   0   bit index
+      // yyyyyyyyyyyyyyyyxxxxxxxxxxxxxxxx
+      if (res_vreg_ty.getElementTypeBitWidth() == 32) {
+        // If the result vreg is 32-bit, we can just interleaved unpack the
+        // input vreg, as there are no multiple subelements to unpack.
+        *v = builder.create<UnpackSubelementsOp>(
+            loc, res_vreg_ty, input_vregs(input_idxs), vreg_part, pack_format);
+      } else {
+        // Otherwise, unpack corresponding subelements to 32-bit, and then pack
+        // it to the result vreg.
+        VectorType unpacked_ty =
+            getNativeVregType(input_ty.getElementType().isSignlessInteger()
+                                  ? cast<Type>(builder.getI32Type())
+                                  : cast<Type>(builder.getF32Type()),
+                              ctx.target_shape);
+        const int dst_packing_factor =
+            32 / res_vreg_ty.getElementTypeBitWidth();
+        // `vreg_part` is with respect to result vreg bitwidth. Expand it to
+        // base on 32-bit.
+        const int vreg_part_unpacked_to_32b = vreg_part * dst_packing_factor;
+        SmallVector<Value> unpacked;
+        for (int i = 0; i < dst_packing_factor; ++i) {
+          unpacked.push_back(builder.create<UnpackSubelementsOp>(
+              loc, unpacked_ty, input_vregs(input_idxs),
+              vreg_part_unpacked_to_32b + i, pack_format));
+        }
+        *v = builder.create<PackSubelementsOp>(loc, res_vreg_ty, unpacked,
+                                               pack_format);
+      }
+    }
   });
   return output_vregs;
 }
@@ -1569,8 +1610,43 @@ FailureOr<xla::Array<Value>> packVregs(RewriteContext &ctx, OpBuilder &builder,
         }
       }
     }
-    *v =
-        builder.create<PackSubelementsOp>(loc, res_vreg_ty, parts, pack_format);
+    if (pack_format == PackFormat::kCompressed) {
+      *v = builder.create<PackSubelementsOp>(loc, res_vreg_ty, parts,
+                                             pack_format);
+    } else {
+      CHECK_EQ(pack_format, PackFormat::kInterleaved);
+      // What we really want to do here is to pack all subelements from one
+      // part, followed by all subelements from the next part, and so on. To
+      // achieve this, we can unpack all subelements in each part to 32-bit and
+      // then interleaved pack them into desired type.
+      SmallVector<Value> unpacks;
+      if (input_ty.getElementType().getIntOrFloatBitWidth() == 32) {
+        unpacks.append(parts.begin(), parts.end());
+      } else {
+        VectorType unpacked_vty =
+            getNativeVregType(input_ty.getElementType().isSignlessInteger()
+                                  ? cast<Type>(builder.getI32Type())
+                                  : cast<Type>(builder.getF32Type()),
+                              ctx.target_shape);
+        const int32_t packing_factor = 32 / input_ty.getElementTypeBitWidth();
+        for (Value part : parts) {
+          if (part) {
+            for (int i = 0; i < packing_factor; ++i) {
+              // Note that input bitwidth is larger than result bitwidth. We
+              // don't need sign extension here because the following packing
+              // ends up truncating sign-extended bits.
+              unpacks.push_back(builder.create<UnpackSubelementsOp>(
+                  loc, unpacked_vty, part, i, pack_format,
+                  /*sign_extended=*/false));
+            }
+          } else {
+            unpacks.append(packing_factor, nullptr);
+          }
+        }
+      }
+      *v = builder.create<PackSubelementsOp>(loc, res_vreg_ty, unpacks,
+                                             pack_format);
+    }
   });
   return output_vregs;
 }
@@ -4777,6 +4853,22 @@ LogicalResult vector_multi_reduction_rule(RewriteContext &ctx, Operation &op,
            << neutral << ", but got " << val;
   }
 
+  bool is_shape_invariant_mode =
+      ctx.shape_invariant_numerics && isa<FloatType>(element_type) &&
+      (multi_reduction_op.getKind() == vector::CombiningKind::ADD ||
+       multi_reduction_op.getKind() == vector::CombiningKind::MUL);
+  if (is_shape_invariant_mode &&
+      ((src_rank > 1 &&
+        src_layout.implicit_dim() != VectorLayout::ImplicitDim::kNone) ||
+       (src_rank == 1 && src_layout.implicit_dim() !=
+                             VectorLayout::ImplicitDim::kSecondMinor))) {
+    return multi_reduction_op.emitOpError(
+        "When shape_invariant_numerics is enabled, input type is a float type, "
+        "and reduction kind is ADD or MUL, input layout must have kSecondMinor "
+        "implicit dim for 1d input and kNone implicit dim for "
+        "multi-dimensional input");
+  }
+
   std::array<bool, 2> reduces;
   switch (src_layout.implicit_dim()) {
     case VectorLayout::ImplicitDim::kNone:
@@ -4798,6 +4890,14 @@ LogicalResult vector_multi_reduction_rule(RewriteContext &ctx, Operation &op,
           "Not implemented: Double implicit dimensions");
   }
 
+  if (is_shape_invariant_mode &&
+      !src_layout.hasNativeTiling(ctx.target_shape)) {
+    return multi_reduction_op.emitOpError(
+        "When shape_invariant_numerics is enabled, input type is a float type, "
+        "and reduction kind is ADD or MUL, input layout must have native "
+        "tiling");
+  }
+
   if ((reduces[0] || reduces[1]) &&
       !src_layout.hasNativeTiling(ctx.target_shape)) {
     return multi_reduction_op.emitOpError(
@@ -4816,6 +4916,12 @@ LogicalResult vector_multi_reduction_rule(RewriteContext &ctx, Operation &op,
     // Offsets have to be equal, unless we're reducing over that dimension.
     if (src_layout.offsets()[i] != dst_layout.offsets()[i] && !reduces[i]) {
       return multi_reduction_op.emitOpError("Not implemented: Offset change");
+    }
+    if (is_shape_invariant_mode && src_layout.offsets()[i] != 0 && reduces[i]) {
+      return multi_reduction_op.emitOpError(
+          "When shape_invariant_numerics is enabled, input type is a float "
+          "type, and reduction kind is ADD or MUL, input layout must have zero "
+          "offsets over dimensions that are being reduced");
     }
   }
   VectorLayout::ImplicitDim dst_implicit_dim;
@@ -4873,6 +4979,18 @@ LogicalResult vector_multi_reduction_rule(RewriteContext &ctx, Operation &op,
           "Not implemented: unsupported reduction kind");
   }
   const ArrayRef<int64_t> src_shape = src_ty.getShape();
+  // We need at least `kMinParallelism` partial accumulators to keep TPU busy.
+  // This threshold is a tunable heuristic; while a higher value increases
+  // parallelism, an excessively large value can cause performance loss due to
+  // register spilling.
+  constexpr int64_t kMinParallelism = 4;
+  // If shape invariant numerics is enabled, input type is a float type, and
+  // reduction kind is Sum, we fall back to sequential reduction for more
+  // deterministic numerics.
+  const int64_t num_partial_accs =
+      is_shape_invariant_mode
+          ? 1
+          : xla::CeilOfRatio(kMinParallelism, dst_vregs.num_elements());
   RETURN_IF_FAILED(Each(
       dst_vregs,
       [&](const ArrayRef<int64_t> idx, Value* const dst_vreg) -> LogicalResult {
@@ -4892,7 +5010,7 @@ LogicalResult vector_multi_reduction_rule(RewriteContext &ctx, Operation &op,
         }
         xla::Array<Value> reduced_vregs =
             src_vregs.Slice(src_slice_start, src_slice_end);
-        std::optional<Value> acc_vreg;
+        std::array<Value, kMinParallelism> partial_accs;
         auto reduce_elementwise = [&](Value lhs, Value rhs) -> Value {
           Value result;
           switch (tpu_kind) {
@@ -4923,6 +5041,7 @@ LogicalResult vector_multi_reduction_rule(RewriteContext &ctx, Operation &op,
           }
           return result;
         };
+        int64_t reduced_vreg_idx = 0;
         RETURN_IF_FAILED(Each(
             reduced_vregs,
             [&](ArrayRef<int64_t> red_idx,
@@ -4947,21 +5066,39 @@ LogicalResult vector_multi_reduction_rule(RewriteContext &ctx, Operation &op,
                   Value vreg,
                   maskOOB(ctx, builder, cast<TypedValue<VectorType>>(*src_vreg),
                           *data_bounds, neutral));
-              if (!acc_vreg.has_value()) {
-                acc_vreg = vreg;
+              int64_t partial_acc_idx = reduced_vreg_idx % num_partial_accs;
+              if (partial_accs[partial_acc_idx] == nullptr) {
+                partial_accs[partial_acc_idx] = vreg;
               } else {
-                acc_vreg = reduce_elementwise(*acc_vreg, vreg);
+                partial_accs[partial_acc_idx] =
+                    reduce_elementwise(partial_accs[partial_acc_idx], vreg);
               }
+              ++reduced_vreg_idx;
               return success();
             }));
-        TPU_ASSERT_OP(acc_vreg.has_value());
+        TPU_ASSERT_OP(partial_accs[0] != nullptr);
+        // Reduce the partial accumulators to a single VReg in a tree-like
+        // fashion. We take the min because there are cases where we have more
+        // partial accumulators than the number of vregs to reduce.
+        int64_t num_valid_partial_accs =
+            std::min(num_partial_accs, reduced_vreg_idx);
+        if (num_valid_partial_accs > 1) {
+          for (int stride = 1; stride < num_valid_partial_accs; stride *= 2) {
+            for (int i = 0; i < (num_valid_partial_accs - stride);
+                 i += 2 * stride) {
+              partial_accs[i] =
+                  reduce_elementwise(partial_accs[i], partial_accs[i + stride]);
+            }
+          }
+        }
+        Value acc_vreg = partial_accs[0];
         const bool is_double_replicated_double_reduced =
             reduces[0] && reduces[1] && !src_layout.offsets()[0].has_value() &&
             !src_layout.offsets()[1].has_value();
         if (reduces[1]) {
           if (src_layout.offsets()[1].has_value()) {
             acc_vreg = builder.create<tpu::AllReduceOp>(
-                multi_reduction_op->getLoc(), acc_vreg->getType(), *acc_vreg,
+                multi_reduction_op->getLoc(), acc_vreg.getType(), acc_vreg,
                 /* dim= */ 1, tpu_kind);
           } else {
             int64_t size_dim1 =
@@ -4977,7 +5114,7 @@ LogicalResult vector_multi_reduction_rule(RewriteContext &ctx, Operation &op,
                       builder,
                       getNativeVregType(builder.getI32Type(), ctx.target_shape),
                       size_attr);
-                  acc_vreg = builder.create<arith::MulIOp>(loc, *acc_vreg,
+                  acc_vreg = builder.create<arith::MulIOp>(loc, acc_vreg,
                                                            source_value);
                 } else {
                   FloatAttr size_attr = builder.getF32FloatAttr(size_dim1);
@@ -4985,7 +5122,7 @@ LogicalResult vector_multi_reduction_rule(RewriteContext &ctx, Operation &op,
                       builder,
                       getNativeVregType(builder.getF32Type(), ctx.target_shape),
                       size_attr);
-                  acc_vreg = builder.create<arith::MulFOp>(loc, *acc_vreg,
+                  acc_vreg = builder.create<arith::MulFOp>(loc, acc_vreg,
                                                            source_value);
                 }
                 break;
@@ -5004,7 +5141,7 @@ LogicalResult vector_multi_reduction_rule(RewriteContext &ctx, Operation &op,
           // Packed types are compressed along rows, so we need to reduce them
           // within each 32-bit word. There's no performance penalty for doing
           // this in 32-bit precision, so we take advantage of it.
-          Type acc_vreg_ty = acc_vreg->getType();
+          Type acc_vreg_ty = acc_vreg.getType();
           if (acc_layout.packing() > 1) {
             Type vreg_ty_32 = nullptr;
             if (acc.getType().getElementType().isBF16()) {
@@ -5015,10 +5152,10 @@ LogicalResult vector_multi_reduction_rule(RewriteContext &ctx, Operation &op,
                   "Not implemented: Unsupported reduction dtype");
             }
             Value acc_vreg_32 = builder.create<tpu::UnpackSubelementsOp>(
-                loc, vreg_ty_32, *acc_vreg, 0, tpu::PackFormat::kInterleaved);
+                loc, vreg_ty_32, acc_vreg, 0, tpu::PackFormat::kInterleaved);
             for (int i = 1; i < acc_layout.packing(); ++i) {
               Value acc_vreg_part_32 = builder.create<tpu::UnpackSubelementsOp>(
-                  loc, vreg_ty_32, *acc_vreg, i, tpu::PackFormat::kInterleaved);
+                  loc, vreg_ty_32, acc_vreg, i, tpu::PackFormat::kInterleaved);
               acc_vreg_32 = reduce_elementwise(acc_vreg_32, acc_vreg_part_32);
             }
             acc_vreg = acc_vreg_32;
@@ -5026,7 +5163,7 @@ LogicalResult vector_multi_reduction_rule(RewriteContext &ctx, Operation &op,
           // At this point acc_vreg is always 32-bit.
           if (src_layout.offsets()[0].has_value()) {
             acc_vreg = builder.create<tpu::AllReduceOp>(
-                multi_reduction_op->getLoc(), acc_vreg->getType(), *acc_vreg, 0,
+                multi_reduction_op->getLoc(), acc_vreg.getType(), acc_vreg, 0,
                 tpu_kind);
           } else if (!is_double_replicated_double_reduced) {
             int64_t size_dim0 =
@@ -5039,7 +5176,7 @@ LogicalResult vector_multi_reduction_rule(RewriteContext &ctx, Operation &op,
                       builder,
                       getNativeVregType(builder.getI32Type(), ctx.target_shape),
                       size_attr);
-                  acc_vreg = builder.create<arith::MulIOp>(loc, *acc_vreg,
+                  acc_vreg = builder.create<arith::MulIOp>(loc, acc_vreg,
                                                            source_value);
                 } else {
                   FloatAttr size_attr = builder.getF32FloatAttr(size_dim0);
@@ -5047,7 +5184,7 @@ LogicalResult vector_multi_reduction_rule(RewriteContext &ctx, Operation &op,
                       builder,
                       getNativeVregType(builder.getF32Type(), ctx.target_shape),
                       size_attr);
-                  acc_vreg = builder.create<arith::MulFOp>(loc, *acc_vreg,
+                  acc_vreg = builder.create<arith::MulFOp>(loc, acc_vreg,
                                                            source_value);
                 }
                 break;
@@ -5065,14 +5202,14 @@ LogicalResult vector_multi_reduction_rule(RewriteContext &ctx, Operation &op,
             SmallVector<int32_t> positions(acc_layout.packing());
             std::iota(positions.begin(), positions.end(),
                       static_cast<int32_t>(0));
-            SmallVector<Value> parts(acc_layout.packing(), *acc_vreg);
+            SmallVector<Value> parts(acc_layout.packing(), acc_vreg);
             acc_vreg = builder.create<tpu::PackSubelementsOp>(
                 loc, acc_vreg_ty, parts,
                 builder.getDenseI32ArrayAttr(positions),
                 tpu::PackFormat::kInterleaved);
           }
         }
-        *dst_vreg = *acc_vreg;
+        *dst_vreg = acc_vreg;
         return success();
       }));
   multi_reduction_op->replaceAllUsesWith(
@@ -5360,6 +5497,7 @@ LogicalResult reshape_rule(RewriteContext& ctx, Operation& op,
       layout_in.bitwidth(),
       layout_out.bitwidth());  // This should be guaranteed through MLIR
                                // verifier plus our layoutIsValidForValue check
+  const int8_t bitwidth = layout_in.bitwidth();
   ImplicitLocOpBuilder builder(op.getLoc(), &op);
   const auto src_ty = cast<VectorType>(op.getOperand(0).getType());
   const ArrayRef<int64_t> src_shape = src_ty.getShape();
@@ -5413,6 +5551,42 @@ LogicalResult reshape_rule(RewriteContext& ctx, Operation& op,
              dst_tiled_dims[1] % dst_vreg_slice[1] == 0) {
     no_op = true;
   }
+
+  auto can_use_row_shuffle = [&ctx](ArrayRef<int64_t> shape,
+                                    VectorLayout layout,
+                                    std::array<int64_t, 2> vreg_slice) {
+    if (shape.size() < 2) {
+      return false;
+    }
+    // vreg must not be padded.
+    if (shape.back() % vreg_slice[1] != 0 ||
+        shape[shape.size() - 2] % vreg_slice[0] != 0) {
+      return false;
+    }
+    if (!llvm::isPowerOf2_32(layout.bitwidth())) {
+      return false;
+    }
+    if (layout.offsets() != LayoutOffsets{0, 0}) {
+      return false;
+    }
+    if (layout.implicit_dim() != VectorLayout::ImplicitDim::kNone) {
+      return false;
+    }
+    // 2d tiling.
+    if (layout.tiling()[0] <= ctx.target_shape[0] * layout.packing() &&
+        layout.tiling()[1] == ctx.target_shape[1] &&
+        shape.back() == vreg_slice[1]) {
+      return true;
+    }
+    // 1d tiling.
+    if (layout.tiling() ==
+            std::array<int64_t, 2>{1, ctx.target_shape[1] * layout.packing()} &&
+        shape.back() % vreg_slice[1] == 0) {
+      return true;
+    }
+    return false;
+  };
+
   FAILUREOR_ASSIGN_OR_RETURN(
       xla::Array<Value> src_vregs,
       disassemble(builder, layout_in,
@@ -5443,82 +5617,178 @@ LogicalResult reshape_rule(RewriteContext& ctx, Operation& op,
           layout_out.tileArrayImplicitShape(dst_shape, ctx.target_shape));
       return dst_vregs_local;
     } else if (
-        // Sublane shuffle within a vreg if there is no padding and each vreg
-        // holds a contiguous slice of the flattened data.
-        dst_shape.size() > 1 && src_shape.size() > 1 &&
-        dst_shape.back() == dst_vreg_slice[1] &&
-        dst_shape[dst_shape.size() - 2] % dst_vreg_slice[0] == 0 &&
-        src_shape.back() == src_vreg_slice[1] &&
-        src_shape[src_shape.size() - 2] % src_vreg_slice[0] == 0 &&
-        layout_in.offsets() == LayoutOffsets{0, 0} &&
-        layout_in.bitwidth() == 32 &&
-        layout_in.implicit_dim() == VectorLayout::ImplicitDim::kNone &&
-        layout_in.tiling()[0] <= ctx.target_shape[0] &&
-        layout_in.tiling()[1] == ctx.target_shape[1] &&
-        layout_out.offsets() == LayoutOffsets{0, 0} &&
-        layout_out.bitwidth() == 32 &&
-        layout_out.implicit_dim() == VectorLayout::ImplicitDim::kNone &&
-        layout_out.tiling()[0] <= ctx.target_shape[0] &&
-        layout_out.tiling()[1] == ctx.target_shape[1]) {
+        // Row shuffle within a vreg if there is no padding and each vreg holds
+        // a contiguous slice of the flattened data.
+        can_use_row_shuffle(src_shape, layout_in, src_vreg_slice) &&
+        can_use_row_shuffle(dst_shape, layout_out, dst_vreg_slice)) {
       auto [sublane_count, lane_count] = ctx.target_shape;
       auto dst_vregs_shape =
           layout_out.tileArrayShape(false, false, dst_shape, ctx.target_shape);
       auto src_vregs_shape =
           layout_in.tileArrayShape(false, false, src_shape, ctx.target_shape);
-      std::array<int64_t, 2> src_sublane_slice = {
-          src_vreg_slice[0], src_vreg_slice[1] / lane_count};
-      std::array<int64_t, 2> dst_sublane_slice = {
-          dst_vreg_slice[0], dst_vreg_slice[1] / lane_count};
-      // Each vreg holds a contiguous slice of the flattened data and sublane
-      // indices are in "column-major order". For example, (4, 256) with (4,
-      // 128) tiling reshapes to (2, 512) with (2, 128) tiling:
-      //
-      //      src vreg           dst vreg indexed by src sublane
-      //
-      //   0     128    256       0     128    256    384    512
-      // 0 +------+------+      0 +------+------+------+------+
-      //   | SL 0 | SL 4 |        | SL 0 | SL 4 | SL 1 | SL 5 |
-      // 1 +------+------+      1 +------+------+------+------+
-      //   | SL 1 | SL 5 |        | SL 2 | SL 6 | SL 3 | SL 7 |
-      // 2 +------+------+      2 +------+------+------+------+
-      //   | SL 2 | SL 6 |
-      // 3 +------+------+
-      //   | SL 3 | SL 7 |
-      // 4 +------+------+
-      //
-      // The shuffle pattern is a sequence of the sublane index in the src vreg
-      // when traversing the dst tiles in column-major order.
-      SmallVector<int32_t> shuffle_pattern;
-      for (int32_t dst_col_index = 0;
-           dst_col_index < dst_sublane_slice[dst_sublane_slice.size() - 1];
-           ++dst_col_index) {
-        for (int32_t dst_row_index = 0;
-             dst_row_index < dst_sublane_slice[dst_sublane_slice.size() - 2];
-             ++dst_row_index) {
-          // Linear index in row-major order is the same in both src and dst
-          // because reshape traverses the data in row-major order.
-          int32_t linear_index_in_row_major =
-              dst_row_index * dst_sublane_slice[dst_sublane_slice.size() - 1] +
-              dst_col_index;
-          int32_t src_row_index =
-              linear_index_in_row_major /
-              src_sublane_slice[src_sublane_slice.size() - 1];
-          int32_t src_col_index =
-              linear_index_in_row_major %
-              src_sublane_slice[src_sublane_slice.size() - 1];
-          int32_t src_linear_index_in_col_major =
-              src_col_index * src_sublane_slice[src_sublane_slice.size() - 2] +
-              src_row_index;
-          shuffle_pattern.push_back(src_linear_index_in_col_major);
+      if (bitwidth == 32) {
+        // For 32 bit data, a sublane is effectively a physical row.
+        std::array<int64_t, 2> src_sublane_slice = {
+            src_vreg_slice[0], src_vreg_slice[1] / lane_count};
+        std::array<int64_t, 2> dst_sublane_slice = {
+            dst_vreg_slice[0], dst_vreg_slice[1] / lane_count};
+        // Each vreg holds a contiguous slice of the flattened data and sublane
+        // indices are in "column-major order". For example, (4, 256) with (4,
+        // 128) tiling reshapes to (2, 512) with (2, 128) tiling:
+        //
+        //      src vreg           dst vreg indexed by src sublane
+        //
+        //   0     128    256       0     128    256    384    512
+        // 0 +------+------+      0 +------+------+------+------+
+        //   | SL 0 | SL 4 |        | SL 0 | SL 4 | SL 1 | SL 5 |
+        // 1 +------+------+      1 +------+------+------+------+
+        //   | SL 1 | SL 5 |        | SL 2 | SL 6 | SL 3 | SL 7 |
+        // 2 +------+------+      2 +------+------+------+------+
+        //   | SL 2 | SL 6 |
+        // 3 +------+------+
+        //   | SL 3 | SL 7 |
+        // 4 +------+------+
+        //
+        // The shuffle pattern is a sequence of the sublane index in the src
+        // vreg when traversing the dst tiles in column-major order.
+        SmallVector<int32_t> shuffle_pattern;
+        for (int32_t dst_col_index = 0;
+             dst_col_index < dst_sublane_slice[dst_sublane_slice.size() - 1];
+             ++dst_col_index) {
+          for (int32_t dst_row_index = 0;
+               dst_row_index < dst_sublane_slice[dst_sublane_slice.size() - 2];
+               ++dst_row_index) {
+            // Linear index in row-major order is the same in both src and dst
+            // because reshape traverses the data in row-major order.
+            int32_t linear_index_in_row_major =
+                dst_row_index *
+                    dst_sublane_slice[dst_sublane_slice.size() - 1] +
+                dst_col_index;
+            int32_t src_row_index =
+                linear_index_in_row_major /
+                src_sublane_slice[src_sublane_slice.size() - 1];
+            int32_t src_col_index =
+                linear_index_in_row_major %
+                src_sublane_slice[src_sublane_slice.size() - 1];
+            int32_t src_linear_index_in_col_major =
+                src_col_index *
+                    src_sublane_slice[src_sublane_slice.size() - 2] +
+                src_row_index;
+            shuffle_pattern.push_back(src_linear_index_in_col_major);
+          }
         }
+        // Modify in place because vreg is one-to-one mapping between src and
+        // dst.
+        src_vregs.Each(
+            [&](absl::Span<const int64_t> src_vreg_indices, Value* src_vreg) {
+              *src_vreg = builder.create<tpu::SublaneShuffleOp>(
+                  src_vreg->getLoc(), src_vreg->getType(), *src_vreg, *src_vreg,
+                  builder.getDenseI32ArrayAttr(shuffle_pattern));
+            });
+      } else {
+        // TODO(twsung): Unify reshape as retiling. Question: `changeTiling` is
+        // one-to-many/many-to-one/many-to-many vreg mapping, while this kind of
+        // reshape is one-to-one mapping.
+        // For packed type, row shuffle within a vreg is implemented by
+        // packing/unpacking the data to/from interleaved/compressed format.
+        //
+        // Note that we can unpack to 32 bit and use sublane shuffle scheme
+        // above, but we lack of general support for SublaneShuffleOp. Even if
+        // we do, it doesn't seem to be faster than the following.
+        //
+        // For example, 16 bit data from (16, 128) with tiling (16, 128)
+        // reshapes to (8, 256) with tiling (8, 128). R{N} indicates a [1, 128]
+        // chunk. (R0, R1), e.t.c., forms a [1, 256] chunk, with
+        // R0 = (R0, R1)[:, 0:128] and R1 = (R0, R1)[:, 128:256]. Note that vreg
+        // is packed in compressed format so that every `packing_factor` logical
+        // rows form a sublane of vreg. The right handside of the example hence
+        // shows the first lane of vregs, with "|" indicating the concatenation
+        // of higher and lower bits in a 32-bit word.
+        //
+        //    logical rows of src               src vreg, first lane
+        //  R indicates a [1, 128] chunk
+        //
+        //          R0                            R1[0, 0] |  R0[0, 0]
+        //          R1                            R3[0, 0] |  R2[0, 0]
+        //          R2                            R5[0, 0] |  R4[0, 0]
+        //          R3                            R7[0, 0] |  R6[0, 0]
+        //          R4                            R9[0, 0] |  R8[0, 0]
+        //          R5                           R11[0, 0] | R10[0, 0]
+        //          R6                           R13[0, 0] | R12[0, 0]
+        //          R7                           R15[0, 0] | R14[0, 0]
+        //          R8
+        //          R9
+        //          R10
+        //          R11
+        //          R12
+        //          R13
+        //          R14
+        //          R15
+        //
+        //    logical rows of dst               dst vreg, first lane
+        //        (R0, R1)                        R2[0, 0] |  R0[0, 0]
+        //        (R2, R3)                        R6[0, 0] |  R4[0, 0]
+        //        (R4, R5)                       R10[0, 0] |  R8[0, 0]
+        //        (R6, R7)                       R14[0, 0] | R12[0, 0]
+        //        (R8, R9)                        R3[0, 0] |  R1[0, 0]
+        //        (R10, R11)                      R7[0, 0] |  R5[0, 0]
+        //        (R12, R13)                     R11[0, 0] |  R9[0, 0]
+        //        (R14, R15)                     R15[0, 0] | R13[0, 0]
+        //
+        // Then from src to dst, we can interleaved unpack `src_vreg` and
+        // compressed pack it to `dst_vreg`. On the other hand, from dst to src,
+        // we can compressed unpack `dst_vreg` and interleaved pack it to
+        // `src_vreg`.
+        //
+        // The pattern holds when we halve/double sublane tiling and
+        // double/halve last shape dimension. Therefore, we can keep applying
+        // the same algorithm until the sublane tilings match. Take 8-bit as an
+        // example, we can reshape (32, 128) with tiling (32, 128) to (16, 256)
+        // with tiling (16, 128) and then to (8, 512) with tiling (8, 128).
+        const int64_t src_sublane_tiling = layout_in.tiling()[0];
+        const int64_t dst_sublane_tiling = layout_out.tiling()[0];
+        CHECK(llvm::isPowerOf2_64(static_cast<uint64_t>(src_sublane_tiling)));
+        CHECK(llvm::isPowerOf2_64(static_cast<uint64_t>(dst_sublane_tiling)));
+        tpu::PackFormat unpack_format, pack_format;
+        if (src_sublane_tiling > dst_sublane_tiling) {
+          unpack_format = tpu::PackFormat::kInterleaved;
+          pack_format = tpu::PackFormat::kCompressed;
+        } else {
+          unpack_format = tpu::PackFormat::kCompressed;
+          pack_format = tpu::PackFormat::kInterleaved;
+        }
+        VectorType packed_vty = getNativeVregType(
+            builder.getIntegerType(src_ty.getElementTypeBitWidth()),
+            ctx.target_shape);
+        VectorType unpacked_vty = getNativeVregType(
+            builder.getIntegerType(src_ty.getElementTypeBitWidth() * 2),
+            ctx.target_shape);
+        src_vregs.Each(
+            [&](absl::Span<const int64_t> src_vreg_indices, Value* src_vreg) {
+              Value dst_vreg = builder.create<tpu::BitcastVregOp>(
+                  src_vreg->getLoc(), packed_vty, *src_vreg);
+              int64_t from_sublane_tiling = src_sublane_tiling;
+              while (from_sublane_tiling != dst_sublane_tiling) {
+                std::array<Value, 2> src_parts;
+                for (int i = 0; i < src_parts.size(); ++i) {
+                  // We don't need sign extension here because the following
+                  // packing ends up truncating sign-extended bits.
+                  src_parts[i] = builder.create<tpu::UnpackSubelementsOp>(
+                      src_vreg->getLoc(), unpacked_vty, dst_vreg, i,
+                      unpack_format, /*sign_extended=*/false);
+                }
+                dst_vreg = builder.create<tpu::PackSubelementsOp>(
+                    src_vreg->getLoc(), packed_vty, src_parts, pack_format);
+                if (from_sublane_tiling > dst_sublane_tiling) {
+                  from_sublane_tiling /= 2;
+                } else {
+                  from_sublane_tiling *= 2;
+                }
+              }
+              *src_vreg = builder.create<tpu::BitcastVregOp>(
+                  src_vreg->getLoc(), src_vreg->getType(), dst_vreg);
+            });
       }
-      // Modify in place because vreg is one-to-one mapping between src and dst.
-      src_vregs.Each(
-          [&](absl::Span<const int64_t> src_vreg_indices, Value* src_vreg) {
-            *src_vreg = builder.create<tpu::SublaneShuffleOp>(
-                src_vreg->getLoc(), src_vreg->getType(), *src_vreg, *src_vreg,
-                builder.getDenseI32ArrayAttr(shuffle_pattern));
-          });
       src_vregs.Reshape(dst_vregs_shape);
       return src_vregs;
     } else if (
@@ -5939,7 +6209,21 @@ LogicalResult vector_transpose_rule(RewriteContext &ctx, Operation &op,
       permutation.take_back(3) ==
       ArrayRef<int64_t>({rank - 2, rank - 3, rank - 1});
 
-  // Packed major minor pemute
+  auto reshape_to_4d = [&](xla::Array<Value>& arr) {
+    auto dims = arr.dimensions();
+    // Keep the last 3 dims, and flatten the rest to the first dim or expand it.
+    auto last_3_dims = dims.last(3);
+    const int64_t num_elements_in_last_3_dims =
+        std::accumulate(last_3_dims.begin(), last_3_dims.end(),
+                        static_cast<int64_t>(1), std::multiplies<int64_t>());
+    llvm::SmallVector<int64_t, 4> new_dims = {
+        arr.num_elements() / num_elements_in_last_3_dims,
+    };
+    new_dims.append(last_3_dims.begin(), last_3_dims.end());
+    arr.Reshape(new_dims);
+  };
+
+  // Packed major minor permute
   // TODO(b/448865291): Merge this branch and the unpacked one into a single
   // general algorithm.
   if (untiled_tiled_swap && layout_in.packing() > 1) {
@@ -5952,59 +6236,92 @@ LogicalResult vector_transpose_rule(RewriteContext &ctx, Operation &op,
         layout_in.tiling()[1] != ctx.target_shape[1]) {
       return op.emitOpError("Not implemented: expected single-sublane tiling");
     }
-    // TODO(b/448862637): Just use the reshape_to_4d from below.
-    if (src_ty.getRank() != 3) {
-      return op.emitOpError("Not implemented: only 3D values supported");
-    }
-    // TODO(b/448862637): We just need to step over in a loop.
-    if (*(src_ty.getShape().end() - 2) != packing) {
-      return op.emitOpError("Not implemented: second minor unequal to packing");
-    }
-    // TODO(b/448862637): We just need to pad below.
-    if (*(src_ty.getShape().end() - 3) % packing != 0) {
-      return op.emitOpError(
-          "Not implemented: third minor not divisible by packing");
-    }
-    xla::Array<Value> dst_vregs(
-        layout_out.tileArrayShape(dst_ty.getShape(), ctx.target_shape));
+
+    const int64_t rank = src_ty.getRank();
+    const auto& src_shape = src_ty.getShape();
+    int64_t src_3rd_minor_shape_padded =
+        llvm::alignTo(src_shape[rank - 3], packing);
+    int64_t src_2nd_minor_shape_padded =
+        llvm::alignTo(src_shape[rank - 2], packing);
+
+    reshape_to_4d(src_vregs);
+
+    // Zero-initialize and pad the src_vregs to have correct 3rd minor and 2nd
+    // minor dimensions.
+    SmallVector<int64_t> padded_src_vreg_dims = {
+        src_vregs.dim(0), src_3rd_minor_shape_padded,
+        src_2nd_minor_shape_padded / packing, src_vregs.dim(3)};
+    auto temp_src_vregs = xla::Array<Value>(
+        padded_src_vreg_dims,
+        getZerosVector(builder, getNativeVregType(src_ty.getElementType(),
+                                                  ctx.target_shape)));
+    temp_src_vregs.UpdateSlice(src_vregs, {0, 0, 0, 0});
+    src_vregs = std::move(temp_src_vregs);
+    // Since this is a major-minor permute, we can use information about
+    // src_vregs to determine the dimensions of dst_vregs.
+    SmallVector<int64_t> temp_dst_vreg_dims = {
+        src_vregs.dim(0), src_2nd_minor_shape_padded,
+        src_3rd_minor_shape_padded / packing, src_vregs.dim(3)};
+    xla::Array<Value> temp_dst_vregs(temp_dst_vreg_dims);
+
     VectorType int_packed_ty = getNativeVregType(
         builder.getIntegerType(layout_in.bitwidth()), ctx.target_shape);
     VectorType int_32_ty =
         getNativeVregType(builder.getI32Type(), ctx.target_shape);
     VectorType vreg_ty =
         getNativeVregType(src_ty.getElementType(), ctx.target_shape);
-    for (int64_t minor_idx = 0; minor_idx < src_vregs.dimensions().back();
-         ++minor_idx) {
-      for (int64_t third_minor_base_idx = 0;
-            third_minor_base_idx < *(src_vregs.dimensions().end() - 3);
-            third_minor_base_idx += packing) {
-        for (int64_t second_minor_idx = 0; second_minor_idx < packing;
-            ++second_minor_idx) {
-          SmallVector<Value> unpacked;
-          // We could have just interleaved unpacked the second_minor_idx part
-          // of the vreg in the loop below, but that ends up being more
-          // expensive than we need. Simple shifts do the trick. The high bits
-          // will be truncated by packing anyway.
-          for (int64_t third_minor_subidx = 0; third_minor_subidx < packing;
-               ++third_minor_subidx) {
-            Value vreg = src_vregs(third_minor_base_idx + third_minor_subidx, 0,
-                                   minor_idx);
-            vreg = tpu::BitcastVregOp::create(builder, int_32_ty, vreg);
-            vreg = arith::ShRUIOp::create(
-                builder, vreg,
-                getFullLikeVector(
-                    builder, cast<TypedValue<VectorType>>(vreg),
-                    builder.getI32IntegerAttr(second_minor_idx * bitwidth)));
-            unpacked.push_back(vreg);
+    // Iterate over the first dim. The algorithm operates on the last 3 dims.
+    for (int64_t outer_idx = 0; outer_idx < src_vregs.dim(0); ++outer_idx) {
+      for (int64_t minor_idx = 0; minor_idx < src_vregs.dim(3); ++minor_idx) {
+        for (int64_t second_minor_vreg_idx = 0;
+             second_minor_vreg_idx < src_vregs.dim(2);
+             ++second_minor_vreg_idx) {
+          for (int64_t third_minor_base_idx = 0;
+               third_minor_base_idx < src_vregs.dim(1);
+               third_minor_base_idx += packing) {
+            for (int64_t second_minor_subidx = 0; second_minor_subidx < packing;
+                 ++second_minor_subidx) {
+              SmallVector<Value> unpacked;
+              // We could have just interleaved unpacked the second_minor_idx
+              // part of the vreg in the loop below, but that ends up being more
+              // expensive than we need. Simple shifts do the trick. The high
+              // bits will be truncated by packing anyway.
+              for (int64_t third_minor_subidx = 0; third_minor_subidx < packing;
+                   ++third_minor_subidx) {
+                Value vreg = src_vregs(
+                    outer_idx, third_minor_base_idx + third_minor_subidx,
+                    second_minor_vreg_idx, minor_idx);
+                vreg = tpu::BitcastVregOp::create(builder, int_32_ty, vreg);
+                vreg = arith::ShRUIOp::create(
+                    builder, vreg,
+                    getFullLikeVector(builder,
+                                      cast<TypedValue<VectorType>>(vreg),
+                                      builder.getI32IntegerAttr(
+                                          second_minor_subidx * bitwidth)));
+                unpacked.push_back(vreg);
+              }
+              Value repacked_i32 = tpu::PackSubelementsOp::create(
+                  builder, int_packed_ty, unpacked,
+                  tpu::PackFormat::kInterleaved);
+              temp_dst_vregs(
+                  outer_idx,
+                  second_minor_vreg_idx * packing + second_minor_subidx,
+                  third_minor_base_idx / packing, minor_idx) =
+                  tpu::BitcastVregOp::create(builder, vreg_ty, repacked_i32);
+            }
           }
-          Value repacked_i32 = tpu::PackSubelementsOp::create(
-              builder, int_packed_ty, unpacked, tpu::PackFormat::kInterleaved);
-          dst_vregs(second_minor_idx, third_minor_base_idx / packing,
-                    minor_idx) =
-              tpu::BitcastVregOp::create(builder, vreg_ty, repacked_i32);
         }
       }
     }
+
+    // Prepare the final dst_vregs.
+    SmallVector<int64_t> dst_vreg_dims =
+        layout_out.tileArrayShape(dst_ty.getShape(), ctx.target_shape);
+    xla::Array<Value> dst_vregs(dst_vreg_dims);
+    reshape_to_4d(dst_vregs);
+    dst_vregs = temp_dst_vregs.Slice({0, 0, 0, 0}, dst_vregs.dimensions());
+    dst_vregs.Reshape(dst_vreg_dims);
+
     auto assembled =
         assemble(builder, dst_ty, layout_out, dst_vregs, ctx.target_shape);
     transpose_op.getOperation()->replaceAllUsesWith(assembled);
@@ -6240,21 +6557,6 @@ LogicalResult vector_transpose_rule(RewriteContext &ctx, Operation &op,
     static constexpr std::array<int, 8> permute_pattern_stage2_high_arr = {
         8,  9,  12, 13,
         10, 11, 14, 15};  // Selects from CH_XY to make A2B2C2D2A3B3C3D3
-
-    auto reshape_to_4d = [&](xla::Array<Value>& arr) {
-      auto dims = arr.dimensions();
-      // Keep the last 3 dims, and flatten the rest to the first dim or expand
-      // it.
-      auto last_3_dims = dims.last(3);
-      const int64_t num_elements_in_last_3_dims =
-          std::accumulate(last_3_dims.begin(), last_3_dims.end(),
-                          static_cast<int64_t>(1), std::multiplies<int64_t>());
-      llvm::SmallVector<int64_t, 4> new_dims = {
-          arr.num_elements() / num_elements_in_last_3_dims,
-      };
-      new_dims.append(last_3_dims.begin(), last_3_dims.end());
-      arr.Reshape(new_dims);
-    };
 
     llvm::SmallVector<int64_t, 4> original_dst_vregs_dims(
         dst_vregs.dimensions().begin(), dst_vregs.dimensions().end());
@@ -7455,6 +7757,12 @@ FailureOr<std::pair<VectorLayout, xla::Array<Value>>> changeOffsets(
     RewriteContext &ctx, OpBuilder &builder, const Location loc,
     const VectorType vty, VectorLayout src, xla::Array<Value> vregs,
     const LayoutOffsets dst_offsets) {
+  if (!vty.getElementType().isSignlessInteger()) {
+    return emitError(loc,
+                     "`changeOffsets` should only be called on integer types. "
+                     "Bitcast before calling this function.");
+  }
+
   const auto &target_shape = ctx.target_shape;
 
   if (!src.offsets()[0].has_value()) {
@@ -7993,6 +8301,12 @@ FailureOr<std::pair<VectorLayout, xla::Array<Value>>> changeTiling(
     VectorLayout src, xla::Array<Value> vregs,
     const std::array<int64_t, 2> dst_tiling,
     const LayoutOffsets dst_offsets_hint) {
+  if (!vty.getElementType().isSignlessInteger()) {
+    return emitError(loc,
+                     "`changeTiling` should only be called on integer types. "
+                     "Bitcast before calling this function.");
+  }
+
   bool has_enough_scratch = ctx.max_sublanes_in_scratch >=
                             ctx.target_shape[0] * (ctx.target_shape[0] + 1);
   const auto &target_shape = ctx.target_shape;
@@ -8016,10 +8330,7 @@ FailureOr<std::pair<VectorLayout, xla::Array<Value>>> changeTiling(
     return std::pair(dst, vregs);
   }
 
-  auto unpacked_elem_ty = vty.getElementType().isSignlessInteger()
-                              ? static_cast<Type>(builder.getI32Type())
-                              : static_cast<Type>(builder.getF32Type());
-  auto unpacked_vty = VectorType::get(vty.getShape(), unpacked_elem_ty);
+  auto unpacked_vty = VectorType::get(vty.getShape(), builder.getI32Type());
   auto unpack_vregs = [&](const VectorLayout packed_layout,
                           const xla::Array<Value> &packed_vregs,
                           const std::array<int64_t, 2> unpacked_tiling) {
@@ -8038,8 +8349,6 @@ FailureOr<std::pair<VectorLayout, xla::Array<Value>>> changeTiling(
   // Handle replicating small-to-large retiling for (a) replicated 2nd minor or
   // (b) 32-bit single-row.
   // This retiling is one-to-many vregs.
-  // TODO(tlongeri): Large-to-small retiling with replicated minor is analogous
-  // to this.
   if (src.tiling()[1] == ctx.target_shape[1] &&
       dst_tiling[1] == ctx.target_shape[1] &&
       dst_tiling[0] % src.tiling()[0] == 0 &&
@@ -8094,7 +8403,7 @@ FailureOr<std::pair<VectorLayout, xla::Array<Value>>> changeTiling(
         gather_pattern.push_back(src_sublane);
       }
       idxs.assign(dst_idx.begin(), dst_idx.end());
-      *(idxs.end() - 2) = 0;
+      DCHECK_EQ(*(idxs.end() - 2), 0);
       *(idxs.end() - 1) = src_col_idx;
       Value src_vreg = vregs(idxs);
       *vreg = builder.create<tpu::GatherOp>(loc, src_vreg.getType(), src_vreg,
@@ -8103,6 +8412,78 @@ FailureOr<std::pair<VectorLayout, xla::Array<Value>>> changeTiling(
     });
     return std::pair(dst, std::move(retiled));
   }
+  // Handle replicating large-to-small retiling for replicated minor.
+  // This retiling is one-to-many vregs.
+  if (src.tiling()[1] == dst_tiling[1] &&
+      src.tiling()[0] % dst_tiling[0] == 0 && !src.offsets()[1] &&
+      // This relayout relies on gathers, which are cheap on newer generations,
+      // so we always use it for them.
+      (!dst_offsets_hint[1] || ctx.hardware_generation >= 5)) {
+    CHECK(src.offsets()[0]);  // Full replication handled separately
+    const int tile_ratio = src.tiling()[0] / dst_tiling[0];
+    const int64_t dst_2nd_minor_offset = *src.offsets()[0] % dst_vreg_slice[0];
+    const int64_t tile_offset = *src.offsets()[0] / dst_vreg_slice[0];
+    const VectorLayout dst(bitwidth, {dst_2nd_minor_offset, std::nullopt},
+                           dst_tiling, src.implicit_dim());
+    const SmallVector<int64_t> dst_vreg_array_shape =
+        dst.tileArrayImplicitShape(vty.getShape(), target_shape);
+    const int64_t src_sublanes_per_tile = src.sublanesPerTile(ctx.target_shape);
+    const int64_t dst_sublanes_per_tile = dst.sublanesPerTile(ctx.target_shape);
+    xla::Array<Value> retiled(dst_vreg_array_shape);
+    SmallVector<int64_t> src_idx;
+    retiled.Each([&](absl::Span<const int64_t> dst_idx, Value* const vreg) {
+      // Recall that this is a one-to-many vregs relayout. Each destination vreg
+      // will hold a different part of the source data.
+      // For example, a (8, 128) -> (4, 128) retiling with replicated 2nd minor:
+      // - Destination vreg 0 comes from the first 4 sublanes of source vreg 0,
+      //   with gather pattern [0, 1, 2, 3, 0, 1, 2, 3]
+      // - Destination vreg 1 comes from the last 4 sublanes of source vreg 0,
+      //   with gather pattern [4, 5, 6, 7, 4, 5, 6, 7]
+      // - Destination vreg 2 comes from the first 4 sublanes of source vreg 1,
+      //   with gather pattern [0, 1, 2, 3, 0, 1, 2, 3]
+      // ...
+
+      // Take the shape, padded with the source offsets and to a multiple of the
+      // dst tiling, and break it up into dst tiles to form a tile array.
+      // Note that by this definition the tiles of some leading rows may be
+      // purely padding.
+      // dst_padded_tile_row_idx is the row index in this array of the tiles
+      // held by this vreg.
+      const int64_t dst_padded_tile_row_idx =
+          *(dst_idx.end() - 2) + tile_offset;
+      // src_row_idx is the row index of the source vreg that holds the data
+      // for this vreg.
+      const int64_t src_row_idx = dst_padded_tile_row_idx / tile_ratio;
+      // Each larger source tile is made up of `tile_ratio` smaller destination
+      // tiles. dst_tile_in_src_tile is the index of the destination tile within
+      // the source tile.
+      const int64_t dst_tile_in_src_tile = dst_padded_tile_row_idx % tile_ratio;
+      SmallVector<int32_t, 8> gather_pattern;
+      for (int sublane = 0; sublane < ctx.target_shape[0]; ++sublane) {
+        // dst_sublane_in_tile is the sublane index within the destination tile.
+        const int64_t dst_sublane_in_tile = sublane % dst_sublanes_per_tile;
+        // Source-sized tiles within the source vreg are all identical, we can
+        // gather from any of them.
+        constexpr int64_t src_tile = 0;
+        // src_sublane_in_tile is the sublane index within the source tile.
+        const int64_t src_sublane_in_tile =
+            dst_tile_in_src_tile * dst_sublanes_per_tile + dst_sublane_in_tile;
+        // src_sublane is the sublane index within the source vreg.
+        const int64_t src_sublane =
+            src_tile * src_sublanes_per_tile + src_sublane_in_tile;
+        gather_pattern.push_back(src_sublane);
+      }
+      src_idx.assign(dst_idx.begin(), dst_idx.end());
+      *(src_idx.end() - 2) = src_row_idx;
+      DCHECK_EQ(*(src_idx.end() - 1), 0);
+      Value src_vreg = vregs(src_idx);
+      *vreg = builder.create<tpu::GatherOp>(loc, src_vreg.getType(), src_vreg,
+                                            gather_pattern,
+                                            /*dimension=*/0);
+    });
+    return std::pair(dst, std::move(retiled));
+  }
+
   // (8,128) <-> (8 * packing,128) tiling change for packed type.
   if (ctx.hardware_generation >= 4 && bitwidth < 32 && 32 % bitwidth == 0 &&
       ((src.tiling() == ctx.target_shape &&
@@ -8249,6 +8630,12 @@ FailureOr<std::pair<VectorLayout, xla::Array<Value>>> changeImplicitDim(
     VectorLayout src, xla::Array<Value> vregs,
     const VectorLayout::ImplicitDim dst_implicit_dim,
     const LayoutOffsets dst_offset_hints) {
+  if (!vty.getElementType().isSignlessInteger()) {
+    return emitError(loc,
+                     "`changeImplicitDim` should only be called on integer "
+                     "types. Bitcast before calling this function.");
+  }
+
   const auto &target_shape = ctx.target_shape;
   if (src.implicit_dim() == dst_implicit_dim) {
     return std::make_pair(src, std::move(vregs));
@@ -8443,32 +8830,23 @@ FailureOr<std::pair<VectorLayout, xla::Array<Value>>> changeImplicitDim(
   CHECK(src.bitwidth() != 32 || !src.hasNativeTiling(ctx.target_shape));
   const int bitwidth = src.bitwidth();
   const std::array<int64_t, 2> tiling = src.tiling();
-  VectorType vreg_ty =
-      getNativeVregType(vty.getElementType(), ctx.target_shape);
-  VectorType int_vreg_ty =
-      getNativeVregType(builder.getIntegerType(bitwidth), ctx.target_shape);
-  VectorType int_vty =
-      VectorType::get(vty.getShape(), builder.getIntegerType(bitwidth));
   VectorType i32_vty = VectorType::get(vty.getShape(), builder.getI32Type());
   // If necessary, retiling is done first to ensure we can unpack directly
   // to 32-bit native tiling:
   const std::array<int64_t, 2> intermediate_tiling =
       src.tiling()[0] % ctx.target_shape[0] == 0 ? src.tiling()
                                                  : ctx.target_shape;
-  vregs.Each([&](const absl::Span<const int64_t> idx, Value *vreg) {
-    *vreg = builder.create<BitcastVregOp>(vreg->getLoc(), int_vreg_ty, *vreg);
-  });
   FAILUREOR_ASSIGN_OR_RETURN(
       std::tie(src, vregs),
       changeTiling(
-          ctx, builder, loc, int_vty, src, vregs,
+          ctx, builder, loc, vty, src, vregs,
           /*dst_tiling=*/intermediate_tiling,
           alignedToVregSlice(dst_offset_hints, ctx.target_shape, bitwidth,
                              /*tiling=*/intermediate_tiling)));
   if (bitwidth != 32) {
     FAILUREOR_ASSIGN_OR_RETURN(
         std::tie(src, vregs),
-        unpackVregs(ctx, builder, loc, vregs, /*input_ty=*/int_vty,
+        unpackVregs(ctx, builder, loc, vregs, /*input_ty=*/vty,
                     /*result_ty=*/i32_vty, src,
                     /*tiling_out=*/ctx.target_shape));
   }
@@ -8482,20 +8860,18 @@ FailureOr<std::pair<VectorLayout, xla::Array<Value>>> changeImplicitDim(
     FAILUREOR_ASSIGN_OR_RETURN(
         std::tie(src, vregs),
         packVregs(ctx, builder, loc, vregs, /*input_ty=*/i32_vty,
-                  /*result_ty=*/int_vty, src, intermediate_tiling,
+                  /*result_ty=*/vty, src, intermediate_tiling,
                   alignedToVregSlice(dst_offset_hints, ctx.target_shape,
                                      bitwidth, intermediate_tiling)));
   }
   FAILUREOR_ASSIGN_OR_RETURN(
       std::tie(src, vregs),
       changeTiling(
-          ctx, builder, loc, int_vty, src, vregs,
+          ctx, builder, loc, vty, src, vregs,
           /*dst_tiling=*/tiling,
           alignedToVregSlice(dst_offset_hints, ctx.target_shape, bitwidth,
                              /*tiling=*/tiling)));
-  vregs.Each([&](const absl::Span<const int64_t> idx, Value *vreg) {
-    *vreg = builder.create<BitcastVregOp>(vreg->getLoc(), vreg_ty, *vreg);
-  });
+
   return std::make_pair(src, std::move(vregs));
 }
 
@@ -8563,20 +8939,36 @@ FailureOr<std::pair<VectorLayout, xla::Array<Value>>> relayoutVregs(
     }
   }
 
+  // Relayout just rearanges the data, so we can do it in integer type, where
+  // pack/unpack support is more comprehensive.
+  VectorType int_vreg_ty = getNativeVregType(
+      builder.getIntegerType(src.bitwidth()), ctx.target_shape);
+  src_tiles.Each([&](const absl::Span<const int64_t> idx, Value* vreg) {
+    *vreg = builder.create<tpu::BitcastVregOp>(loc, int_vreg_ty, *vreg);
+  });
+
+  VectorType int_vty =
+      VectorType::get(vty.getShape(), builder.getIntegerType(src.bitwidth()));
   FAILUREOR_ASSIGN_OR_RETURN(
       std::tie(src, src_tiles),
-      changeTiling(ctx, builder, loc, vty, src, std::move(src_tiles),
+      changeTiling(ctx, builder, loc, int_vty, src, std::move(src_tiles),
                    dst.tiling(), dst.offsets()));
 
   FAILUREOR_ASSIGN_OR_RETURN(
       std::tie(src, src_tiles),
-      changeImplicitDim(ctx, builder, loc, vty, src, std::move(src_tiles),
+      changeImplicitDim(ctx, builder, loc, int_vty, src, std::move(src_tiles),
                         dst.implicit_dim(), dst.offsets()));
 
   FAILUREOR_ASSIGN_OR_RETURN(
       std::tie(src, src_tiles),
-      changeOffsets(ctx, builder, loc, vty, src, std::move(src_tiles),
+      changeOffsets(ctx, builder, loc, int_vty, src, std::move(src_tiles),
                     dst.offsets()));
+
+  VectorType original_vreg_ty =
+      getNativeVregType(vty.getElementType(), ctx.target_shape);
+  src_tiles.Each([&](const absl::Span<const int64_t> idx, Value* vreg) {
+    *vreg = builder.create<tpu::BitcastVregOp>(loc, original_vreg_ty, *vreg);
+  });
 
   CHECK_EQ(src, dst);
   return std::make_pair(dst, std::move(src_tiles));
@@ -8931,6 +9323,7 @@ struct ApplyVectorLayoutPass
     max_sublanes_in_scratch = ctx.max_sublanes_in_scratch;
     vmem_banks = ctx.vmem_banks;
     max_shuffle_sublane_offset = ctx.max_shuffle_sublane_offset;
+    shape_invariant_numerics = ctx.shape_invariant_numerics;
   }
   void runOnOperation() override {
     // Fail if hardware_generation has not been set from the default value.
@@ -8945,6 +9338,7 @@ struct ApplyVectorLayoutPass
         .max_sublanes_in_scratch = max_sublanes_in_scratch,
         .vmem_banks = vmem_banks,
         .max_shuffle_sublane_offset = max_shuffle_sublane_offset,
+        .shape_invariant_numerics = shape_invariant_numerics,
     };
     if (failed(applyLayoutFunc(ctx, getOperation()))) {
       signalPassFailure();

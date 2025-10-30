@@ -348,7 +348,7 @@ absl::Status PyClient::Defragment() {
   }
   GlobalPyRefManager()->CollectGarbage();
 
-  xla::ifrt::UserContextScope user_context_scope(PyUserContext::Create());
+  PyUserContextScope user_context_scope;
   DevicePutOptions options;
   options.squash_64bit_types = false;
   options.allow_zero_copy =
@@ -446,7 +446,7 @@ PyClient::CompileAndLoadIfrtProgram(
     }
   }
 
-  xla::ifrt::UserContextScope user_context_scope(PyUserContext::Create());
+  PyUserContextScope user_context_scope;
   ifrt::LoadedExecutableRef ifrt_loaded_executable;
   std::optional<std::string> fingerprint;
   absl::Status compile_status;
@@ -515,8 +515,9 @@ PyClient::CompileAndLoad(nb_class_ptr<PyClient> client, mlir::ModuleOp module,
       TF_RETURN_IF_ERROR(xla::ExportShardyForGSPMD(module));
     }
   }
+  options.allow_in_place_mlir_modification = true;  // We just cloned the module
   return CompileAndLoadIfrtProgram(
-      client, std::make_unique<xla::ifrt::HloProgram>(module),
+      client, std::make_unique<xla::ifrt::HloProgram>(std::move(module)),
       MakeIfrtCompileOptions(std::move(options), std::move(executable_devices),
                              std::move(host_callbacks)));
 }
@@ -564,7 +565,7 @@ PyClient::DeserializeExecutable(nb_class_ptr<PyClient> client,
   auto ifrt_deserialize_options = MakeIfrtDeserializeExecutableOptions(
       std::move(options), std::move(executable_devices),
       std::move(host_callbacks));
-  xla::ifrt::UserContextScope user_context_scope(PyUserContext::Create());
+  PyUserContextScope user_context_scope;
   {
     nb::gil_scoped_release gil_release;
     TF_ASSIGN_OR_RETURN(

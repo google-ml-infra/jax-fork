@@ -58,10 +58,12 @@ struct GpuTransposePlanCache {
   explicit GpuTransposePlanCache(int capacity) : cache(capacity) {}
   xla::TransposePlanCache cache;
 };
+
 xla::ffi::TypeId GpuTransposePlanCache::id = {};
 
 XLA_FFI_REGISTER_TYPE(xla::ffi::GetXlaFfiApi(), "GpuTransposePlanCache",
-                      &GpuTransposePlanCache::id);
+                      &GpuTransposePlanCache::id,
+                      xla::ffi::TypeInfo<GpuTransposePlanCache>());
 
 static xla::ffi::ErrorOr<std::unique_ptr<GpuTransposePlanCache>>
 GpuTransposePlanCacheInstantiate(uint64_t index) {
@@ -152,18 +154,19 @@ xla::ffi::Error XlaFfiPythonGpuCallback(gpuStream_t stream,
     PyTuple_SET_ITEM(host_input_arrays.ptr(), i, array.inc_ref().ptr());
   }
 
-  xla::EnterHostCallback();
   // TODO(dsuo): Change this to use the Python vectorcall protocol, which allows
   // you to avoid constructing a tuple for the arguments.
   nb::tuple result_tuple;
-  try {
-    auto result_object = callback(*nb::borrow<nb::args>(host_input_arrays));
-    result_tuple = nb::cast<nb::tuple>(result_object);
-  } catch (nb::python_error& e) {
-    return xla::ffi::Error::Internal(
-        absl::StrFormat("CpuCallback error calling callback: %s", e.what()));
+  {
+    xla::HostCallbackScope scope;
+    try {
+      auto result_object = callback(*nb::borrow<nb::args>(host_input_arrays));
+      result_tuple = nb::cast<nb::tuple>(result_object);
+    } catch (nb::python_error& e) {
+      return xla::ffi::Error::Internal(
+          absl::StrFormat("CpuCallback error calling callback: %s", e.what()));
+    }
   }
-  xla::LeaveHostCallback();
 
   std::vector<void*> temp_buffers;
   for (size_t i = 0; i < rets.size(); ++i) {
@@ -271,9 +274,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
     (jax::XlaBufferCallback<kDLROCM>),
 #endif
     xla::ffi::Ffi::Bind()
+        .Ctx<xla::ffi::Context>()
         .Ctx<xla::ffi::DeviceOrdinal>()
-        .Ctx<xla::ffi::FfiApi>()
-        .Ctx<xla::ffi::FfiExecutionContext>()
         .Ctx<xla::ffi::UserData<xla::FfiLoadedHostCallbacks>>()
         .Attr<uint64_t>("index")
         .RemainingArgs()
@@ -287,9 +289,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
     (jax::XlaBufferCallback<kDLROCM>),
 #endif
     xla::ffi::Ffi::Bind()
+        .Ctx<xla::ffi::Context>()
         .Ctx<xla::ffi::DeviceOrdinal>()
-        .Ctx<xla::ffi::FfiApi>()
-        .Ctx<xla::ffi::FfiExecutionContext>()
         .Ctx<xla::ffi::UserData<xla::FfiLoadedHostCallbacks>>()
         .Attr<uint64_t>("index")
         .RemainingArgs()
