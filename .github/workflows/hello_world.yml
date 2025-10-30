@@ -33,7 +33,7 @@ jobs:
         run: |
           echo "Running tests..."
           sleep 15
-          echo "Tests complete..."
+          echo "Tests complete.."
       - name: Simulate testing
         run: |
           echo "Running tests."
