@@ -26,6 +26,13 @@ jobs:
   build:
     runs-on: linux-x86-g2-48-l4-4gpu
     container: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build:latest
+    # Service containers to run with `container-job`
+    services:
+      # Label used to access the service container
+      redis:
+        # Docker Hub image
+        image: redis
+
     strategy:
       matrix:
         python-version: [3.11]
