@@ -15,7 +15,7 @@
 # limitations under the License.
 #
 #### CLI for building JAX wheel packages from source and for updating the
-# requirements_lock.txt files
+## requirements_lock.txt files
 
 import argparse
 import asyncio
