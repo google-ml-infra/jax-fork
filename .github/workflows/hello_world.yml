@@ -17,7 +17,7 @@ permissions: {}
 jobs:
   build:
     
-    runs-on: linux-arm64-t2a-16
+    runs-on: linux-arm64-c4a-16
     container: 'us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build-arm64:latest'
     steps:
       - name: Checkout code
