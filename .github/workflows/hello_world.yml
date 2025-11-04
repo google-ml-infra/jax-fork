@@ -5,6 +5,12 @@ on:
       - main
   workflow_dispatch: # allows triggering the workflow run manually
   workflow_call:
+    inputs:
+      json_vars:
+        type: string
+        description: 'A JSON string of key-value pairs that will be passed as environment variables to the workflow. (e.g., {"NAME": "test", "VERSION": "1.2.3"})'
+        required: false
+        default: '{}'
 
 permissions: {}
 
@@ -16,12 +22,17 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+      - name: Parse and set dynamic env vars
+        run: |
+          echo "Setting environment variables from input..."
+          echo '${{ inputs.json_vars }}' | jq -r 'to_entries[] | "\(.key)=\(.value)"' >> $GITHUB_ENV
       - name: Simulate build
         run: |
+          echo $GITHUB_ENV
+          echo $TEST
           echo "Building the project..."
           sleep 10
           echo "Build complete."
-          exit 1
 
   test:
     runs-on: linux-arm64-t2a-16
