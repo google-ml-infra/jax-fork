@@ -10,7 +10,7 @@ on:
         type: string
         description: 'A JSON string of key-value pairs that will be passed as environment variables to the workflow. (e.g., {"NAME": "test", "VERSION": "1.2.3"})'
         required: false
-        default: '{}'
+        default: '{"TEST": "my-cli-test"}'
 
 permissions: {}
 
