@@ -10,7 +10,7 @@ on:
         type: string
         description: 'A JSON string of key-value pairs that will be passed as environment variables to the workflow. (e.g., {"NAME": "test", "VERSION": "1.2.3"})'
         required: false
-        default: '{"TEST": "my-cli-test"}'
+        default: ''
 
 permissions: {}
 
@@ -33,6 +33,7 @@ jobs:
           echo "Building the project..."
           sleep 10
           echo "Build complete."
+          exit 1
 
   test:
     runs-on: linux-arm64-t2a-16
