@@ -32,7 +32,7 @@ jobs:
           echo $TEST
           echo "Building the project..."
           sleep 10
-          echo "Build complete..."
+          echo "Build complete...."
           exit 1
 
   test:
