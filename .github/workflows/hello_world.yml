@@ -33,6 +33,7 @@ jobs:
           echo "Building the project..."
           sleep 10
           echo "Build complete...."
+          exit 1
 
   test:
     runs-on: linux-x86-n2-16
