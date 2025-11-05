@@ -90,7 +90,7 @@ class PallasBaseTest(jtu.JaxTestCase):
     return pl.pallas_call(*args, interpret=cls.INTERPRET, **kwargs)
 
 
-@jtu.thread_unsafe_test_class()  # hypothesis is not thread safe
+@jtu.thread_unsafe_test_class(condition=not jtu.hypothesis_is_thread_safe())
 class OpsTest(PallasBaseTest):
 
   @parameterized.product(
@@ -305,13 +305,6 @@ class OpsTest(PallasBaseTest):
       reduce_func = [jnp.sum, jnp.max, jnp.min]
   )
   def test_reduction(self, dtype, axis, reduce_func):
-    # TODO(b/395579834): Remove this skip later.
-    if (
-        dtype == jnp.int32
-        and axis == 2
-        and not jtu.if_cloud_tpu_at_least(2025, 9, 1)
-    ):
-      self.skipTest("Requires libtpu built after 2025-09-01")
     in_shape = (2, 16, 128)
     out_shape = list(in_shape)
     out_shape[axis] = 1
@@ -332,8 +325,6 @@ class OpsTest(PallasBaseTest):
       reduce_func = [jnp.argmax, jnp.argmin]
   )
   def test_reduce_index(self, axis, reduce_func):
-    if not jtu.if_cloud_tpu_at_least(2025, 9, 8):
-      self.skipTest("Requires libtpu built after 2025-09-08")
     dtype = jnp.float32
     in_shape = (2, 32, 256)
     rank = len(in_shape)
@@ -495,7 +486,7 @@ class OpsTest(PallasBaseTest):
     if not jtu.is_device_tpu_at_least(version=4):
       self.skipTest("Requires TPUv4+")
     kwargs = {}
-    if jtu.get_tpu_version() == 6:
+    if jtu.is_device_tpu_at_least(version=6):
       kwargs.update(dict(rtol=1e-2))
     def kernel(x, y, out):
       out[:] = jax.lax.div(x[:], y[:])
@@ -583,8 +574,6 @@ class OpsTest(PallasBaseTest):
     )
 
   def test_while_loop_arg_num_change(self):
-    if not jtu.if_cloud_tpu_at_least(2025, 7, 17):
-      self.skipTest("Requires libtpu built after 2025-07-17")
     # This kernel will generate a while loop that will be CSEd by MLIR to have
     # the different number of argments in before region and after region.
     def kernel(
@@ -633,8 +622,6 @@ class OpsTest(PallasBaseTest):
     self.assertEqual(output, 0)
 
   def test_produce_predicate_phi(self):
-    if not jtu.if_cloud_tpu_at_least(2025, 7, 18):
-      self.skipTest("Requires libtpu built after 2025-07-18")
     def kernel(
         out_ref,
         a,
@@ -680,6 +667,65 @@ class OpsTest(PallasBaseTest):
     )()[0]
     self.assertEqual(output, 0)
 
+  def test_retiling_with_replicated_lane(self):
+    self.skipTest("TODO(b/452689987)")
+    shape = (32, 1)
+    broadcast_shape = (32, 256)
+
+    @functools.partial(
+        pl.pallas_call,
+        out_shape=jax.ShapeDtypeStruct((8, 4, 256), jnp.float32),
+    )
+    def kernel(x_ref, o_ref):
+      o_ref[...] = jnp.broadcast_to(
+          x_ref[...], broadcast_shape
+      ).reshape(o_ref.shape)
+
+    x = jnp.arange(np.prod(shape), dtype=jnp.float32).reshape(shape)
+    out = kernel(x).reshape(broadcast_shape)
+    expected = jnp.broadcast_to(x, broadcast_shape)
+    np.testing.assert_array_equal(out, expected)
+
+  @parameterized.parameters(
+      [jnp.bfloat16, jnp.float8_e5m2, jnp.float8_e4m3fn, jnp.float8_e4m3b11fnuz]
+  )
+  def test_stochastic_round(self, target_dtype):
+    if not jtu.is_device_tpu_at_least(version=5):
+      self.skipTest("Requires TPU v5+")
+    if not jtu.if_cloud_tpu_at_least(2025, 10, 29):
+      self.skipTest("Test requires libtpu from 2025/10/29 or later")
+
+    def kernel(x_ref, b_ref, o_ref):
+      o_ref[...] = pltpu.stochastic_round(
+          x_ref[...], b_ref[...], target_dtype=target_dtype
+      )
+
+    shape = (8, 128)
+    k1, k2 = jax.random.split(jax.random.key(4242), 2)
+    x = jax.random.normal(k1, shape, dtype=jnp.float32)
+    bits = jax.random.bits(k2, shape, dtype=jnp.uint32)
+    x_cast = x.astype(target_dtype)
+    x_cast_as_f32 = x_cast.astype(jnp.float32)
+    max_val = jnp.finfo(target_dtype).max
+    min_val = jnp.finfo(target_dtype).min
+    lower = jnp.where(x_cast_as_f32 > x, jnp.nextafter(x_cast, min_val), x_cast)
+    upper = jnp.where(x_cast_as_f32 < x, jnp.nextafter(x_cast, max_val), x_cast)
+
+    result = pl.pallas_call(
+        kernel,
+        in_specs=[pl.BlockSpec(), pl.BlockSpec()],
+        out_shape=jax.ShapeDtypeStruct(x.shape, target_dtype),
+    )(x, bits)
+
+    int_dtype = getattr(jnp, f"uint{dtypes.bit_width(target_dtype)}")
+    is_correct_bitwise = (
+        (result.view(int_dtype) == lower.view(int_dtype)) |
+        (result.view(int_dtype) == upper.view(int_dtype))
+    )
+    is_correct = jnp.where(
+        jnp.isnan(x_cast), jnp.isnan(result), is_correct_bitwise
+    )
+    self.assertTrue(jnp.all(is_correct))
 
 if __name__ == "__main__":
   absltest.main()

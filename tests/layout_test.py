@@ -14,6 +14,7 @@
 
 import math
 from functools import partial
+
 from absl.testing import absltest
 import numpy as np
 
@@ -375,7 +376,7 @@ class LayoutTest(jtu.JaxTestCase):
 
   def test_wsc_bfloat16_concrete_layout(self):
     mesh = jtu.create_mesh((2, 2), ('x', 'y'))
-    shape = (16, 128)
+    shape = (64, 128)
     s = NamedSharding(mesh, P('x'))
     inp = jnp.arange(math.prod(shape), dtype=jnp.bfloat16).reshape(shape)
     arr = jax.device_put(inp, s)
@@ -451,7 +452,7 @@ class LayoutTest(jtu.JaxTestCase):
     l = Format(custom_dll, SingleDeviceSharding(jax.devices()[0]))
     inp = np.arange(8)
 
-    @partial(jax.jit, in_shardings=l)
+    @jax.jit(in_shardings=l)
     def f(x):
       return x * 2
 
@@ -492,7 +493,7 @@ class LayoutTest(jtu.JaxTestCase):
 
     custom_dll2 = Layout(major_to_minor=(1, 0))
 
-    @partial(jax.jit, in_shardings=Format(custom_dll2, s))
+    @jax.jit(in_shardings=Format(custom_dll2, s))
     def g(x):
       return x.T
 
@@ -533,7 +534,7 @@ class LayoutTest(jtu.JaxTestCase):
     custom_dll = Layout(major_to_minor=(0, 1))
     arr = jax.device_put(np_inp, Format(custom_dll, s))
 
-    @partial(jax.jit, in_shardings=Format(custom_dll, s), donate_argnums=0)
+    @jax.jit(in_shardings=Format(custom_dll, s), donate_argnums=0)
     def f(x):
       return x
 
@@ -548,7 +549,7 @@ class LayoutTest(jtu.JaxTestCase):
 
     arr = jax.device_put(np_inp, s)
 
-    @partial(jax.jit, out_shardings=Format(Layout.AUTO), donate_argnums=0)
+    @jax.jit(out_shardings=Format(Layout.AUTO), donate_argnums=0)
     def f(x):
       return x * x
 
@@ -565,7 +566,7 @@ class LayoutTest(jtu.JaxTestCase):
     l = Format(custom_dll, s)
     arr = jax.device_put(np_inp, l)
 
-    @partial(jax.jit, in_shardings=l, out_shardings=l, donate_argnums=0)
+    @jax.jit(in_shardings=l, out_shardings=l, donate_argnums=0)
     def f(x):
       return x * x
 
@@ -583,7 +584,7 @@ class LayoutTest(jtu.JaxTestCase):
     l1 = Format(custom_dll1, s)
     arr = jax.device_put(np_inp, s)
 
-    @partial(jax.jit, out_shardings=l1, donate_argnums=0)
+    @jax.jit(out_shardings=l1, donate_argnums=0)
     def f(x):
       return x * x
 
@@ -592,7 +593,7 @@ class LayoutTest(jtu.JaxTestCase):
     self.assertFalse(arr.is_deleted())
 
   def test_donation_error_on_auto(self):
-    @partial(jax.jit, donate_argnums=0, in_shardings=Format(Layout.AUTO))
+    @jax.jit(donate_argnums=0, in_shardings=Format(Layout.AUTO))
     def f(x):
       return x * 2
 
@@ -600,7 +601,7 @@ class LayoutTest(jtu.JaxTestCase):
         ValueError, ".*Did you mean to set the.*output layout.*AUTO.*"):
       f(jnp.arange(8))
 
-    @partial(jax.jit, donate_argnums=0, out_shardings=Format(Layout.AUTO))
+    @jax.jit(donate_argnums=0, out_shardings=Format(Layout.AUTO))
     def g(x):
       return x * 2
 
@@ -609,6 +610,8 @@ class LayoutTest(jtu.JaxTestCase):
       g(jnp.arange(8))
 
   def test_sparsecore_compute(self):
+    if not jtu.if_cloud_tpu_at_least(2025, 10, 14):
+      self.skipTest("disabled on cloud tpu until 2025-10-14")
     if not (jax.devices()[0].device_kind == 'TPU v5' or
             jtu.is_device_tpu_at_least(6)):
       self.skipTest('Does not have a sparsecore present')
@@ -626,13 +629,15 @@ class LayoutTest(jtu.JaxTestCase):
     def sparsecore_compute(x):
       return x * x
 
-    @partial(jax.jit, out_shardings=(dense_format, sparse_format))
+    @jax.jit(out_shardings=(dense_format, sparse_format))
     def f(x, y):
       return x * 2, sparsecore_compute(y)
 
     f(inp, sparecore_arr)
 
   def test_sparsecore_compute_twice(self):
+    if not jtu.if_cloud_tpu_at_least(2025, 10, 14):
+      self.skipTest("disabled on cloud tpu until 2025-10-14")
     if not (
         jax.devices()[0].device_kind == 'TPU v5'
         or jtu.is_device_tpu_at_least(6)
@@ -656,13 +661,15 @@ class LayoutTest(jtu.JaxTestCase):
     def sparsecore_add(x, y):
       return x + y
 
-    @partial(jax.jit, donate_argnums=0, out_shardings=sparse_format)
+    @jax.jit(donate_argnums=0, out_shardings=sparse_format)
     def f(x):
       return sparsecore_multiply(sparsecore_add(x, x) + 1, x)
 
     f(sparecore_arr)
 
   def test_sparsecore_and_host_compute(self):
+    if not jtu.if_cloud_tpu_at_least(2025, 10, 14):
+      self.skipTest("disabled on cloud tpu until 2025-10-14")
     if not (
         jax.devices()[0].device_kind == 'TPU v5'
         or jtu.is_device_tpu_at_least(6)
@@ -731,7 +738,7 @@ class LayoutTest(jtu.JaxTestCase):
     arr = jax.device_put(np_inp, s)
     out_format = Format(arr.format.layout, s)
 
-    @partial(jax.jit, out_shardings=out_format, donate_argnums=0)
+    @jax.jit(out_shardings=out_format, donate_argnums=0)
     def f(x):
       return x * 2
 
@@ -802,7 +809,7 @@ class LayoutTest(jtu.JaxTestCase):
     l = Format(custom_dll, s)
     arr = jax.device_put(np_inp, l)
 
-    @partial(jax.jit, in_shardings=l, out_shardings=l)
+    @jax.jit(in_shardings=l, out_shardings=l)
     def f(x):
       return x * x
 

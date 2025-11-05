@@ -90,6 +90,7 @@ limitations under the License.
 #include "xla/backends/cpu/collectives/mpi_collectives.h"
 #endif  // !_WIN32 && !PLATFORM_GOOGLE
 
+#include "jaxlib/call_location.h"
 #include "jaxlib/config.h"
 #include "jaxlib/custom_call_sharding.h"
 #include "jaxlib/dlpack.h"
@@ -113,10 +114,10 @@ limitations under the License.
 #include "jaxlib/traceback.h"
 #include "jaxlib/xla_compiler.h"
 #include "xla/hlo/builder/lib/approx_topk_shape.h"
+#include "xla/pjrt/c_api_client/pjrt_c_api_client.h"
 #include "xla/pjrt/distributed/key_value_store_interface.h"
 #include "xla/pjrt/exceptions.h"
 #include "xla/pjrt/pjrt_api.h"
-#include "xla/pjrt/pjrt_c_api_client.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/pjrt/pjrt_common.h"
 #include "xla/pjrt/pjrt_executable.h"
@@ -532,6 +533,9 @@ NB_MODULE(_jax, m) {
   nb::class_<PyLoadedExecutable>(m, "LoadedExecutable")
       .def_prop_ro("client", &PyLoadedExecutable::client)
       .def("local_devices", &PyLoadedExecutable::AddressableDevices)
+      .def("get_hlo_text",
+           xla::ValueOrThrowWrapper(
+               &PyLoadedExecutable::GetHumanReadableProgramText))
       .def("size_of_generated_code_in_bytes",
            &PyLoadedExecutable::SizeOfGeneratedCodeInBytes)
       .def(
@@ -582,24 +586,37 @@ NB_MODULE(_jax, m) {
   m.def(
       "dlpack_managed_tensor_to_buffer",
       [](const nb::capsule& tensor, nb_class_ptr<PyDevice> device,
-         std::optional<std::intptr_t> stream) {
+         std::optional<std::intptr_t> stream, std::optional<bool> copy) {
         return xla::ValueOrThrow(DLPackManagedTensorToBuffer(
-            tensor, device->device(), device->client(), stream));
+            tensor, device->device(), device->client(), stream, copy));
       },
       nb::arg("dlpack"), nb::arg("device"), nb::arg("stream").none(),
-    nb::sig(
-      // clang-format off
+      nb::arg("copy").none() = nb::none(),
+      nb::sig(
+          // clang-format off
       "def dlpack_managed_tensor_to_buffer("
       "dlpack: typing_extensions.CapsuleType, "
       "device: Device, "
-      "stream: int | None"
+      "stream: int | None, "
+      "copy: bool | None = ..."
       ") -> ArrayImpl"
-      // clang-format on
-    ));
+          // clang-format on
+          ));
   m.def("cuda_array_interface_to_buffer",
         xla::ValueOrThrowWrapper(CudaArrayInterfaceToBuffer), nb::arg("cai"),
         nb::arg("gpu_backend").none() = nb::none(),
         nb::arg("device_id").none() = nb::none());
+
+  nb::enum_<jax::RuntimeTracebackMode>(m, "RuntimeTracebackMode")
+      .value("OFF", jax::RuntimeTracebackMode::kOff)
+      .value("ON", jax::RuntimeTracebackMode::kOn)
+      .value("FULL", jax::RuntimeTracebackMode::kFull);
+  m.def("add_exclude_path", &jax::AddExcludePath,
+        "Adds a path to exclude from tracebacks.");
+  m.def("set_send_traceback_to_runtime_global",
+        &jax::SetSendTracebackToRuntimeGlobal);
+  m.def("set_send_traceback_to_runtime_thread_local",
+        &jax::SetSendTracebackToRuntimeThreadLocal, nb::arg("mode").none());
 
   BuildConfigSubmodule(m);
   BuildIfrtProgramsSubmodule(m);
@@ -727,7 +744,16 @@ NB_MODULE(_jax, m) {
           [](xla::DistributedRuntimeClient& client,
              std::vector<int32_t> process_ids) {
             nb::gil_scoped_release gil_release;
-            return xla::ValueOrThrow(client.GetLiveNodes(process_ids));
+            // Python doesn't understand the IncarnationId type, so we convert
+            // to regular integers before returning.
+            absl::flat_hash_map<int32_t, tsl::IncarnationId> nodes =
+                xla::ValueOrThrow(
+                    client.GetLiveNodesWithIncarnations(process_ids));
+            absl::flat_hash_map<int32_t, uint64_t> py_nodes;
+            for (const auto& [task_id, incarnation_id] : nodes) {
+              py_nodes[task_id] = incarnation_id.value();
+            }
+            return py_nodes;
           },
           nb::arg("process_ids"))
       // The key must be a string, but the value can either be a Python string

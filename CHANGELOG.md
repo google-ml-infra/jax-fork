@@ -16,13 +16,51 @@ When releasing, please add the new-release-boilerplate to docs/pallas/CHANGELOG.
 
 ## Unreleased
 
+* New features:
+
+  * {func}`jax.jit` now supports the decorator factory pattern; i.e instead of
+    writing
+    ```
+    @functools.partial(jax.jit, static_argnames=['n'])
+    def f(x, n):
+      ...
+    ```
+    you may write
+    ```
+    @jax.jit(static_argnames=['n'])
+    def f(x, n):
+      ...
+    ```
+
+* Changes:
+
+  * {func}`jax.lax.linalg.eigh` now accepts an `implementation` argument to
+    select between QR (CPU/GPU), Jacobi (GPU/TPU), and QDWH (TPU)
+    implementations. The `EighImplementation` enum is publicly exported from
+    {mod}`jax.lax.linalg`.
+
+  * {func}`jax.lax.linalg.svd` now implements an `algorithm` that uses the polar
+    decomposition on CUDA GPUs. This is also an alias for the existing algorithm
+    on TPUs.
+
+* Deprecations:
+  * {mod}`jax.cloud_tpu_init` and its contents were deprecated. There is no
+    reason for a user to import or use the contents of this module; JAX handles
+    this for you automatically if needed.
+
+## JAX 0.8.0 (October 15, 2025)
+
 * Breaking changes:
 
   * JAX is changing the default `jax.pmap` implementation to one implemented in
     terms of `jax.jit` and `jax.shard_map`. `jax.pmap` is in maintenance mode
     and we encourage all new code to use `jax.shard_map` directly. See the
-    [migration guide](https://docs.jax.dev/en/latest/deprecate_pmap.html) for
+    [migration guide](https://docs.jax.dev/en/latest/migrate_pmap.html) for
     more information.
+  * The `auto=` parameter of `jax.experimental.shard_map.shard_map` has been
+    removed. This means that `jax.experimental.shard_map.shard_map` no longer
+    supports nesting. If you want to nest shard_map calls, please use
+    `jax.shard_map`.
   * JAX no longer allows passing objects that support `__jax_array__` directly
     to, e.g. `jit`-ed functions. Call `jax.numpy.asarray` on them first.
   * {func}`jax.numpy.cov` is now returns NaN for empty arrays ({jax-issue}`#32305`),
@@ -60,17 +98,32 @@ When releasing, please add the new-release-boilerplate to docs/pallas/CHANGELOG.
   * The deprecated functions in {mod} `jax.dlpack`, {mod} `jax.errors`, {mod}
     `jax.lib.xla_bridge`, {mod} `jax.lib.xla_client`, and {mod}
     `jax.lib.xla_extension` were removed.
+  * `jax.interpreters.mlir.dense_bool_array` was removed. Use MLIR APIs to
+    construct attributes instead.
 
 * Changes
-  * `jax.grad` and `jax.vjp` will now round always primals to float32 if float64
-    mode is not enabled.
+  * {func}`jax.numpy.linalg.eig` now returns a namedtuple (with attributes
+    `eigenvalues` and `eigenvectors`) instead of a plain tuple.
+  * {func}`jax.grad` and {func}`jax.vjp` will now round always primals to
+    `float32` if `float64` mode is not enabled.
   * {func}`jax.dlpack.from_dlpack` now accepts arrays with non-default layouts,
     for example, transposed.
+  * The default nonsymmetric eigendecomposition on NVIDIA GPUs now uses
+    cusolver. The magma and LAPACK implementations are still available via the
+    new `implementation` argument to {func}`jax.lax.linalg.eig`
+    ({jax-issue}`#27265`). The `use_magma` argument is now deprecated in favor
+    of `implementation`.
+  * {func}`jax.numpy.trim_zeros` now follows NumPy 2.2 in supporting
+    multi-dimensional inputs.
 
 * Deprecations
   * {func}`jax.experimental.enable_x64` and {func}`jax.experimental.disable_x64`
     are deprecated in favor of the new non-experimental context manager
     {func}`jax.enable_x64`.
+  * {func}`jax.experimental.shard_map.shard_map` is deprecated; going forward use
+    {func}`jax.shard_map`.
+  * {func}`jax.experimental.pjit.pjit` is deprecated; going forward use
+    {func}`jax.jit`.
 
 ## JAX 0.7.2 (September 16, 2025)
 

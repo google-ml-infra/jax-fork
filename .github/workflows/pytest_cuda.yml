@@ -45,9 +45,13 @@ on:
         type: string
       halt-for-connection:
         description: 'Should this workflow run wait for a remote connection?'
-        type: boolean
-        required: false
-        default: false
+        type: string
+        default: 'no'
+permissions: {}
+
+env:
+  UV_DEFAULT_INDEX: "https://us-python.pkg.dev/ml-oss-artifacts-published/pypi-mirror/simple"
+
 jobs:
   run-tests:
     defaults:

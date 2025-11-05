@@ -488,6 +488,8 @@ def is_device_tpu(version: int | None = None, variant: str = "") -> bool:
     return "v6 lite" in device_kind
   elif expected_version == "v5p":
     return device_kind.endswith("v5")
+  elif expected_version == "v7x":
+    return "TPU7x" in device_kind
   return expected_version in device_kind
 
 def pattern_search(patterns: str | Sequence[str], string: str):
@@ -495,14 +497,14 @@ def pattern_search(patterns: str | Sequence[str], string: str):
     patterns = (patterns,)  # type: ignore
 
   for pattern in patterns:
-    if pattern in string:
+    if re.search(pattern, string):
       return pattern
   return None
 
-def device_kind_matches(device_patterns: str | Sequence[str]):
+def device_kind_match(device_patterns: str | Sequence[str]):
   device_kind = xla_bridge.devices()[0].device_kind
   matching_pattern = pattern_search(device_patterns, device_kind)
-  return matching_pattern is not None
+  return matching_pattern
 
 def skip_if_errors(
     *,
@@ -541,6 +543,16 @@ skip_if_triton_exceeds_shared_memory = functools.partial(
   error_patterns="Shared memory size limit exceeded",
   reason=lambda err, dev: f"Triton kernel exceeds shared memory on {dev}",
 )
+
+def get_cuda_nonportable_max_cluster_size():
+  if device_kind_match("GB10$"):
+    # 12 is the nonportable maximum cluster size on DGX Spark,
+    # determined by querying cuOccupancyMaxPotentialClusterSize.
+    return 12
+  # 16 is the nonportable maximum cluster size on:
+  # - Hopper: https://docs.nvidia.com/cuda/hopper-tuning-guide/index.html#:~:text=cluster%20size%20of-,16,-by%20opting%20in
+  # - Blackwell: https://docs.nvidia.com/cuda/blackwell-tuning-guide/index.html#:~:text=cluster%20size%20of-,16,-by%20opting%20in
+  return 16
 
 def is_cuda_compute_capability_at_least(capability: str) -> bool:
   if not is_device_cuda():
@@ -1234,36 +1246,30 @@ class JaxTestCase(parameterized.TestCase):
     'jax_legacy_prng_key': 'error',
   }
 
-  _context_stack: ExitStack | None = None
 
 
   def setUp(self):
     super().setUp()
-    self.enter_context(assert_global_configs_unchanged())
+    self.enterContext(assert_global_configs_unchanged())
 
     # We use the adler32 hash for two reasons.
     # a) it is deterministic run to run, unlike hash() which is randomized.
     # b) it returns values in int32 range, which RandomState requires.
     self._rng = npr.RandomState(zlib.adler32(self._testMethodName.encode()))
 
-    # TODO(phawkins): use TestCase.enterContext once Python 3.11 is the minimum
-    # version.
-    self._context_stack = ExitStack()
-    self.addCleanup(self._context_stack.close)
-    stack = self._context_stack
-    stack.enter_context(global_config_context(**self._default_global_config))
+    self.enterContext(global_config_context(**self._default_global_config))
     for config_name, value in self._default_thread_local_config.items():
-      stack.enter_context(config.config_states[config_name](value))
+      self.enterContext(config.config_states[config_name](value))
 
     if TEST_WITH_PERSISTENT_COMPILATION_CACHE.value:
       assert TEST_NUM_THREADS.value <= 1, "Persistent compilation cache is not thread-safe."
-      stack.enter_context(config.enable_compilation_cache(True))
-      stack.enter_context(config.raise_persistent_cache_errors(True))
-      stack.enter_context(config.persistent_cache_min_compile_time_secs(0))
-      stack.enter_context(config.persistent_cache_min_entry_size_bytes(0))
-      tmp_dir = stack.enter_context(tempfile.TemporaryDirectory())
-      stack.enter_context(config.compilation_cache_dir(tmp_dir))
-      stack.callback(compilation_cache.reset_cache)
+      self.enterContext(config.enable_compilation_cache(True))
+      self.enterContext(config.raise_persistent_cache_errors(True))
+      self.enterContext(config.persistent_cache_min_compile_time_secs(0))
+      self.enterContext(config.persistent_cache_min_entry_size_bytes(0))
+      tmp_dir = self.enterContext(tempfile.TemporaryDirectory())
+      self.enterContext(config.compilation_cache_dir(tmp_dir))
+      self.addCleanup(compilation_cache.reset_cache)
 
   def tearDown(self) -> None:
     assert core.reset_trace_state()
@@ -1877,8 +1883,8 @@ class vectorize_with_mpmath(np.vectorize):
     self.extra_prec_multiplier = kwargs.pop('extra_prec_multiplier', 0)
     self.extra_prec = kwargs.pop('extra_prec', 0)
     self.mpmath = mpmath
-    self.contexts = dict()
-    self.contexts_inv = dict()
+    self.contexts = {}
+    self.contexts_inv = {}
     for fp_format, prec in self.float_prec.items():
       ctx = self.mpmath.mp.clone()
       ctx.prec = prec
@@ -2331,6 +2337,17 @@ class numpy_with_mpmath:
       assert 0  # unreachable
 
 # Hypothesis testing support
+def hypothesis_is_thread_safe() -> bool:
+  """Returns True if the installed hypothesis version is thread-safe.
+
+  Hypothesis versions >= 6.136.9 are thread-safe.
+  """
+  try:
+    import hypothesis as hp  # pytype: disable=import-error
+    return tuple(int(x) for x in hp.__version__.split('.')) >= (6, 136, 9)
+  except (ModuleNotFoundError, ImportError):
+    return True
+
 def setup_hypothesis(max_examples=30) -> None:
   """Sets up the hypothesis profiles.
 

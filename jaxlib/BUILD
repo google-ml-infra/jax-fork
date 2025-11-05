@@ -205,6 +205,7 @@ cc_library(
 cc_library(
     name = "ffi_helpers",
     hdrs = ["ffi_helpers.h"],
+    # compatible with libtpu
     features = ["-use_header_modules"],
     deps = [
         "@com_google_absl//absl/algorithm:container",
@@ -323,10 +324,20 @@ nanobind_pywrap_extension(
 nanobind_pywrap_extension(
     name = "_jax",
     srcs = ["jax.cc"],
+    additional_stubgen_deps = [
+        "//third_party/py/numpy",
+        "//jaxlib/mlir:ir",
+    ],
+    enable_stub_generation = True,
     pytype_deps = py_deps(["numpy"]),
     pytype_srcs = glob(["_jax/*.pyi"]),
+    stub_replacement_patterns = {
+        "jax.jaxlib._jax.Array$": "Array: Any",
+        "jax.jaxlib._jax.ArrayImpl$": "ArrayImpl: Any",
+    },
     visibility = jax_visibility("jaxlib/_jax"),
     deps = [
+        ":call_location",
         ":config",
         ":custom_call_sharding",
         ":dlpack",
@@ -371,7 +382,6 @@ nanobind_pywrap_extension(
         "@xla//xla/pjrt:exceptions",
         "@xla//xla/pjrt:mlir_to_hlo",
         "@xla//xla/pjrt:pjrt_api",
-        "@xla//xla/pjrt:pjrt_c_api_client",
         "@xla//xla/pjrt:pjrt_client",
         "@xla//xla/pjrt:pjrt_common",
         "@xla//xla/pjrt:pjrt_compiler",
@@ -380,6 +390,7 @@ nanobind_pywrap_extension(
         "@xla//xla/pjrt:status_casters",
         "@xla//xla/pjrt/c:pjrt_c_api_hdrs",
         "@xla//xla/pjrt/c:pjrt_c_api_raw_buffer_external",
+        "@xla//xla/pjrt/c_api_client:pjrt_c_api_client",
         "@xla//xla/pjrt/cpu:cpu_client",
         "@xla//xla/pjrt/distributed",
         "@xla//xla/pjrt/distributed:client",
@@ -484,6 +495,32 @@ cc_library(
         "@xla//xla/python:nb_numpy",
         "@xla//xla/tsl/platform:statusor",
         "@xla//xla/tsl/python/lib/core:numpy",
+    ],
+)
+
+cc_library(
+    name = "call_location",
+    srcs = ["call_location.cc"],
+    hdrs = ["call_location.h"],
+    compatible_with = [],
+    copts = [
+        "-fexceptions",
+        "-fno-strict-aliasing",
+    ],
+    features = ["-use_header_modules"],
+    deps = [
+        ":py_user_context",
+        ":traceback",
+        "@com_google_absl//absl/base:core_headers",
+        "@com_google_absl//absl/base:no_destructor",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/synchronization",
+        "@nanobind",
+        "@xla//xla/python/ifrt",
+        "@xla//xla/python/ifrt:attribute_map",
+        "@xla//xla/python/ifrt:user_context",
+        "@xla//xla/python/pjrt_ifrt",
     ],
 )
 
@@ -594,7 +631,6 @@ cc_library(
         "@xla//xla/pjrt:pjrt_compiler",
         "@xla//xla/python:types",
         "@xla//xla/python/ifrt",
-        "@xla//xla/python/ifrt:user_context",
         "@xla//xla/python/pjrt_ifrt",
         "@xla//xla/tsl/platform:errors",
         "@xla//xla/tsl/platform:logging",
@@ -769,6 +805,7 @@ cc_library(
         "@llvm-project//mlir:ReconcileUnrealizedCasts",
         "@llvm-project//mlir:Support",
         "@nanobind",
+        "@shardy//shardy/dialect/mpmd/ir:dialect",
         "@shardy//shardy/dialect/sdy/ir:dialect",
         "@stablehlo//:stablehlo_serialization",
         "@xla//xla/hlo/builder:xla_computation",
@@ -805,6 +842,7 @@ cc_library(
     ],
     features = ["-use_header_modules"],
     deps = [
+        ":call_location",
         ":config",
         ":guard_lib",
         ":jax_jit",
@@ -854,6 +892,7 @@ cc_library(
     ],
     features = ["-use_header_modules"],
     deps = [
+        ":call_location",
         ":config",
         ":jax_jit",
         ":nb_class_ptr",
@@ -947,6 +986,7 @@ cc_library(
     visibility = jax_visibility("jaxlib/py_client"),
     deps = [
         ":cached_py_object",
+        ":call_location",
         ":guard_lib",
         ":nb_class_ptr",
         ":pprof_profile_builder",
@@ -981,6 +1021,7 @@ cc_library(
         "@tsl//tsl/platform:ml_dtypes",
         "@tsl//tsl/profiler/lib:traceme",
         "@xla//third_party/python_runtime:headers",  # buildcleaner: keep
+        "@xla//xla:future",
         "@xla//xla:literal",
         "@xla//xla:shape_util",
         "@xla//xla:status_macros",
@@ -994,7 +1035,6 @@ cc_library(
         "@xla//xla/pjrt:pjrt_client",
         "@xla//xla/pjrt:pjrt_compiler",
         "@xla//xla/pjrt:pjrt_executable",
-        "@xla//xla/pjrt:pjrt_future",
         "@xla//xla/pjrt:pjrt_layout",
         "@xla//xla/pjrt:status_casters",
         "@xla//xla/python:nb_absl_span",
@@ -1132,16 +1172,15 @@ cc_library(
         "@llvm-project//llvm:Support",
         "@nanobind",
         "@tsl//tsl/platform:casts",
+        "@xla//xla:future",
         "@xla//xla:util",
         "@xla//xla/pjrt:pjrt_client",
-        "@xla//xla/pjrt:pjrt_future",
         "@xla//xla/pjrt:status_casters",
         "@xla//xla/pjrt/distributed:client",
         "@xla//xla/pjrt/distributed:key_value_store_interface",
         "@xla//xla/python:nb_numpy",
         "@xla//xla/python:types",
         "@xla//xla/python/ifrt",
-        "@xla//xla/python/ifrt:user_context",
         "@xla//xla/python/pjrt_ifrt",
         "@xla//xla/python/pjrt_ifrt:pjrt_dtype",
         "@xla//xla/python/pjrt_ifrt:transfer_server_interface",
@@ -1263,6 +1302,9 @@ nanobind_pywrap_extension(
         "@shardy//shardy/dialect/mpmd/ir:fragment_execution_rules",
         "@shardy//shardy/dialect/mpmd/transforms/import:mesh_assignment_map",
         "@shardy//shardy/integrations/python/jax/mpmd/jaxlib:mpmd_program",
+        "@xla//xla/pjrt:status_casters",
+        "@xla//xla/python:nb_absl_flat_hash_map",
+        "@xla//xla/python/ifrt/ir/conversions/mpmd:lower_to_ifrt",
     ],
 )
 
@@ -1311,8 +1353,8 @@ cc_library(
         "@com_google_absl//absl/time",
         "@com_google_absl//absl/types:span",
         "@nanobind",
+        "@xla//xla:future",
         "@xla//xla:util",
-        "@xla//xla/pjrt:pjrt_future",
         "@xla//xla/python:version",
         "@xla//xla/python/ifrt",
         "@xla//xla/tsl/concurrency:async_value",

@@ -85,10 +85,10 @@ def _pallas_call_abstract_eval(
     out_avals: tuple[jax_core.AbstractValue, ...],
     interpret,
     backend,
+    input_output_aliases,
+    grid_mapping,
     **params
 ):
-  del avals
-
   if isinstance(interpret, mosaic_tpu_interpret.InterpretParams):
     # Report effects that will be introduced when running/lowering
     # mosaic_tpu_interpret.mosaic_tpu_interpret.interpret_pallas_call .
@@ -98,13 +98,25 @@ def _pallas_call_abstract_eval(
   else:
     effs = jax_core.no_effects
 
+  # closed-over refs and dynamic grid bounds aren't reflected in
+  # input_output_aliases, though they are present in `avals`, so split them off
+  num_refs = sum(isinstance(a, state.AbstractRef) for a in avals)
+  _, _, avals = split_list(avals, [num_refs, grid_mapping.num_dynamic_grid_bounds])
+
+  inout_aliases = dict(input_output_aliases)
+  lin_avals = {i for i, a in enumerate(avals)
+               if isinstance(a, state_types.AbstractLinVal)}
+  if (missing := lin_avals - set(inout_aliases)):
+    raise ValueError(f"input pinned buffers without input_output_aliases:"
+                     f"{missing}")
+  outin_aliases = {out_idx: in_idx for in_idx, out_idx in inout_aliases.items()}
+  out_avals = [jax_core.ShapedArray(a.shape, a.dtype, a.weak_type)
+               if isinstance(a, pallas_core.ShapedArrayWithMemorySpace) else
+               avals[outin_aliases[out_idx]] if out_idx in outin_aliases
+               else a for out_idx, a in enumerate(out_avals)]
+
   # Make sure we don't return ShapedArrayWithMemorySpace to the outside world.
-  return [
-      jax_core.ShapedArray(a.shape, a.dtype, a.weak_type)
-      if isinstance(a, pallas_core.ShapedArrayWithMemorySpace)
-      else a
-      for a in out_avals
-  ], effs
+  return out_avals, effs
 
 
 pallas_call_p.def_effectful_abstract_eval(_pallas_call_abstract_eval)
@@ -140,6 +152,7 @@ def _pallas_call_to_lojax(
     out_avals: tuple[jax_core.AbstractValue, ...],
     backend: Backend | None,
     metadata: FrozenDict[str, str] | None,
+    name: str | None,
 ):
   if any(jax_core.get_aval(x).has_qdd for x in hi_args):
     raise NotImplementedError("pallas_call does not support QDD for inputs")
@@ -209,6 +222,7 @@ def _pallas_call_to_lojax(
       interpret=interpret,
       input_output_aliases=tuple(new_input_output_aliases),
       out_avals=tuple(lo_out_avals),
+      name=name,
   )
   return pe.raise_lo_outs(out_avals, lo_outs)
 pallas_call_p.to_lojax = _pallas_call_to_lojax  # type: ignore
@@ -229,6 +243,7 @@ def _pallas_call_jvp_rule(
     out_avals: tuple[jax_core.AbstractValue, ...],
     backend: Backend | None,
     metadata: FrozenDict[str, str] | None,
+    name: str | None,
 ):
   debug_info = jaxpr.debug_info
   if grid_mapping.num_dynamic_grid_bounds:
@@ -296,6 +311,7 @@ def _pallas_call_jvp_rule(
       out_avals=(*out_avals, *out_avals),
       backend=backend,
       metadata=metadata,
+      name=name,
   )
   out_primals, out_tangents = split_list(out_flat, [len(out_flat) // 2])
   return out_primals, out_tangents
@@ -445,6 +461,7 @@ def _batch_with_explicit_loop(
     out_avals: tuple[jax_core.AbstractValue, ...],
     backend: Backend | None,
     metadata: FrozenDict[str, str] | None,
+    name: str | None,
 ):
   """Batch the pallas_call by calling it in loop over the batch size.
 
@@ -514,6 +531,7 @@ def _batch_with_explicit_loop(
         out_avals=out_avals,
         backend=backend,
         metadata=metadata,
+        name=name,
     )
     for i, batch_out_array in enumerate(batch_out):
       state[i] = jax.lax.dynamic_update_index_in_dim(
@@ -545,6 +563,7 @@ def _pallas_call_batching_rule(
     out_avals: tuple[jax_core.AbstractValue, ...],
     backend: Backend | None,
     metadata: FrozenDict[str, str] | None = None,
+    name: str | None = None,
 ):
   if mesh is not None:
     raise NotImplementedError(
@@ -584,6 +603,7 @@ def _pallas_call_batching_rule(
         out_avals=out_avals,
         backend=backend,
         metadata=metadata,
+        name=name,
     )
     return [jnp.expand_dims(x, 0) for x in out], (0,) * len(out)
 
@@ -619,6 +639,7 @@ def _pallas_call_batching_rule(
         out_avals=out_avals,
         backend=backend,
         metadata=metadata,
+        name=name,
     )
   else:
     pass  # No dynamic grid dimensions
@@ -655,6 +676,7 @@ def _pallas_call_batching_rule(
           out_avals=out_avals,
           backend=backend,
           metadata=metadata,
+          name=name,
       )
 
   if not dims:
@@ -1036,6 +1058,7 @@ def _pallas_call_batching_rule(
       out_avals=batched_out_avals,
       backend=backend,
       metadata=metadata,
+      name=name,
   )
   return out, (0,) * len(out)
 
@@ -1458,7 +1481,8 @@ jax_core.custom_str_eqn_compact_rules[pallas_call_p] = (
     _pallas_custom_str_eqn_compact
 )
 
-def _pallas_call_typecheck_rule(*in_avals, grid_mapping, **params):
+def _pallas_call_typecheck_rule(ctx_factory, *in_atoms, grid_mapping, **params):
+  in_avals = [x.aval for x in in_atoms]
   with grid_mapping.trace_env():
     return pallas_call_p.abstract_eval(
         *in_avals, grid_mapping=grid_mapping, **params
@@ -1510,6 +1534,7 @@ def _pallas_call_state_discharge_rule(
     out_avals: tuple[jax_core.AbstractValue, ...],
     backend: Backend | None,
     metadata: FrozenDict[str, str] | None,
+    name: str | None,
 ):
   del avals_out
   assert all(isinstance(v.aval, state.AbstractRef) for v in jaxpr.constvars)
@@ -1616,6 +1641,7 @@ def _pallas_call_state_discharge_rule(
       out_avals=new_out_avals,
       backend=backend,
       metadata=metadata,
+      name=name,
   )
   refs_out, rest = split_list(out_flat, [num_refs])
   updated_vals_in = refs_out + [None] * len(rest_in_avals)
@@ -1896,6 +1922,7 @@ def _pallas_call(
         cost_estimate=cost_estimate,
         backend=backend,
         metadata=FrozenDict(metadata) if metadata is not None else None,
+        name=name,
     )
     out = tree_util.tree_unflatten(out_tree, out_flat)
     return out
@@ -1933,7 +1960,7 @@ except ImportError:
   mosaic_tpu_backend = None  # type: ignore
 
 try:
-  from jax._src.pallas.mosaic import interpret as mosaic_tpu_interpret
+  from jax._src.pallas.mosaic.interpret import interpret_pallas_call as mosaic_tpu_interpret
 except ImportError:
   mosaic_tpu_interpret = types.SimpleNamespace(  # type: ignore
       InterpretParams=types.new_class('_NoInstances', (enum.Enum,)),

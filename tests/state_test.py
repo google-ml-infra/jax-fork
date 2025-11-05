@@ -956,7 +956,7 @@ def _pack_idx(non_slice_idx: Sequence[int | np.ndarray],
   assert next(idx_, None) is None
   return idx
 
-@jtu.thread_unsafe_test_class()  # hypothesis isn't thread-safe
+@jtu.thread_unsafe_test_class(condition=not jtu.hypothesis_is_thread_safe())
 class StateHypothesisTest(jtu.JaxTestCase):
 
   @hp.given(get_vmap_params())
@@ -1374,6 +1374,15 @@ class GeneralRefTest(jtu.JaxTestCase):
         wrap_init(f, 1), [AbstractRef(core.AbstractToken())])
     self.assertIs(type(jaxpr.outvars[0].aval), core.AbstractToken)
 
+  def test_reshape(self):
+    def f(x_ref):
+      x_ref = x_ref.reshape(4, -1)
+      x_ref.reshape(-1)[...] = jnp.arange(36)
+      return [x_ref[...]]
+    jaxpr, _, _ = pe.trace_to_jaxpr_dynamic(
+        wrap_init(f, 1), [AbstractRef(core.ShapedArray((12, 3), jnp.int32))])
+    self.assertEqual(jaxpr.outvars[0].aval.shape, (4, 9))
+
   # NOTE(mattjj): disabled because it's extremely illegal
   # def test_ref_of_ref(self):
   #   def f(x_ref_ref):
@@ -1619,7 +1628,7 @@ def add_spec(draw, depth):
                   min_dim=max(f1.min_dim, f2.min_dim),
                   max_dim=min(f1.max_dim, f2.max_dim))
 
-@jtu.thread_unsafe_test_class()  # because of hypothesis
+@jtu.thread_unsafe_test_class(condition=not jtu.hypothesis_is_thread_safe())
 class RunStateHypothesisTest(jtu.JaxTestCase):
 
   @jax.legacy_prng_key('allow')
@@ -1659,7 +1668,7 @@ class PinnedBuffersTest(jtu.JaxTestCase):
     txt = f.lower(x).as_text('hlo')
     self.assertIn("Pin", txt)
 
-    if jtu.test_device_matches(['gpu']):
+    if jtu.test_device_matches(['gpu', 'tpu']):
       y = f(x)
       self.assertAllClose(y, x)
 

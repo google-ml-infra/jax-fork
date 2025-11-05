@@ -20,18 +20,17 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator, Sequence, Set
+from collections.abc import Callable, Iterator, Sequence
 import dataclasses
 import enum
-from functools import partial
 import itertools
+import math
 import re
 from typing import Any, assert_never, cast
 
 from jax._src.lib import mosaic_gpu_dialect as mgpu  # noqa: F401
 from jax._src.lib.mlir import ir
 from jax._src.lib.mlir.dialects import arith
-from jax._src.lib.mlir.dialects import gpu
 from jax._src.lib.mlir.dialects import math as mlir_math
 from jax._src.lib.mlir.dialects import memref
 from jax._src.lib.mlir.dialects import scf
@@ -50,10 +49,11 @@ import numpy as np
 class VariableType(enum.IntEnum):
   """The type of a variable.
 
-  Variables here are either operands or results of MLIR operations.
+  Variables are operands, results, or arguments of MLIR operations.
   """
   OPERAND = 0
   RESULT = 1
+  ARGUMENT = 2
 
 
 class MemorySpace(enum.Enum):
@@ -66,26 +66,40 @@ class MemorySpace(enum.Enum):
 _op_name_regex = re.compile(r"^(%\d+ = )?\S+")
 
 @dataclasses.dataclass(frozen=True)
-class OperandOrResult:
-  """A unique identifier for a variable."""
-  # A MLIR operation.
+class ValueSite:
+  """A unique identifier for a variable.
+
+  This class describes a particular role of a Value, either as a result of an
+  operation, an operand of an operation, or a block argument.
+  """
+  # A MLIR operation. If the type is `ARGUMENT`, this is the owner of the block
+  # and region_index is the region that contains the block with the argument.
+  # The block is always the first block of the region.
   operation: ir.OpView
-  # Whether this represents an operand or a result.
+  # Whether this represents an operand, a result, or an argument.
   type: VariableType
-  # The index of the operand/result within the op's operands/results.
+  # The index of the operand/result/argument within the op's
+  # operands/results/arguments.
   index: int
+  # The index of the region that contains the block with the argument.
+  region_index: int | None = None
+
+  def __post_init__(self):
+    assert (self.type != VariableType.ARGUMENT) == (self.region_index is None)
 
   @property
   def value(self) -> ir.Value:
-    """Returns the IR value corresponding to this operand or result."""
+    """Returns the IR value corresponding to this value site."""
     if self.type == VariableType.OPERAND:
       return self.operation.operands[self.index]
-    else:
+    elif self.type == VariableType.RESULT:
       return self.operation.results[self.index]
+    else:
+      return self.operation.regions[self.region_index].blocks[0].arguments[self.index]
 
   @property
   def memory_space(self) -> MemorySpace:
-    """Returns the memory space associated with this operand or result."""
+    """Returns the memory space associated with this value."""
     type = self.value.type
     if ir.VectorType.isinstance(type):
       return MemorySpace.REG
@@ -101,8 +115,10 @@ class OperandOrResult:
     assert match is not None
     if self.type == VariableType.OPERAND:
       return f"{match.group(0)}:o-{self.index}"
-    else:
+    elif self.type == VariableType.RESULT:
       return f"{match.group(0)}:r-{self.index}"
+    else:
+      return f"{match.group(0)}:a-{self.index}"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -259,39 +275,20 @@ def _strided_layout_for_variable(
 
 
 def _extract_tiling_candidate(
-    divides: eqns.Divides, num_tiled_dims: int
+    divide_constraint: eqns.Divides, num_tiled_dims: int
 ) -> Iterator[tuple[eqns.Variable, eqns.Constant]]:
-  if not isinstance(divides.expr, eqns.Variable):
+  if not isinstance(divide_constraint.expr, eqns.Variable):
     return
-  if num_tiled_dims > len(divides.dimensions_to_tile):
-    # TODO(b/447079781): Support this case, by just assuming 0 (no constraints).
+  if num_tiled_dims > len(divide_constraint.tiling_multiple):
+    # The tiling's rank cannot be larger than the size of `tiling_multiple`.
     return
+  tiling = divide_constraint.tiling_multiple[-num_tiled_dims:]
+  yield divide_constraint.expr, eqns.SMEMTiling(lc.TileTransform(tiling))
 
-  if num_tiled_dims == 0:
-    yield divides.expr, eqns.SMEMTiling(None)
-    return
 
-  static_tiling = []
-  dynamic_tiling = []
-  for dim in divides.dimensions_to_tile[-num_tiled_dims:]:
-    assert isinstance(dim[0], int)
-    static_tiling.append(dim[0])
-    # Any remaining values are dynamic. Use 1 for those to be safe.
-    dynamic_tiling.append(dim[0] if len(dim) == 1 else 1)
-
-  # The static tiling ignores dynamic values. Try this first as it yields
-  # larger tiles that are likely to have better performance.
-  yield divides.expr, eqns.SMEMTiling(lc.TileTransform(tuple(static_tiling)))
-
-  if dynamic_tiling != static_tiling:
-    # If that does not work, we could use a smaller, safe tiles by yielding
-    # dynamic_tiling here. However, performance will be worse, and we choose to
-    # return instead.
-    return
-
-def _extract_layout_candidates_from_memory_space_transfers(
+def _extract_layout_candidates_from_memory_space_transfer(
     constraint: eqns.IsTransferable,
-    divides_per_var: dict[eqns.Variable, list[eqns.Divides]],
+    division_constraint_per_var: dict[eqns.Variable, eqns.Divides],
 ) -> Iterator[tuple[eqns.Variable, eqns.Constant]]:
   """Attempts to extract variable assignments from a `Constraint`."""
   # This code assumes that the `IsTransferable` constraint is bidirectional.
@@ -322,18 +319,20 @@ def _extract_layout_candidates_from_memory_space_transfers(
             variable.key.value.type,
             max_swizzle=mgpu.SwizzlingMode.k128ByteSwizzle
         )
-        assert len(tiling) == 2
-        divides = divides_per_var.get(variable, [])
-        divides.append(eqns.Divides(variable, ((tiling[0],), (tiling[1],))))
-        [divides] = eqns.merge_divides_constraints(divides)
-        assert isinstance(divides, eqns.Divides)
-        yield from _extract_tiling_candidate(divides, len(tiling))
+        divide = eqns.Divides(variable, tiling)
+        if (divide2 := division_constraint_per_var.get(variable)) is not None:
+          # This is done on two lines to satisfy type checkers.
+          # TODO(b/447079781): clean up the `merge_divides_constraints` to
+          # avoid the need for this.
+          [merged] = eqns.merge_divides_constraints([divide, divide2])
+          divide = cast(eqns.Divides, merged)
+        yield from _extract_tiling_candidate(divide, len(tiling))
       else:
         # An empty tiling is valid here but we don't yield it in order to
         # avoid duplicating the empty tiling yielded by the caller.
         return
 
-  elif isinstance(constant, eqns.TMEMLayout):
+  if isinstance(constant, eqns.TMEMLayout):
     layout = constant.value
     packing = layout.vector_length
     for tmem_layout, reg_layout in constraint.supported_tmem_transfers(packing):
@@ -343,16 +342,16 @@ def _extract_layout_candidates_from_memory_space_transfers(
 
 def _divides_per_var(
     constraints: Sequence[eqns.Constraint],
-) -> dict[eqns.Variable, list[eqns.Divides]]:
-  """Returns all Divides constraints per variable."""
-  result: dict[eqns.Variable, list[eqns.Divides]] = {}
+) -> dict[eqns.Variable, eqns.Divides]:
+  result: dict[eqns.Variable, eqns.Divides] = {}
   for constraint in constraints:
-    match constraint:
-      case eqns.Divides(expr=expr) if isinstance(expr, eqns.Variable):
-        result.setdefault(expr, []).append(constraint)
+    if isinstance(constraint, eqns.Divides) and isinstance(constraint.expr, eqns.Variable):
+      assert constraint.expr not in result
+      result[constraint.expr] = constraint
   return result
 
 
+# TODO(bchetioui): flatten this call hierarchy.
 def _extract_variable_assignments_from_constraints(
     constraints: Sequence[eqns.Constraint],
 ) -> Iterator[tuple[eqns.Variable, eqns.Constant]]:
@@ -361,11 +360,11 @@ def _extract_variable_assignments_from_constraints(
   for c in constraints:
     match c:
       case eqns.IsTransferable():
-        yield from _extract_layout_candidates_from_memory_space_transfers(c, dpv)
+        yield from _extract_layout_candidates_from_memory_space_transfer(c, dpv)
 
 
 def conjure_assignment(
-    unknowns: Set[eqns.Variable],
+    unknowns: Sequence[eqns.Variable],
     equation_system: eqns.EquationSystem,
     hints: Sequence[Hint],
 ) -> Iterator[tuple[eqns.Variable, eqns.Constant]]:
@@ -376,9 +375,22 @@ def conjure_assignment(
       equation_system.constraints
   )
 
-  for hint in hints:
-    if (assignment := extract_variable_assignment_from_hint(hint)) is not None:
-      yield assignment
+  def assignment_order(
+      assignment: tuple[eqns.Variable, eqns.Constant],
+  ) -> int:
+    match assignment:
+      # Try TiledLayout first, before other hints, because TiledLayout` are
+      # usually more useful to propagate than `WGSplat`. Also this often
+      # improves the performance of the layout inference.
+      case (_, eqns.RegisterLayout(fa.TiledLayout())):
+        return 0
+      case _:
+        return 1
+
+  assignments = [extract_variable_assignment_from_hint(h) for h in hints]
+  assignments = [a for a in assignments if a is not None]
+  assignments = sorted(assignments, key=assignment_order)
+  yield from assignments
 
   # Here, we have not managed to find an assignment for all the unknown
   # variables, and our hints have not proven sufficient to unblock us. We now
@@ -398,14 +410,15 @@ def conjure_assignment(
 
 
 def find_assignments_for(
-    unknowns: Set[eqns.Variable],
+    unknowns: Sequence[eqns.Variable],
     equation_system: eqns.EquationSystem,
     hints: Sequence[Hint],
 ) -> dict[eqns.Variable, eqns.Constant] | eqns.Unsatisfiable:
   """Attempts to find assignments that satisfy `equation_system` for `unknowns`.
 
   Args:
-    unknowns: the set of variables that are unknown.
+    unknowns: the set of variables that are unknown. Represented as a sequence
+      of `Variable`s for determinism purposes.
     equation_system: the equation system to satisfy.
     hints: a list of hints that may be used to introduce new assignments.
 
@@ -418,7 +431,10 @@ def find_assignments_for(
   if isinstance(equation_system, eqns.Unsatisfiable):
     return eqns.Unsatisfiable()
 
-  remaining_unknowns = unknowns - equation_system.assignments.keys()
+  remaining_unknowns = [
+      u for u in unknowns if u not in equation_system.assignments.keys()
+  ]
+
   # In this case, we have determined an assignment for all the unknown
   # variables. Return their respective assignment.
   if not remaining_unknowns:
@@ -454,51 +470,48 @@ def find_assignments_for(
 @dataclasses.dataclass()
 class DerivationContext:
   """Holds context information used for deriving an equation system."""
-  # TODO(b/447079781): Remove once SMEM transform inference is implemented.
-  enable_smem_inference : bool = False
-  # A map of `OperandOrResult` to the variable that it is associated with.
-  variable_for_operand_or_result: dict[OperandOrResult, eqns.Variable] = (
+  # A map of `ValueSite` to the variable that it is associated with.
+  variable_for_value_site: dict[ValueSite, eqns.Variable] = (
       dataclasses.field(default_factory=dict, init=False)
   )
-  # A map of `eqns.Variable` to all the `OperandOrResult`s that it is associated
-  # with.
-  operand_and_results_for_variable: OperandOrResultsForVariable = (
+  # A map of `eqns.Variable` to all the `ValueSite`s that it is associated with.
+  value_sites_for_variable: ValueSitesForVariable = (
       dataclasses.field(default_factory=dict, init=False)
   )
 
-  def update(self, mapping: OperandOrResultsForVariable) -> None:
-    for variable, operand_and_results in mapping.items():
-      if variable in self.operand_and_results_for_variable:
-        self.operand_and_results_for_variable[variable].extend(operand_and_results)
+  def update(self, mapping: ValueSitesForVariable) -> None:
+    for variable, value_sites in mapping.items():
+      if variable in self.value_sites_for_variable:
+        self.value_sites_for_variable[variable].extend(value_sites)
       else:
-        self.operand_and_results_for_variable[variable] = operand_and_results
-      for operand_or_result in operand_and_results:
-        assert operand_or_result not in self.variable_for_operand_or_result
-        self.variable_for_operand_or_result[operand_or_result] = variable
+        self.value_sites_for_variable[variable] = value_sites
+      for value_site in value_sites:
+        assert value_site not in self.variable_for_value_site
+        self.variable_for_value_site[value_site] = variable
 
-  def producer_ref(self, operand: OperandOrResult) -> eqns.Variable:
+  def producer_ref(self, operand: ValueSite) -> eqns.Variable:
     """Returns the producer reference variable for the given operand."""
-    return self.variable_for_operand_or_result[producer_result(operand)]
+    return self.variable_for_value_site[producer_result(operand)]
 
 
-OperandOrResultsForVariable = dict[eqns.Variable, list[OperandOrResult]]
+ValueSitesForVariable = dict[eqns.Variable, list[ValueSite]]
 
 # An equation system derivation rule is a function that takes an MLIR operation
-# and returns an equation system, a mapping from variables to operand/result
+# and returns an equation system, a mapping from variables to value site
 # identifiers, and a list of hints.
 #
 # The intended meaning of the mapping is that, for each identifier in the list
-# keyed by a given variable, the MLIR operand/result corresponding to that
-# identifier has the same layout as the variable.
+# keyed by a given variable, the MLIR operand/result/argument corresponding to
+# that identifier has the same layout as the variable.
 #
 # An `EquationSystemDerivationRule` must return a mapping such that the
-# identifier corresponding to each operand/result must appear in the mapping,
+# identifier corresponding to each value site must appear in the mapping,
 # and each identifier in the mapping must be keyed by exactly one variable.
-# Lastly, the mapping must only refer to variables and operands/results that
-# correspond to the given operation.
+# Lastly, the mapping must only refer to variables and
+# operands/results/arguments that correspond to the given operation.
 EquationSystemDerivationRule = Callable[
     [DerivationContext, ir.OpView],
-    tuple[eqns.EquationSystem, OperandOrResultsForVariable, list[Hint]],
+    tuple[eqns.EquationSystem, ValueSitesForVariable, list[Hint]],
 ]
 _equation_system_derivation_rules: dict[str, EquationSystemDerivationRule] = {}
 
@@ -526,11 +539,11 @@ def _is_tmem_ref(v: ir.Value) -> bool:
 def _pointwise_op_equation_system(
     ctx: DerivationContext,
     op: ir.OpView,
-) -> tuple[eqns.EquationSystem, OperandOrResultsForVariable, list[Hint]]:
+) -> tuple[eqns.EquationSystem, ValueSitesForVariable, list[Hint]]:
   del ctx
-  all_operands_and_results = vector_operands_and_results(op)
-  variable = eqns.Variable(all_operands_and_results[0])
-  return eqns.EquationSystem(), {variable: all_operands_and_results}, []
+  all_value_sites = vector_value_sites(op)
+  variable = eqns.Variable(all_value_sites[-1])
+  return eqns.EquationSystem(), {variable: all_value_sites}, []
 
 
 for op in [
@@ -576,123 +589,115 @@ for op in [
   _add_equation_system_derivation_rule(op)(_pointwise_op_equation_system)
 
 
-def _divides_constraint_from_indices(
-    var: eqns.Variable,
-    indices: Sequence[ir.Value],
-) -> eqns.Divides:
-  """Returns a Divides constraint from the given load/store indices."""
-  dimensions_to_tile : list[tuple[int | ir.Value, ...]] = []
-  for i in indices:
-    index_defining_op = i.owner.opview
-    if isinstance(index_defining_op, arith.ConstantOp):
-      dimensions_to_tile.append((index_defining_op.literal_value,))
-    else:
-      dimensions_to_tile.append((i,))
-  return eqns.Divides(var, tuple(dimensions_to_tile))
-
-
 @_add_equation_system_derivation_rule(vector.LoadOp)
 def _vector_load_equation_system(
     ctx: DerivationContext,
     op: vector.LoadOp,
-) -> tuple[eqns.EquationSystem, OperandOrResultsForVariable, list[Hint]]:
+) -> tuple[eqns.EquationSystem, ValueSitesForVariable, list[Hint]]:
   # TODO(b/447079781): Investigate whether we should check for contiguous
-  # strides here. An initial implementaiton of this failed the
+  # strides here. An initial implementation of this failed the
   # test_gmem_to_smem_with_multiple_smem_indexers_and_transforms test, but
   # we should confirm that this is properly supported.
 
   # Registers
-  dest = OperandOrResult(op, VariableType.RESULT, 0)
+  dest = ValueSite(op, VariableType.RESULT, 0)
   dest_var = eqns.Variable(dest)
-  operand_or_results_for_variable = {dest_var: [dest]}
-  constraints = [
-      eqns.Distinct(
-          dest_var,
-          eqns.RegisterLayout(
-              fa.WGSplatFragLayout(shape=tuple(ir.ShapedType(op.result.type).shape))
-          ),
-      ),
-  ]
+  value_sites_for_variable = {dest_var: [dest]}
+  constraints = [eqns.NotOfType(dest_var, fa.WGSplatFragLayout)]
 
   # SMEM
-  if ctx.enable_smem_inference and utils.is_smem_ref(op.base):
-    source = OperandOrResult(op, VariableType.OPERAND, 0)
+  if utils.is_smem_ref(op.base):
+    base_shape = ir.ShapedType(op.base.type).shape
+    divisibility_constraints = []
+    for axis_size, index in zip(base_shape, op.indices, strict=True):
+      divisibility_constraints.append(dynamic_gcd(axis_size, index))
+    source = ValueSite(op, VariableType.OPERAND, 0)
     source_var = ctx.producer_ref(source)
-    operand_or_results_for_variable[source_var] = [source]
+    value_sites_for_variable[source_var] = [source]
     constraints.extend([
         eqns.IsTransferable(
             source=source_var,
             target=dest_var,
             shape=tuple(ir.ShapedType(op.result.type).shape),
         ),
-        _divides_constraint_from_indices(source_var, op.indices),
+        eqns.Divides(
+            expr=source_var,
+            tiling_multiple=tuple(divisibility_constraints),
+        ),
     ])
 
   system = eqns.EquationSystem(constraints=constraints)
-  return system, operand_or_results_for_variable, []
+  return system, value_sites_for_variable, []
 
 
 @_add_equation_system_derivation_rule(vector.StoreOp)
 def _vector_store_equation_system(
     ctx: DerivationContext,
     op: vector.StoreOp,
-) -> tuple[eqns.EquationSystem, OperandOrResultsForVariable, list[Hint]]:
+) -> tuple[eqns.EquationSystem, ValueSitesForVariable, list[Hint]]:
   # TODO(b/447079781): Investigate whether we should check for contiguous
   # strides here. An initial implementaiton of this failed the
   # test_gmem_to_smem_with_multiple_smem_indexers_and_transforms test, but
   # we should confirm that this is properly supported.
 
   # Registers
-  value = OperandOrResult(op, VariableType.OPERAND, 0)
+  value = ValueSite(op, VariableType.OPERAND, 0)
   value_var = eqns.Variable(value)
-  operand_or_results_for_variable = {value_var: [value]}
+  value_sites_for_variable = {value_var: [value]}
 
   # SMEM
   constraints = []
-  if ctx.enable_smem_inference and utils.is_smem_ref(op.base):
-    dest = OperandOrResult(op, VariableType.OPERAND, 1)
+  if utils.is_smem_ref(op.base):
+    dest_shape = ir.ShapedType(op.base.type).shape
+    divisibility_constraints = []
+    for axis_size, index in zip(dest_shape, op.indices, strict=True):
+      divisibility_constraints.append(dynamic_gcd(axis_size, index))
+    dest = ValueSite(op, VariableType.OPERAND, 1)
     dest_var = ctx.producer_ref(dest)
-    operand_or_results_for_variable[dest_var] = [dest]
+    value_sites_for_variable[dest_var] = [dest]
     constraints = [
         eqns.IsTransferable(
             source=value_var,
             target=dest_var,
             shape=tuple(ir.ShapedType(op.base.type).shape),
         ),
-        _divides_constraint_from_indices(dest_var, op.indices),
+        eqns.Divides(
+            expr=dest_var,
+            tiling_multiple=tuple(divisibility_constraints),
+        ),
     ]
 
   system = eqns.EquationSystem(constraints=constraints)
-  return system, operand_or_results_for_variable, []
+  return system, value_sites_for_variable, []
 
 
 @_add_equation_system_derivation_rule(mgpu.OptimizationBarrierOp)
 def _optimization_barrier_equation_system(
     ctx: DerivationContext,
     op: ir.OpView,
-) -> tuple[eqns.EquationSystem, OperandOrResultsForVariable, list[Hint]]:
+) -> tuple[eqns.EquationSystem, ValueSitesForVariable, list[Hint]]:
   del ctx
-  operand_or_results_for_variable: OperandOrResultsForVariable = {}
+  value_sites_for_variable: ValueSitesForVariable = {}
 
   for i, operand in enumerate(op.operands):
     if not is_vector(operand):
       continue
-    variable = eqns.Variable(OperandOrResult(op, VariableType.OPERAND, i))
-    operand_or_results_for_variable[variable] = [
-        OperandOrResult(op, VariableType.OPERAND, i),
-        OperandOrResult(op, VariableType.RESULT, i)
+    variable = eqns.Variable(ValueSite(op, VariableType.OPERAND, i))
+    value_sites_for_variable[variable] = [
+        ValueSite(op, VariableType.OPERAND, i),
+        ValueSite(op, VariableType.RESULT, i)
     ]
 
-  return eqns.EquationSystem(), operand_or_results_for_variable, []
+  return eqns.EquationSystem(), value_sites_for_variable, []
 
 
-@_add_equation_system_derivation_rule(vector.SplatOp)
+@_add_equation_system_derivation_rule(vector.BroadcastOp)
 def _vector_splat_equation_system(
     ctx: DerivationContext,
     op: ir.OpView,
-) -> tuple[eqns.EquationSystem, OperandOrResultsForVariable, list[Hint]]:
+) -> tuple[eqns.EquationSystem, ValueSitesForVariable, list[Hint]]:
   del ctx
-  result = OperandOrResult(op, VariableType.RESULT, 0)
+  result = ValueSite(op, VariableType.RESULT, 0)
   variable = eqns.Variable(result)
   layout = fa.WGSplatFragLayout(tuple(cast(ir.ShapedType, op.result.type).shape))
   system = eqns.EquationSystem(
@@ -705,10 +710,10 @@ def _vector_splat_equation_system(
 def _constant_equation_system(
     ctx: DerivationContext,
     constant_op: arith.ConstantOp,
-) -> tuple[eqns.EquationSystem, OperandOrResultsForVariable, list[Hint]]:
+) -> tuple[eqns.EquationSystem, ValueSitesForVariable, list[Hint]]:
   del ctx
   value = constant_op.value
-  result = OperandOrResult(constant_op, VariableType.RESULT, 0)
+  result = ValueSite(constant_op, VariableType.RESULT, 0)
   variable = eqns.Variable(result)
   shape = tuple(ir.ShapedType(constant_op.result.type).shape)
   if (
@@ -720,10 +725,7 @@ def _constant_equation_system(
         assignments={variable: eqns.RegisterLayout(layout)}
     )
   else:
-    constant_is_not_splat = eqns.Distinct(
-        variable,
-        eqns.RegisterLayout(fa.WGSplatFragLayout(shape=shape)),
-    )
+    constant_is_not_splat = eqns.NotOfType(variable, fa.WGSplatFragLayout)
     system = eqns.EquationSystem(constraints=[constant_is_not_splat])
 
   return system, {variable: [result]}, []
@@ -745,97 +747,135 @@ def _terminator(
 def _for_equation_system(
     ctx: DerivationContext,
     op: scf.ForOp,
-) -> tuple[eqns.EquationSystem, OperandOrResultsForVariable, list[Hint]]:
+) -> tuple[eqns.EquationSystem, ValueSitesForVariable, list[Hint]]:
   [block] = op.region.blocks
   yield_op = _terminator(block, scf.YieldOp)
-  operand_or_results_for_variable: OperandOrResultsForVariable = {}
+  value_sites_for_variable: ValueSitesForVariable = {}
 
   # Account for the lower bound, upper bound, and step of the loop, which appear
   # in the operands but not in the results.
   num_leading_args = 3
   for index, o in enumerate(op.operands):
-    if not is_vector(o) and not (ctx.enable_smem_inference and _is_smem_ref(o)):
+    if not is_vector(o) and not _is_smem_ref(o):
       continue
     result_index = index - num_leading_args
-    operand = OperandOrResult(op, VariableType.OPERAND, index)
-    result = OperandOrResult(op, VariableType.RESULT, result_index)
-    yield_operand = OperandOrResult(
+    arg_index = index - num_leading_args + 1  # Account for the induction var.
+    operand = ValueSite(op, VariableType.OPERAND, index)
+    arg = ValueSite(op, VariableType.ARGUMENT, arg_index, region_index=0)
+    result = ValueSite(op, VariableType.RESULT, result_index)
+    yield_operand = ValueSite(
         yield_op, VariableType.OPERAND, result_index
     )
     var = eqns.Variable(operand) if is_vector(o) else ctx.producer_ref(operand)
-    operand_or_results_for_variable[var] = [operand, result, yield_operand]
+    value_sites_for_variable[var] = [operand, arg, result, yield_operand]
 
-  return eqns.EquationSystem(), operand_or_results_for_variable, []
+  return eqns.EquationSystem(), value_sites_for_variable, []
+
+
+def prime_decomposition(n: int) -> list[int]:
+  """Returns the prime decomposition of the given number `n` as a list of ints.
+
+  A factor appears as many times in the list as the power up to which it divides
+  `n`.
+  """
+  # This implementation should be sufficiently efficient for small `n`, which
+  # should always be the case for us.
+  prime_factors = []
+  divisor = 2
+  while divisor * divisor <= n:
+    while n % divisor == 0:
+      n //= divisor
+      prime_factors.append(divisor)
+    divisor += 1
+  if n != 1:
+    prime_factors.append(n)
+  return prime_factors
+
+
+# TODO(bchetioui): let's see if we need to parametrize this by depth.
+def dynamic_gcd(a: int, b: ir.Value) -> int:
+  if a <= 0:
+    raise ValueError("a must be strictly positive")
+  if not ir.IntegerType.isinstance(b.type) and not ir.IndexType.isinstance(b.type):
+    raise ValueError(f"Expected an integer dynamic value, got a {b.type}")
+  if isinstance(b.owner.opview, arith.ConstantOp):
+    return math.gcd(a, b.owner.opview.literal_value)
+  running_gcd = 1
+  for factor in prime_decomposition(a):
+    if utils.is_known_divisible(b, running_gcd * factor):
+      running_gcd *= factor
+  return running_gcd
 
 
 @_add_equation_system_derivation_rule(scf.WhileOp)
 def _while_equation_system(
     ctx: DerivationContext,
     op: scf.WhileOp,
-) -> tuple[eqns.EquationSystem, OperandOrResultsForVariable, list[Hint]]:
+) -> tuple[eqns.EquationSystem, ValueSitesForVariable, list[Hint]]:
   del ctx
   [before_block] = op.before.blocks
   [after_block] = op.after.blocks
   cond_op = _terminator(before_block, scf.ConditionOp)
   yield_op = _terminator(after_block, scf.YieldOp)
 
-  operand_or_results_for_variable: OperandOrResultsForVariable = {}
+  value_sites_for_variable: ValueSitesForVariable = {}
 
-  for operand_or_result in vector_operands_and_results(op):
-    match operand_or_result.type:
+  for value_site in vector_value_sites(op):
+    idx = value_site.index
+    match value_site.type:
       case VariableType.OPERAND:
-        yield_operand = OperandOrResult(
-            yield_op, VariableType.OPERAND, operand_or_result.index
-        )
-        operand_or_results_for_variable[eqns.Variable(operand_or_result)] = [
-            operand_or_result,
+        arg = ValueSite(op, VariableType.ARGUMENT, idx, region_index=0)
+        yield_operand = ValueSite(yield_op, VariableType.OPERAND, idx)
+        value_sites_for_variable[eqns.Variable(value_site)] = [
+            value_site,
+            arg,
             yield_operand,
         ]
       case VariableType.RESULT:
         # Increment by 1 to account for the conditional.
-        cond_operand = OperandOrResult(
-            cond_op, VariableType.OPERAND, operand_or_result.index + 1
-        )
-        operand_or_results_for_variable[eqns.Variable(operand_or_result)] = [
-            operand_or_result,
+        cond_operand = ValueSite(cond_op, VariableType.OPERAND, idx + 1)
+        arg = ValueSite(op, VariableType.ARGUMENT, idx, region_index=1)
+        value_sites_for_variable[eqns.Variable(value_site)] = [
+            value_site,
+            arg,
             cond_operand,
         ]
       case _ as never:
-        assert_never(never)
+        assert_never(never)  # pytype: disable=wrong-arg-types
 
-  return eqns.EquationSystem(), operand_or_results_for_variable, []
+  return eqns.EquationSystem(), value_sites_for_variable, []
 
 
 @_add_equation_system_derivation_rule(scf.IndexSwitchOp)
 def _index_switch_equation_system(
     ctx: DerivationContext,
     op: scf.IndexSwitchOp,
-) -> tuple[eqns.EquationSystem, OperandOrResultsForVariable, list[Hint]]:
+) -> tuple[eqns.EquationSystem, ValueSitesForVariable, list[Hint]]:
   del ctx
-  operand_or_results_for_variable: OperandOrResultsForVariable = {
-      eqns.Variable(o): [o] for o in vector_operands_and_results(op)
+  value_sites_for_variable: ValueSitesForVariable = {
+      eqns.Variable(o): [o] for o in vector_value_sites(op)
   }
   for region in op.regions:
     [block] = region.blocks
     yield_op = _terminator(block, scf.YieldOp)
-    for operand_or_result in operand_or_results_for_variable.keys():
-      assert operand_or_result.key.type == VariableType.RESULT
-      yield_operand = OperandOrResult(
-          yield_op, VariableType.OPERAND, operand_or_result.key.index
+    for value_site in value_sites_for_variable.keys():
+      assert value_site.key.type == VariableType.RESULT
+      yield_operand = ValueSite(
+          yield_op, VariableType.OPERAND, value_site.key.index
       )
-      operand_or_results_for_variable[operand_or_result].append(yield_operand)
+      value_sites_for_variable[value_site].append(yield_operand)
 
-  return eqns.EquationSystem(), operand_or_results_for_variable, []
+  return eqns.EquationSystem(), value_sites_for_variable, []
 
 
 @_add_equation_system_derivation_rule(mgpu.LayoutCastOp)
 def _layout_cast_equation_system(
     ctx: DerivationContext,
     op: mgpu.LayoutCastOp,
-) -> tuple[eqns.EquationSystem, OperandOrResultsForVariable, list[Hint]]:
+) -> tuple[eqns.EquationSystem, ValueSitesForVariable, list[Hint]]:
   del ctx
-  operand = OperandOrResult(op, VariableType.OPERAND, 0)
-  result = OperandOrResult(op, VariableType.RESULT, 0)
+  operand = ValueSite(op, VariableType.OPERAND, 0)
+  result = ValueSite(op, VariableType.RESULT, 0)
   variable = eqns.Variable(operand)
   out_layout = eqns.RegisterLayout(layouts_lib.from_layout_attr(op.new_layout))
   return (
@@ -911,29 +951,28 @@ def _infer_wgmma_tiling(
 def _wgmma_equation_system(
     ctx: DerivationContext,
     op: mgpu.WGMMAOp,
-) -> tuple[eqns.EquationSystem, OperandOrResultsForVariable, list[Hint]]:
+) -> tuple[eqns.EquationSystem, ValueSitesForVariable, list[Hint]]:
   assignments: dict[eqns.Variable, eqns.Constant] = {}
   # Registers
-  vector_operands_or_results = vector_operands_and_results(op)
+  vector_operands_or_results = vector_value_sites(op)
   vec_variable = eqns.Variable(vector_operands_or_results[0])
   assignments[vec_variable] = eqns.RegisterLayout(fa.WGMMA_LAYOUT)
   operands_or_results_for_variable = {vec_variable: vector_operands_or_results}
 
   # SMEM
-  if ctx.enable_smem_inference:
-    a_tiling, b_tiling = _infer_wgmma_tiling(op.a.type, op.b.type)
-    b = OperandOrResult(op, VariableType.OPERAND, 2)
-    b_var = ctx.producer_ref(b)
+  a_tiling, b_tiling = _infer_wgmma_tiling(op.a.type, op.b.type)
+  b = ValueSite(op, VariableType.OPERAND, 2)
+  b_var = ctx.producer_ref(b)
 
-    assignments[b_var] = eqns.SMEMTiling(lc.TileTransform(b_tiling))
-    operands_or_results_for_variable[b_var] = [b]
+  assignments[b_var] = eqns.SMEMTiling(lc.TileTransform(b_tiling))
+  operands_or_results_for_variable[b_var] = [b]
 
-    if a_tiling is not None:
-      # a is in SMEM
-      a = OperandOrResult(op, VariableType.OPERAND, 1)
-      a_var = ctx.producer_ref(a)
-      assignments[a_var] = eqns.SMEMTiling(lc.TileTransform(a_tiling))
-      operands_or_results_for_variable[a_var] = [a]
+  if a_tiling is not None:
+    # a is in SMEM
+    a = ValueSite(op, VariableType.OPERAND, 1)
+    a_var = ctx.producer_ref(a)
+    assignments[a_var] = eqns.SMEMTiling(lc.TileTransform(a_tiling))
+    operands_or_results_for_variable[a_var] = [a]
 
   system = eqns.EquationSystem(
       assignments=assignments,
@@ -945,13 +984,13 @@ def _wgmma_equation_system(
 def _vector_broadcast_equation_system(
     ctx: DerivationContext,
     op: vector.BroadcastOp,
-) -> tuple[eqns.EquationSystem, OperandOrResultsForVariable, list[Hint]]:
+) -> tuple[eqns.EquationSystem, ValueSitesForVariable, list[Hint]]:
   del ctx
   # This is not expected to be necessary at the moment. We should be using
   # mgpu.BroadcastInDimOp instead when dealing with broadcasting vectors.
   if ir.ShapedType.isinstance(op.source.type):
     raise NotImplementedError("Only vector broadcasts from scalars are supported.")
-  out_variable = eqns.Variable(OperandOrResult(op, VariableType.RESULT, 0))
+  out_variable = eqns.Variable(ValueSite(op, VariableType.RESULT, 0))
   layout = eqns.RegisterLayout(fa.WGSplatFragLayout(tuple(op.result.type.shape)))
   return (
       eqns.EquationSystem(assignments={out_variable: layout}),
@@ -964,9 +1003,9 @@ def _vector_broadcast_equation_system(
 def _vector_reduction_equation_system(
     ctx: DerivationContext,
     op: vector.ReductionOp,
-) -> tuple[eqns.EquationSystem, OperandOrResultsForVariable, list[Hint]]:
+) -> tuple[eqns.EquationSystem, ValueSitesForVariable, list[Hint]]:
   del ctx
-  in_variable = eqns.Variable(OperandOrResult(op, VariableType.OPERAND, 0))
+  in_variable = eqns.Variable(ValueSite(op, VariableType.OPERAND, 0))
   return eqns.EquationSystem(), {in_variable: [in_variable.key]}, []
 
 
@@ -991,11 +1030,11 @@ def _reduction_equation_and_hint(
 def _multi_dim_reduction_equation_system(
     ctx: DerivationContext,
     op: vector.MultiDimReductionOp,
-) -> tuple[eqns.EquationSystem, OperandOrResultsForVariable, list[Hint]]:
+) -> tuple[eqns.EquationSystem, ValueSitesForVariable, list[Hint]]:
   del ctx
-  source = OperandOrResult(op, VariableType.OPERAND, 0)
-  acc = OperandOrResult(op, VariableType.OPERAND, 1)
-  out = OperandOrResult(op, VariableType.RESULT, 0)
+  source = ValueSite(op, VariableType.OPERAND, 0)
+  acc = ValueSite(op, VariableType.OPERAND, 1)
+  out = ValueSite(op, VariableType.RESULT, 0)
   source_variable = eqns.Variable(source)
   out_variable = eqns.Variable(out)
 
@@ -1017,10 +1056,10 @@ def _multi_dim_reduction_equation_system(
 def _broadcast_in_dim_equation_system(
     ctx: DerivationContext,
     op: mgpu.BroadcastInDimOp,
-) -> tuple[eqns.EquationSystem, OperandOrResultsForVariable, list[Hint]]:
+) -> tuple[eqns.EquationSystem, ValueSitesForVariable, list[Hint]]:
   del ctx
-  out_variable = eqns.Variable(OperandOrResult(op, VariableType.RESULT, 0))
-  source_variable = eqns.Variable(OperandOrResult(op, VariableType.OPERAND, 0))
+  out_variable = eqns.Variable(ValueSite(op, VariableType.RESULT, 0))
+  source_variable = eqns.Variable(ValueSite(op, VariableType.OPERAND, 0))
   out_shape = tuple(cast(ir.ShapedType, op.result.type).shape)
   reduction_dims = tuple(
       i for i in range(len(out_shape)) if i not in op.broadcast_dimensions
@@ -1040,13 +1079,13 @@ def _broadcast_in_dim_equation_system(
 @_add_equation_system_derivation_rule(vector.ShapeCastOp)
 def _shape_cast_equation_system(
     ctx: DerivationContext, op: vector.ShapeCastOp
-) -> tuple[eqns.EquationSystem, OperandOrResultsForVariable, list[Hint]]:
+) -> tuple[eqns.EquationSystem, ValueSitesForVariable, list[Hint]]:
   del ctx
   in_shape = tuple(cast(ir.ShapedType, op.source.type).shape)
   out_shape = tuple(cast(ir.ShapedType, op.result.type).shape)
 
-  in_variable = eqns.Variable(OperandOrResult(op, VariableType.OPERAND, 0))
-  out_variable = eqns.Variable(OperandOrResult(op, VariableType.RESULT, 0))
+  in_variable = eqns.Variable(ValueSite(op, VariableType.OPERAND, 0))
+  out_variable = eqns.Variable(ValueSite(op, VariableType.RESULT, 0))
 
   # Here, we are in a case where we are stating
   #
@@ -1081,33 +1120,80 @@ def _shape_cast_equation_system(
   )
 
 
+@_add_equation_system_derivation_rule(vector.ExtractStridedSliceOp)
+def _extract_strided_slice_equation_system(
+    ctx: DerivationContext, op: vector.ExtractStridedSliceOp
+) -> tuple[eqns.EquationSystem, ValueSitesForVariable, list[Hint]]:
+  del ctx
+  if any(ir.IntegerAttr(s).value != 1 for s in op.strides):
+    raise NotImplementedError("`strides` must contain only 1s.")
+  operand = ValueSite(op, VariableType.OPERAND, 0)
+  result = ValueSite(op, VariableType.RESULT, 0)
+  variable = eqns.Variable(operand)
+  offsets = tuple(ir.IntegerAttr(o).value for o in op.offsets)
+  constraints = [
+      eqns.Divides(variable, offsets),
+      # TODO(allanrenucci): Remove once vectors with splat and strided layouts
+      # can be sliced.
+      eqns.NotOfType(variable, fa.WGSplatFragLayout),
+      eqns.NotOfType(variable, fa.WGStridedFragLayout),
+  ]
+  return (
+      eqns.EquationSystem(constraints=constraints),
+      # We use a single variable because lowering does not support two different
+      # layouts for `source` and `result`.
+      {variable: [operand, result]},
+      [],
+  )
+
+
 @_add_equation_system_derivation_rule(mgpu.CustomPrimitiveOp)
 def _custom_primitive_equation_system(
     ctx: DerivationContext,
     op: mgpu.CustomPrimitiveOp,
-) -> tuple[eqns.EquationSystem, OperandOrResultsForVariable, list[Hint]]:
-  del ctx
+) -> tuple[eqns.EquationSystem, ValueSitesForVariable, list[Hint]]:
   assignments: dict[eqns.Variable, eqns.Constant] = {}
+  equations: list[eqns.Equation] = []
   in_layouts = iter(op.in_layouts)
+  in_transforms = iter(op.in_transforms)
   variables: list[eqns.Variable] = []
   for i, operand in enumerate(op.operands):
-    if ir.VectorType.isinstance(operand.type):
-      v = eqns.Variable(OperandOrResult(op, VariableType.OPERAND, i))
+    if is_vector(operand):
+      v = eqns.Variable(ValueSite(op, VariableType.OPERAND, i))
       variables.append(v)
       assignments[v] = eqns.RegisterLayout(
           layouts_lib.from_layout_attr(next(in_layouts))
       )
+    elif _is_smem_ref(operand):
+      # Here we need to create a new variable, even though it is equal to the
+      # source operand. This is because we directly assign the new variable and
+      # if we did that to the source there could be conflicting assignments.
+      # For example, the same ref could be passed into the custom op twice with
+      # different transforms, which needs to yield an unsatisfiable system.
+      #
+      # TODO(b/447079781): Consider creating the final Equation system using
+      # __and__ and potentially returning Unsatisfiable() directly if there is
+      # a conflict between the assignments.
+      value_site = ValueSite(op, VariableType.OPERAND, i)
+      source_var = ctx.producer_ref(value_site)
+      v = eqns.Variable(value_site)
+      equations.append(eqns.Equation(lhs=source_var, rhs=v))
+      variables.append(v)
+      transforms = next(in_transforms)
+      ref_ty = value_site.value.type
+      tiling = _extract_smem_tiling_from_custom_transform_attrs(ref_ty, transforms)
+      assignments[v] = tiling
 
   out_layouts = iter(op.out_layouts)
   for i, result in enumerate(op.results):
     if ir.VectorType.isinstance(result.type):
-      v = eqns.Variable(OperandOrResult(op, VariableType.RESULT, i))
+      v = eqns.Variable(ValueSite(op, VariableType.RESULT, i))
       variables.append(v)
       assignments[v] = eqns.RegisterLayout(
           layouts_lib.from_layout_attr(next(out_layouts))
       )
   return (
-      eqns.EquationSystem(assignments=assignments),
+      eqns.EquationSystem(equations=equations, assignments=assignments),
       {v: [v.key] for v in variables},
       [],
   )
@@ -1127,10 +1213,10 @@ def _tmem_layout_from_layout_attr(
 def _tmem_layout_cast_equation_system(
     ctx: DerivationContext,
     op: mgpu.TmemLayoutCastOp,
-) -> tuple[eqns.EquationSystem, OperandOrResultsForVariable, list[Hint]]:
-  operand = OperandOrResult(op, VariableType.OPERAND, 0)
+) -> tuple[eqns.EquationSystem, ValueSitesForVariable, list[Hint]]:
+  operand = ValueSite(op, VariableType.OPERAND, 0)
   variable = ctx.producer_ref(operand)
-  result = OperandOrResult(op, VariableType.RESULT, 0)
+  result = ValueSite(op, VariableType.RESULT, 0)
   out_layout = eqns.TMEMLayout(_tmem_layout_from_layout_attr(op.new_layout))
   return (
       eqns.EquationSystem(assignments={variable: out_layout}),
@@ -1143,15 +1229,15 @@ def _tmem_layout_cast_equation_system(
 def _tmem_alloc_equation_system(
     ctx: DerivationContext,
     op: mgpu.TmemAllocOp,
-) -> tuple[eqns.EquationSystem, OperandOrResultsForVariable, list[Hint]]:
+) -> tuple[eqns.EquationSystem, ValueSitesForVariable, list[Hint]]:
   del ctx
-  result = OperandOrResult(op, VariableType.RESULT, 0)
+  result = ValueSite(op, VariableType.RESULT, 0)
   result_var = eqns.Variable(result)
   layout = tcgen05._infer_tmem_layout(
       tuple(op.result.type.shape), op.collective, packing=1
   )
 
-  in_smem = OperandOrResult(op, VariableType.OPERAND, 0)
+  in_smem = ValueSite(op, VariableType.OPERAND, 0)
   in_smem_var = eqns.Variable(in_smem)
   assignments: dict[eqns.Variable, eqns.Constant] = {
       in_smem_var: eqns.SMEMTiling(None)
@@ -1169,8 +1255,8 @@ def _tmem_alloc_equation_system(
 def _tmem_dealloc_equation_system(
     ctx: DerivationContext,
     op: mgpu.TmemDeallocOp,
-) -> tuple[eqns.EquationSystem, OperandOrResultsForVariable, list[Hint]]:
-  operand = OperandOrResult(op, VariableType.OPERAND, 0)
+) -> tuple[eqns.EquationSystem, ValueSitesForVariable, list[Hint]]:
+  operand = ValueSite(op, VariableType.OPERAND, 0)
   variable = ctx.producer_ref(operand)
   return eqns.EquationSystem(), {variable: [operand]}, []
 
@@ -1179,12 +1265,12 @@ def _tmem_dealloc_equation_system(
 def _tcgen05_mma_equation_system(
     ctx: DerivationContext,
     op: mgpu.TcGen05MMAOp,
-) -> tuple[eqns.EquationSystem, OperandOrResultsForVariable, list[Hint]]:
+) -> tuple[eqns.EquationSystem, ValueSitesForVariable, list[Hint]]:
   assignments: dict[eqns.Variable, eqns.Constant] = {}
-  operands_for_variable: OperandOrResultsForVariable = {}
+  operands_for_variable: ValueSitesForVariable = {}
 
   # TMEM
-  acc = OperandOrResult(op, VariableType.OPERAND, 0)
+  acc = ValueSite(op, VariableType.OPERAND, 0)
   acc_variable = ctx.producer_ref(acc)
   acc_type = ir.ShapedType(op.accumulator.type)
   acc_layout = tcgen05._infer_tmem_layout(
@@ -1194,7 +1280,7 @@ def _tcgen05_mma_equation_system(
   operands_for_variable[acc_variable] = [acc]
 
   if _is_tmem_ref(op.a):
-    a = OperandOrResult(op, VariableType.OPERAND, 1)
+    a = ValueSite(op, VariableType.OPERAND, 1)
     a_type = ir.ShapedType(op.a.type)
     a_var = ctx.producer_ref(a)
     packing = 32 // utils.bitwidth(a_type.element_type)
@@ -1205,25 +1291,24 @@ def _tcgen05_mma_equation_system(
     operands_for_variable[a_var] = [a]
 
   # SMEM
-  if ctx.enable_smem_inference:
-    b_tiling = _infer_tiling_for_mma_ref(
-        ir.MemRefType(op.b.type),
+  b_tiling = _infer_tiling_for_mma_ref(
+      ir.MemRefType(op.b.type),
+      max_swizzle=mgpu.SwizzlingMode.k128ByteSwizzle,
+  )
+  b = ValueSite(op, VariableType.OPERAND, 2)
+  b_var = ctx.producer_ref(b)
+  assignments[b_var] = eqns.SMEMTiling(lc.TileTransform(b_tiling))
+  operands_for_variable[b_var] = [b]
+
+  if _is_smem_ref(op.a):
+    a_tiling = _infer_tiling_for_mma_ref(
+        ir.MemRefType(op.a.type),
         max_swizzle=mgpu.SwizzlingMode.k128ByteSwizzle,
     )
-    b = OperandOrResult(op, VariableType.OPERAND, 2)
-    b_var = ctx.producer_ref(b)
-    assignments[b_var] = eqns.SMEMTiling(lc.TileTransform(b_tiling))
-    operands_for_variable[b_var] = [b]
-
-    if _is_smem_ref(op.a):
-      a_tiling = _infer_tiling_for_mma_ref(
-          ir.MemRefType(op.a.type),
-          max_swizzle=mgpu.SwizzlingMode.k128ByteSwizzle,
-      )
-      a = OperandOrResult(op, VariableType.OPERAND, 1)
-      a_var = ctx.producer_ref(a)
-      assignments[a_var] = eqns.SMEMTiling(lc.TileTransform(a_tiling))
-      operands_for_variable[a_var] = [a]
+    a = ValueSite(op, VariableType.OPERAND, 1)
+    a_var = ctx.producer_ref(a)
+    assignments[a_var] = eqns.SMEMTiling(lc.TileTransform(a_tiling))
+    operands_for_variable[a_var] = [a]
 
   return eqns.EquationSystem(assignments=assignments), operands_for_variable, []
 
@@ -1232,10 +1317,10 @@ def _tcgen05_mma_equation_system(
 def _async_load_tmem_equation_system(
     ctx: DerivationContext,
     op: mgpu.AsyncLoadTmemOp,
-) -> tuple[eqns.EquationSystem, OperandOrResultsForVariable, list[Hint]]:
-  source = OperandOrResult(op, VariableType.OPERAND, 0)
+) -> tuple[eqns.EquationSystem, ValueSitesForVariable, list[Hint]]:
+  source = ValueSite(op, VariableType.OPERAND, 0)
   source_variable = ctx.producer_ref(source)
-  destination = OperandOrResult(op, VariableType.RESULT, 0)
+  destination = ValueSite(op, VariableType.RESULT, 0)
   destination_variable = eqns.Variable(destination)
   constraint = eqns.IsTransferable(
       source_variable,
@@ -1253,10 +1338,10 @@ def _async_load_tmem_equation_system(
 def _async_store_tmem_equation_system(
     ctx: DerivationContext,
     op: mgpu.AsyncStoreTmemOp,
-) -> tuple[eqns.EquationSystem, OperandOrResultsForVariable, list[Hint]]:
-  source = OperandOrResult(op, VariableType.OPERAND, 0)
+) -> tuple[eqns.EquationSystem, ValueSitesForVariable, list[Hint]]:
+  source = ValueSite(op, VariableType.OPERAND, 0)
   source_variable = eqns.Variable(source)
-  destination = OperandOrResult(op, VariableType.OPERAND, 1)
+  destination = ValueSite(op, VariableType.OPERAND, 1)
   destination_variable = ctx.producer_ref(destination)
   constraint = eqns.IsTransferable(
       source_variable,
@@ -1274,59 +1359,95 @@ def _async_store_tmem_equation_system(
 def _slice_smem_equation_system(
     ctx: DerivationContext,
     op: mgpu.SliceSMEMOp,
-) -> tuple[eqns.EquationSystem, OperandOrResultsForVariable, list[Hint]]:
+) -> tuple[eqns.EquationSystem, ValueSitesForVariable, list[Hint]]:
   del ctx
-  res = OperandOrResult(op, VariableType.RESULT, 0)
+  res = ValueSite(op, VariableType.RESULT, 0)
   res_var = eqns.Variable(res)
   return (eqns.EquationSystem(), {res_var: [res]}, [])
 
 
-# TODO(b/447079781): Check whether we still need this rule. Normally,
-# DynamicSharedMemory is only generated in the lowering pass. If there is
-# another case where a ViewOp is generated beforehand, and this rule cannot be
-# removed, document here what that case is.
-@_add_equation_system_derivation_rule(memref.ViewOp)
-def _memref_view_op_equation_system(
+@_add_equation_system_derivation_rule(memref.SubViewOp)
+def _memref_subview_equation_system(
     ctx: DerivationContext,
-    op: memref.ViewOp,
-) -> tuple[eqns.EquationSystem, OperandOrResultsForVariable, list[Hint]]:
-  del ctx
+    op: memref.SubViewOp,
+) -> tuple[eqns.EquationSystem, ValueSitesForVariable, list[Hint]]:
+  source = ValueSite(op, VariableType.OPERAND, 0)
+  dest = ValueSite(op, VariableType.RESULT, 0)
+  source_dest_var = ctx.producer_ref(source)
 
-  # The source is expected to come from a DynamicSharedMemoryOp which does not
-  # participate in layout inference and no variable exists for it.
-  if not isinstance(op.source.owner.opview, gpu.DynamicSharedMemoryOp):
+  if any(map(lambda s: s != 1, op.static_strides)):
     raise NotImplementedError(
-        "Memref view transforms are only inferred when the op is a direct user "
-        f"of a DynamicSharedMemoryOp but got {op}."
+        f"Only unit strides are supported but got {op.static_strides}."
     )
 
-  res = OperandOrResult(op, VariableType.RESULT, 0)
-  res_var = eqns.Variable(res)
-  return eqns.EquationSystem(), {res_var: [res]}, []
+  # Collect all the constraints from all dimensions.
+  tiling_multiple = []
+  dynamic_offset_index = 0
+  for i, size in enumerate(op.static_sizes):
+    offset = op.static_offsets[i]
+    if offset == ir.ShapedType.get_dynamic_size():
+      offset = op.offsets[dynamic_offset_index]
+      dynamic_offset_index += 1
+
+    # Drop all dimensions up to and including the last dynamic size. Dynamic
+    # sizes are not supported yet.
+    #
+    # Supporting dynamic sizes here can be done analogously to how dynamic
+    # offsets are supported. The reason we don't support dynamic sizes now is
+    # because the lowering does not yet support them.
+    if ir.ShapedType.is_dynamic_size(size):
+      tiling_multiple = []
+    else:
+      src_type = ir.ShapedType(op.source.type)
+      divisibility_constraint = math.gcd(size, src_type.shape[i])
+      if isinstance(offset, int):
+        divisibility_constraint = math.gcd(divisibility_constraint, offset)
+      else:
+        divisibility_constraint = dynamic_gcd(divisibility_constraint, offset)
+      tiling_multiple.append(divisibility_constraint)
+
+  constraints = [eqns.Divides(source_dest_var, tuple(tiling_multiple))]
+  system = eqns.EquationSystem(constraints=constraints)
+  return system, {source_dest_var: [source, dest]}, []
 
 
-# TODO(b/447079781): Check whether we should create new variables or use
-# variables from the producer_ref in all memref rules. Ideally all of those
-# rules should handles references the same way. If there is a reason for
-# handling them differently, document in each rule.
-#
-# E.g. here, using the producer_ref variable would work for all existing tests,
-# but we create a new variable + an equation in order to be consistent with the
-# other memref rules.
 @_add_equation_system_derivation_rule(memref.CastOp)
 def _memref_cast_op_equation_system(
     ctx: DerivationContext,
     op: memref.CastOp,
-) -> tuple[eqns.EquationSystem, OperandOrResultsForVariable, list[Hint]]:
-  source = OperandOrResult(op, VariableType.OPERAND, 0)
-  var_source = ctx.producer_ref(source)
-  dest = OperandOrResult(op, VariableType.RESULT, 0)
-  var_dest = eqns.Variable(dest)
-  return (
-      eqns.EquationSystem(equations=[eqns.Equation(var_source, var_dest)]),
-      {var_source: [source], var_dest: [dest]},
-      [],
-  )
+) -> tuple[eqns.EquationSystem, ValueSitesForVariable, list[Hint]]:
+  source = ValueSite(op, VariableType.OPERAND, 0)
+  var_source_dest = ctx.producer_ref(source)
+  dest = ValueSite(op, VariableType.RESULT, 0)
+  return eqns.EquationSystem(), {var_source_dest: [source, dest]}, []
+
+
+@_add_equation_system_derivation_rule(memref.TransposeOp)
+def _memref_transpose_op_equation_system(
+    ctx: DerivationContext,
+    op: memref.TransposeOp,
+) -> tuple[eqns.EquationSystem, ValueSitesForVariable, list[Hint]]:
+  in_ty = ir.MemRefType(op.in_.type)
+  if len(in_ty.shape) != 2:
+    raise NotImplementedError(f"Only 2D memrefs are supported, got {in_ty}")
+  in_strides, _ = in_ty.get_strides_and_offset()
+  out_strides, _ = ir.MemRefType(op.result.type).get_strides_and_offset()
+  transpose = in_strides != out_strides
+
+  source = ValueSite(op, VariableType.OPERAND, 0)
+  dest = ValueSite(op, VariableType.RESULT, 0)
+  source_var = ctx.producer_ref(source)
+
+  if not transpose:
+    return (eqns.EquationSystem(), {source_var: [source, dest]}, [])
+
+  dest_var = eqns.Variable(dest)
+  equations = [
+      eqns.Equation(source_var, eqns.Transpose(dest_var)),
+      eqns.Equation(eqns.Transpose(source_var), dest_var),
+  ]
+  system = eqns.EquationSystem(equations=equations)
+  return system, {source_var: [source], dest_var: [dest]}, []
 
 
 # `memref.load` and `memref.store` are used to load barrier phases which are
@@ -1336,7 +1457,7 @@ def _memref_cast_op_equation_system(
 def _memref_load_store_op_equation_system(
     ctx: DerivationContext,
     op: memref.LoadOp | memref.StoreOp,
-) -> tuple[eqns.EquationSystem, OperandOrResultsForVariable, list[Hint]]:
+) -> tuple[eqns.EquationSystem, ValueSitesForVariable, list[Hint]]:
   del ctx
 
   ref_shape = ir.MemRefType(op.memref.type).shape
@@ -1346,22 +1467,17 @@ def _memref_load_store_op_equation_system(
     )
 
   ref_op_index = 0 if isinstance(op, memref.LoadOp) else 1
-  ref = OperandOrResult(op, VariableType.OPERAND, ref_op_index)
+  ref = ValueSite(op, VariableType.OPERAND, ref_op_index)
   var = eqns.Variable(ref)
   assignments: dict[eqns.Variable, eqns.Constant] = {var: eqns.SMEMTiling(None)}
   return eqns.EquationSystem(assignments=assignments), {var: [ref]}, []
 
 
-@_add_equation_system_derivation_rule(mgpu.WithTransformsOp)
-def _with_transforms_equation_system(
-    ctx: DerivationContext,
-    op: mgpu.WithTransformsOp,
-) -> tuple[eqns.EquationSystem, OperandOrResultsForVariable, list[Hint]]:
-  source = OperandOrResult(op, VariableType.OPERAND, 0)
-  dest = OperandOrResult(op, VariableType.RESULT, 0)
-  var = ctx.producer_ref(source)
-
-  transforms = [layouts_lib.from_transform_attr(x) for x in op.transforms]
+def _extract_smem_tiling_from_custom_transform_attrs(
+    ref_type: ir.MemRefType,
+    transform_attrs: ir.ArrayAttr,
+) -> eqns.SMEMTiling:
+  transforms = [layouts_lib.from_transform_attr(x) for x in transform_attrs]
   match transforms:
     case []:
       tile_transform = None
@@ -1376,16 +1492,26 @@ def _with_transforms_equation_system(
       raise NotImplementedError(f"Unsupported transforms {transforms}")
 
   if swizzle is not None:
-    computed_swizzle = _compute_swizzle(op.ref.type, tile_transform)
+    computed_swizzle = _compute_swizzle(ref_type, tile_transform)
     if computed_swizzle != swizzle:
       raise NotImplementedError(
           f"Cannot honor caller-provided swizzle {swizzle} that is different "
-          f"from the computed swizle {computed_swizzle} on op {op}."
+          f"from the computed swizle {computed_swizzle} for type {ref_type}."
       )
 
-  assignments: dict[eqns.Variable, eqns.Constant] = {
-      var: eqns.SMEMTiling(tile_transform)
-  }
+  return eqns.SMEMTiling(tile_transform)
+
+
+@_add_equation_system_derivation_rule(mgpu.WithTransformsOp)
+def _with_transforms_equation_system(
+    ctx: DerivationContext,
+    op: mgpu.WithTransformsOp,
+) -> tuple[eqns.EquationSystem, ValueSitesForVariable, list[Hint]]:
+  source = ValueSite(op, VariableType.OPERAND, 0)
+  dest = ValueSite(op, VariableType.RESULT, 0)
+  var = ctx.producer_ref(source)
+  tiling = _extract_smem_tiling_from_custom_transform_attrs(op.ref.type, op.transforms)
+  assignments: dict[eqns.Variable, eqns.Constant] = {var: tiling}
   return eqns.EquationSystem(assignments=assignments), {var: [source, dest]}, []
 
 
@@ -1394,16 +1520,14 @@ def _with_transforms_equation_system(
 def _async_load_store_equation_system(
     ctx: DerivationContext,
     op: mgpu.AsyncLoadOp | mgpu.AsyncStoreOp,
-) -> tuple[eqns.EquationSystem, OperandOrResultsForVariable, list[Hint]]:
+) -> tuple[eqns.EquationSystem, ValueSitesForVariable, list[Hint]]:
   operand_index = 1 if isinstance(op, mgpu.AsyncLoadOp) else 0
-  operand = OperandOrResult(op, VariableType.OPERAND, operand_index)
+  operand = ValueSite(op, VariableType.OPERAND, operand_index)
   var = ctx.producer_ref(operand)
   return eqns.EquationSystem(), {var: [operand]}, []
 
 
-def _ensure_all_layouts_are_set(
-    op: ir.OpView, enable_smem_inference: bool
-) -> None:
+def _ensure_all_layouts_are_set(op: ir.OpView) -> None:
   if inference_utils.should_have_layout(op):
     _ensure_right_number_of_layouts(
         op,
@@ -1424,7 +1548,7 @@ def _ensure_all_layouts_are_set(
         if inference_utils.has_out_tmem_layouts_set(op)
         else [],
     )
-  if enable_smem_inference and inference_utils.should_have_transforms(op):
+  if inference_utils.should_have_transforms(op):
     _ensure_right_number_of_transforms(
         op,
         inference_utils.in_transforms(op)
@@ -1525,15 +1649,12 @@ class _TypeAndLayout:
   layout: eqns.Constant
 
 
-def assign_layouts(
-    solution: dict[OperandOrResult, eqns.Constant],
-    enable_smem_inference: bool,
-) -> None:
+def assign_layouts(solution: dict[ValueSite, eqns.Constant]) -> None:
   """Assigns the layouts in `solution` to the MLIR ops they belong to.
 
   This function requires that, for each MLIR op that appears in `solution`,
   `solution` contains a layout assignment for all of its `vector`, TMEM, and
-  SMEM operands and results.
+  SMEM operands and results. Block arguments are ignored.
   """
   solution_sorted_by_op = sorted(
       solution.items(), key=lambda kv: id(kv[0].operation)
@@ -1581,8 +1702,7 @@ def assign_layouts(
 
     _ensure_right_number_of_layouts(op, in_layouts, out_layouts)
     _ensure_right_number_of_tmem_layouts(op, in_tmem_layouts, out_tmem_layouts)
-    if enable_smem_inference:
-      _ensure_right_number_of_transforms(op, in_transforms, out_transforms)
+    _ensure_right_number_of_transforms(op, in_transforms, out_transforms)
 
     if inference_utils.should_have_in_layout(op):
       attrs = [layouts_lib.to_layout_attr(l) for l in in_layouts]
@@ -1597,139 +1717,116 @@ def assign_layouts(
       attrs = [layouts_lib.to_layout_attr(l) for l in out_tmem_layouts]
       op.attributes["out_tmem_layouts"] = ir.ArrayAttr.get(attrs)
 
-    if enable_smem_inference:
+    def _to_transform_attrs(
+        transforms: list[_TypeAndLayout],
+    ) -> list[ir.ArrayAttr]:
+      all_attrs: list[ir.ArrayAttr] = []
+      for tl in transforms:
+        assert isinstance(tl.layout, eqns.SMEMTiling)  # make pytype happy
+        attrs = []
+        if tl.layout.value is not None:
+          attrs.append(layouts_lib.to_transform_attr(tl.layout.value))
+          swizzle = _compute_swizzle(tl.type, tl.layout.value)
+          attrs.append(layouts_lib.to_transform_attr(swizzle))
+        all_attrs.append(ir.ArrayAttr.get(attrs))
+      return all_attrs
 
-      def _to_transform_attrs(
-          transforms: list[_TypeAndLayout],
-      ) -> list[ir.ArrayAttr]:
-        all_attrs: list[ir.ArrayAttr] = []
-        for tl in transforms:
-          assert isinstance(tl.layout, eqns.SMEMTiling)  # make pytype happy
-          attrs = []
-          if tl.layout.value is not None:
-            attrs.append(layouts_lib.to_transform_attr(tl.layout.value))
-            swizzle = _compute_swizzle(tl.type, tl.layout.value)
-            attrs.append(layouts_lib.to_transform_attr(swizzle))
-          all_attrs.append(ir.ArrayAttr.get(attrs))
-        return all_attrs
-
-      if inference_utils.should_have_in_transforms(op):
-        attrs = _to_transform_attrs(in_transforms)
-        op.attributes["in_transforms"] = ir.ArrayAttr.get(attrs)
-      if inference_utils.should_have_out_transforms(op):
-        attrs = _to_transform_attrs(out_transforms)
-        op.attributes["out_transforms"] = ir.ArrayAttr.get(attrs)
+    if inference_utils.should_have_in_transforms(op):
+      attrs = _to_transform_attrs(in_transforms)
+      op.attributes["in_transforms"] = ir.ArrayAttr.get(attrs)
+    if inference_utils.should_have_out_transforms(op):
+      attrs = _to_transform_attrs(out_transforms)
+      op.attributes["out_transforms"] = ir.ArrayAttr.get(attrs)
 
 
-def vector_operands_and_results(op: ir.OpView) -> list[OperandOrResult]:
+def vector_value_sites(op: ir.OpView) -> list[ValueSite]:
   """Returns all the vector operands and results for the given op."""
-  operands_or_results = [
-      OperandOrResult(op, VariableType.OPERAND, i)
+  value_sites = [
+      ValueSite(op, VariableType.OPERAND, i)
       for i, o in enumerate(op.operands)
       if is_vector(o)
   ]
-  operands_or_results.extend([
-      OperandOrResult(op, VariableType.RESULT, i)
+  value_sites.extend([
+      ValueSite(op, VariableType.RESULT, i)
       for i, o in enumerate(op.results)
       if is_vector(o)
   ])
-  return operands_or_results
+  return value_sites
 
 
-def producer_result(operand: OperandOrResult) -> OperandOrResult:
+def producer_result(operand: ValueSite) -> ValueSite:
   """Given an operand, returns the corresponding result in its producer.
 
   When the producer is a block, we return the corresponding operand in the
   operation that owns the block.
   """
   assert operand.type == VariableType.OPERAND
-  value = operand.operation.operands[operand.index]
+  value = operand.value
   producer = value.owner
   if isinstance(producer, ir.Operation):
     index = list(producer.results).index(value)
-    return OperandOrResult(producer.opview, VariableType.RESULT, index)
+    return ValueSite(producer.opview, VariableType.RESULT, index)
 
-  # Block case, useful for deriving layouts for ops
-  # depending on function parameters, or loop block arguments.
   if isinstance(producer, ir.Block):
-    index = list(cast(ir.Block, producer).arguments).index(value)
-    if isinstance(producer.owner, scf.ForOp):
-      # In this case, the block arguments are offset compared to the loop
-      # operands. The loop operands have the lower bound, upper bound, and step
-      # as their leading arguments. The block arguments omit these parameters,
-      # but start with the iteration variable.
-      num_leading_args = 3
-      index += num_leading_args - 1
-      return OperandOrResult(producer.owner.opview, VariableType.OPERAND, index)
-    if isinstance(producer.owner, scf.WhileOp):
-      [before_block] = producer.owner.before.blocks
-      [after_block] = producer.owner.after.blocks
-      if producer == before_block:
-        # In this case, the block arguments correspond to the while operands.
-        return OperandOrResult(producer.owner.opview, VariableType.OPERAND, index)
-      else:
-        assert producer == after_block
-        # In this case, the block arguments correspond to the while results.
-        return OperandOrResult(producer.owner.opview, VariableType.RESULT, index)
-    raise NotImplementedError(
-        f"Producer {producer} is not a ForOp, a WhileOp: {type(producer)}."
-    )
+    index = list(producer.arguments).index(value)
+    region_index = list(producer.owner.regions).index(producer.region)
+    return ValueSite(producer.owner, VariableType.ARGUMENT, index, region_index)
 
   raise TypeError(
       f"Producer {producer} is not an operation nor a block: {type(producer)}."
   )
 
 
-def consumer_operands(result: OperandOrResult) -> Sequence[OperandOrResult]:
-  """Given a result, returns the corresponding operands in its consumers."""
-  assert result.type == VariableType.RESULT
-  consumer_operands: list[OperandOrResult] = []
+def consumer_operands(result: ValueSite) -> Sequence[ValueSite]:
+  """Given a result or an argument, returns the corresponding operands in its consumers."""
+  assert result.type in (VariableType.RESULT, VariableType.ARGUMENT)
+  consumer_operands: list[ValueSite] = []
   # The layout can also be chosen from the layout of the consumers of the
   # results.
-  for use in cast(ir.OpResult, result.operation.results[result.index]).uses:
+  for use in result.value.uses:
     consumer = use.owner.opview  # pytype: disable=attribute-error
     index = use.operand_number
-    consumer_operands.append(OperandOrResult(consumer, VariableType.OPERAND, index))
+    consumer_operands.append(ValueSite(consumer, VariableType.OPERAND, index))
   return consumer_operands
 
 
 def derive_hints_and_constraints(
-    operands_and_results_for_variable: OperandOrResultsForVariable
+    value_sites_for_variable: ValueSitesForVariable
 ) -> tuple[list[Hint], list[eqns.Relayout]]:
   """Derives propagation hints from the given variable mapping."""
   hints: list[Hint] = []
   constraints: list[eqns.Relayout] = []
-  variable_for_operand_or_result: dict[OperandOrResult, eqns.Variable] = {}
-  for variable, operand_and_results in operands_and_results_for_variable.items():
-    for operand_or_result in operand_and_results:
-      if operand_or_result in variable_for_operand_or_result:
+  variable_for_value_site: dict[ValueSite, eqns.Variable] = {}
+  for variable, value_sites in value_sites_for_variable.items():
+    for value_site in value_sites:
+      if value_site in variable_for_value_site:
         raise ValueError(
-            f"{operand_or_result} is mapped to both {variable} and "
-            f"{variable_for_operand_or_result[operand_or_result]}"
+            f"{value_site} is mapped to both {variable} and "
+            f"{variable_for_value_site[value_site]}"
         )
-    variable_for_operand_or_result |= {k: variable for k in operand_and_results}
+    variable_for_value_site |= {k: variable for k in value_sites}
 
   visited: set[eqns.Variable] = set()
-  for variable, operand_and_results in operands_and_results_for_variable.items():
+  for variable, value_sites in value_sites_for_variable.items():
     producers: list[eqns.Variable] = []
     consumers: list[eqns.Variable] = []
-    for operand_or_result in operand_and_results:
+    for value_site in value_sites:
       # We can only relayout variables that are in registers.
-      if operand_or_result.memory_space != MemorySpace.REG:
+      if value_site.memory_space != MemorySpace.REG:
         continue
 
-      if operand_or_result.type == VariableType.OPERAND:
-        pr = producer_result(operand_or_result)
-        producer_variable = variable_for_operand_or_result[pr]
+      if value_site.type == VariableType.OPERAND:
+        pr = producer_result(value_site)
+        producer_variable = variable_for_value_site[pr]
         producers.append(producer_variable)
         # Only add the constraint if we haven't already created that constraint
         # when processing this variable as one of the producer's consumers.
         if producer_variable not in visited:
           # The producer of a variable must be relayout-able to the variable.
           constraints.append(eqns.Relayout(producer_variable, variable))
-      elif operand_or_result.type == VariableType.RESULT:
-        for co in consumer_operands(operand_or_result):
-          consumer_variable = variable_for_operand_or_result[co]
+      elif value_site.type in (VariableType.RESULT, VariableType.ARGUMENT):
+        for co in consumer_operands(value_site):
+          consumer_variable = variable_for_value_site[co]
           consumers.append(consumer_variable)
           # Only add the constraint if we haven't already created that
           # constraint when processing this variable as the consumer's producer.
@@ -1753,60 +1850,7 @@ def is_terminator(op: ir.OpView) -> bool:
   return isinstance(op, (scf.YieldOp, scf.ConditionOp))
 
 
-def _drop_smem(
-    system: eqns.EquationSystem, ctx: DerivationContext
-) -> tuple[eqns.EquationSystem, DerivationContext]:
-  """Drops SMEM related variables constraints and hints.
-
-  This is only needed to enable the gradual implementation and testing of
-  SMEM inference.
-  TODO(b/447079781): Remove this function once SMEM inference is fully
-  implemented.
-  """
-  def is_smem(
-      x: (
-          OperandOrResult
-          | eqns.Constraint
-          | eqns.Expression
-          | eqns.Equation
-      ),
-  ) -> bool:
-    match x:
-      case OperandOrResult(memory_space=MemorySpace.SMEM):
-        return True
-      case eqns.Transpose():
-        return True
-      case eqns.IsTransferable(source=source, target=target):
-        return is_smem(source) or is_smem(target)
-      case eqns.Divides():
-        return True
-      case eqns.Variable(key=key):
-        return is_smem(key)
-      case eqns.SMEMTiling():
-        return True
-      case eqns.Equation(lhs=lhs, rhs=rhs):
-        return is_smem(lhs) or is_smem(rhs)
-      case _:
-        return False
-
-  assign = {k: v for k, v in system.assignments.items() if not is_smem(v)}
-  equations = [e for e in system.equations if not is_smem(e)]
-  const = [c for c in system.constraints if not is_smem(c)]
-
-  new_ctx = DerivationContext()
-
-  new_ctx.operand_and_results_for_variable = {
-      k: v for k, v in ctx.operand_and_results_for_variable.items() if not is_smem(k)
-  }
-
-  new_ctx.variable_for_operand_or_result = {
-      k: v for k, v in ctx.variable_for_operand_or_result.items() if not is_smem(k)
-  }
-
-  return eqns.EquationSystem(assign, equations, const), new_ctx
-
-
-def infer_layout(module: ir.Module, enable_smem_inference: bool = False):
+def infer_layout(module: ir.Module):
   """Infers layouts for the given module.
 
   * If there are vector (respectively SMEM refs, TMEM refs) operands,
@@ -1817,16 +1861,11 @@ def infer_layout(module: ir.Module, enable_smem_inference: bool = False):
   and contain one element per relevant argument in the memory space.
   * Any of these attributes is guaranteed to not be set if there is no relevant
   input/output in the corresponding memory space.
-
-  If `enable_smem_inference` is False, SMEM transforms are not inferred. This
-  is only a temporary flag to allow for an incremental rollout of SMEM
-  inference.
-  TODO(b/447079781): Remove this flag once SMEM inference is fully implemented.
   """
   global_equation_system: eqns.EquationSystem | eqns.Unsatisfiable
   global_equation_system = eqns.EquationSystem()
   hints: list[Hint] = []
-  ctx = DerivationContext(enable_smem_inference=enable_smem_inference)
+  ctx = DerivationContext()
 
   def gather_equations(op: ir.Operation):
     # Terminator ops are handled directly by the op whose region they belong to.
@@ -1838,7 +1877,7 @@ def infer_layout(module: ir.Module, enable_smem_inference: bool = False):
     should_have_layout = (
         inference_utils.should_have_layout(op)
         or inference_utils.should_have_tmem_layout(op)
-        or (inference_utils.should_have_transforms(op) and enable_smem_inference)
+        or inference_utils.should_have_transforms(op)
     )
     if not should_have_layout:
       return
@@ -1852,7 +1891,7 @@ def infer_layout(module: ir.Module, enable_smem_inference: bool = False):
     hints.extend(op_hints)
 
   for op in module.body:
-    inference_utils.traverse_op(op, gather_equations, pre_order=True)
+    inference_utils.traverse_op(op, gather_equations)
 
   if isinstance(global_equation_system, eqns.Unsatisfiable):
     raise ValueError(
@@ -1860,10 +1899,7 @@ def infer_layout(module: ir.Module, enable_smem_inference: bool = False):
         "user-provided layout casts are unsatisfiable."
     )
 
-  if not enable_smem_inference:
-    global_equation_system, ctx = _drop_smem(global_equation_system, ctx)
-
-  propagation_hints, constraints = derive_hints_and_constraints(ctx.operand_and_results_for_variable)
+  propagation_hints, constraints = derive_hints_and_constraints(ctx.value_sites_for_variable)
   hints = reduce_hints(hints + propagation_hints, global_equation_system.assignments)  # pytype: disable=attribute-error
   global_equation_system &= eqns.EquationSystem(constraints=constraints)
   assert not isinstance(global_equation_system, eqns.Unsatisfiable)
@@ -1876,7 +1912,8 @@ def infer_layout(module: ir.Module, enable_smem_inference: bool = False):
 
   # Attempt to find assignments that satisfy the equation system.
   solution = find_assignments_for(
-      ctx.operand_and_results_for_variable.keys(), global_equation_system, hints
+      list(ctx.value_sites_for_variable.keys()), global_equation_system,
+      hints
   )
 
   if isinstance(solution, eqns.Unsatisfiable):
@@ -1885,21 +1922,15 @@ def infer_layout(module: ir.Module, enable_smem_inference: bool = False):
         "user-provided layout casts are unsatisfiable."
     )
 
-  layout_for_operand_or_result = {
+  layout_for_value_site = {
       k: solution[v]
-      for v, ks in ctx.operand_and_results_for_variable.items()
+      for v, ks in ctx.value_sites_for_variable.items()
       for k in ks
   }
 
   # Assigns the layouts that we found to the ops.
-  assign_layouts(layout_for_operand_or_result, enable_smem_inference)
+  assign_layouts(layout_for_value_site)
 
   # Sanity check: ensure that all ops have the right number of in/out layouts.
   for op in module.body:
-    inference_utils.traverse_op(
-        op,
-        partial(
-            _ensure_all_layouts_are_set,
-            enable_smem_inference=enable_smem_inference,
-        ),
-    )
+    inference_utils.traverse_op(op, _ensure_all_layouts_are_set)

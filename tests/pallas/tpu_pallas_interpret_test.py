@@ -26,7 +26,7 @@ from absl.testing import absltest
 from absl.testing import parameterized
 import jax
 from jax._src import test_util as jtu
-import jax._src.pallas.mosaic.interpret as mosaic_interpret
+from jax._src.pallas.mosaic.interpret import interpret_pallas_call as mosaic_interpret
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp

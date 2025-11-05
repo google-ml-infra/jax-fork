@@ -1,0 +1,32 @@
+name: Culprit Finder Workflow
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      workflow-to-debug:
+        description: "Which workflow should be run?"
+        type: string
+        default: ""
+        required: true
+      json_vars:
+        type: string
+        description: 'A JSON string of key-value pairs that will be passed as environment variables to the workflow. (e.g., {"NAME": "test", "VERSION": "1.2.3"})'
+        required: false
+        default: '{"TEST": "my-cli-test"}'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+
+permissions: {}
+
+jobs:
+  bisect-hello-world:
+    if: ${{ inputs.workflow-to-debug == 'hello_world.yml' }}
+    uses: ./.github/workflows/hello_world.yml
+    
+    name: Bisect Hello World
+    with:
+      json_vars: ${{ inputs.json_vars }}

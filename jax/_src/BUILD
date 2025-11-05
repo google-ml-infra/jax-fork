@@ -816,6 +816,7 @@ pytype_strict_library(
         ":batching",
         ":core",
         ":effects",
+        ":frozen_dict",
         ":hashable_array",
         ":layout",
         ":mlir",
@@ -835,6 +836,7 @@ pytype_strict_library(
         ":dtypes",
         ":lax",
         ":tree_util",
+        ":typing",
         ":util",
     ] + py_deps("numpy"),
 )
@@ -933,7 +935,6 @@ pytype_strict_library(
     name = "batching",
     srcs = ["interpreters/batching.py"],
     deps = [
-        ":ad",
         ":ad_util",
         ":config",
         ":core",
@@ -1070,7 +1071,6 @@ pytype_strict_library(
     visibility = ["//jax:internal"] + jax_visibility("pretty_printer"),
     deps = [
         ":config",
-        ":util",
         "//jax/_src/lib",
     ],
 )
@@ -1082,6 +1082,23 @@ pytype_strict_library(
         ":traceback_util",
         ":xla_bridge",
         "//jax/_src/lib",
+    ],
+)
+
+pytype_strict_library(
+    name = "pmap",
+    srcs = ["pmap.py"],
+    deps = [
+        ":api",
+        ":core",
+        ":lax",
+        ":mesh",
+        ":shard_map",
+        ":stages",
+        ":traceback_util",
+        ":tree_util",
+        ":util",
+        ":xla_bridge",
     ],
 )
 
@@ -1163,9 +1180,10 @@ pytype_strict_library(
     deps = [
         ":ad",
         ":ad_util",
+        ":batching",
         ":core",
+        ":dtypes",
         ":effects",
-        ":partial_eval",
         ":tree_util",
         ":util",
     ],
@@ -1289,7 +1307,6 @@ pytype_strict_library(
     ]),
     deps = [
         ":api",
-        ":batching",
         ":config",
         ":core",
         ":cudnn",
@@ -1297,7 +1314,6 @@ pytype_strict_library(
         ":deprecations",
         ":dtypes",
         ":lax",
-        ":mlir",
         ":named_sharding",
         ":numpy",
         ":partition_spec",
@@ -1402,6 +1418,7 @@ pytype_strict_library(
         ":traceback_util",
         ":tree_util",
         ":typing",
+        "//jax/_src/lib",
     ] + py_deps("numpy"),
 )
 
@@ -1429,6 +1446,7 @@ pytype_strict_library(
     deps = [
         ":config",
         ":util",
+        "//jax/_src/lib",
     ],
 )
 
@@ -1562,8 +1580,5 @@ pytype_strict_library(
 pytype_strict_library(
     name = "ref",
     srcs = ["ref.py"],
-    deps = [
-        ":core",
-        ":typing",
-    ],
+    deps = [":core"],
 )

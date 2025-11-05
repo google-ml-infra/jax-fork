@@ -54,10 +54,6 @@ from .layouts import (
     to_layout_attr as to_layout_attr,
 )
 
-from .transform_inference import (
-    infer_transforms as infer_transforms,
-)
-
 from .fragmented_array import (
     FragmentedArray as FragmentedArray,
     FragmentedLayout as FragmentedLayout,
@@ -70,6 +66,8 @@ from .fragmented_array import (
     WGMMA_ROW_LAYOUT as WGMMA_ROW_LAYOUT,
     WGMMA_COL_LAYOUT as WGMMA_COL_LAYOUT,
     WGMMA_TRANSPOSED_LAYOUT as WGMMA_TRANSPOSED_LAYOUT,
+    WGMMA_LAYOUT_UPCAST_2X as WGMMA_LAYOUT_UPCAST_2X,
+    WGMMA_LAYOUT_UPCAST_4X as WGMMA_LAYOUT_UPCAST_4X,
     TMEM_NATIVE_LAYOUT as TMEM_NATIVE_LAYOUT,
     TMA_GATHER_INDICES_LAYOUT as TMA_GATHER_INDICES_LAYOUT,
     tmem_native_layout as tmem_native_layout,

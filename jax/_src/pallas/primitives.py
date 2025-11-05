@@ -701,6 +701,16 @@ def store(x_ref_or_view, idx, val, *, mask=None, eviction_policy=None) -> None:
   _ = swap(x_ref_or_view, idx, val, mask=mask, eviction_policy=eviction_policy,
            _function_name="store")
 
+
+def _handle_small(dtype: jax.typing.DTypeLike):
+  """Ugly workaround to support types that don't allow automatic promotion."""
+  if dtype == jnp.int4:
+    return jnp.int8
+  if dtype == jnp.float8_e4m3b11fnuz:
+    return jnp.bfloat16
+  return dtype
+
+
 def dot(a, b, trans_a: bool = False, trans_b: bool = False,
         allow_tf32: bool | None = None, precision=None):
   if (a.ndim != 2) or (b.ndim != 2):
@@ -712,13 +722,7 @@ def dot(a, b, trans_a: bool = False, trans_b: bool = False,
       raise ValueError("Only one of allow_tf32 and precision can be specified")
     precision = lax.Precision.HIGH if allow_tf32 else lax.Precision.HIGHEST
 
-  def _handle_f8(dtype: jax.typing.DTypeLike):
-    """Ugly workaround to support float8_e4m3b11fnuz in dot."""
-    if dtype == jnp.float8_e4m3b11fnuz:
-      return jnp.bfloat16
-    return dtype
-
-  dtype = jnp.promote_types(_handle_f8(a.dtype), _handle_f8(b.dtype))
+  dtype = jnp.promote_types(_handle_small(a.dtype), _handle_small(b.dtype))
   out_dtype = jnp.int32 if jnp.issubdtype(dtype, jnp.integer) else jnp.float32
   return jax.lax.dot_general(
       a,
@@ -962,6 +966,48 @@ def _run_scoped_lowering_rule(ctx, *args, jaxpr, collective_axes):
   return mlir.lower_fun(_lower_fun, multiple_results=True)(ctx, *args)
 
 
+get_global_p = jax_core.Primitive("get_global")
+get_global_p.multiple_results = False
+get_global_p.ref_primitive = True
+jax_core._ref_allocating_primitives.add(get_global_p)
+
+def get_global(what: pallas_core.ScratchShape) -> jax.Array:
+  """Returns a global reference that persists across all kernel invocations.
+
+  Each call to get_global returns a different and unique reference, but one that
+  is stable across invocations of the kernel body.
+
+  Args:
+    what: The reference type to allocate. Each backend has its own set of
+      reference types (e.g., `plgpu.SemaphoreType.REGULAR` for GPU).
+
+  Example::
+
+    sem_ref = pl.get_global(plgpu.SemaphoreType.REGULAR)
+    pl.semaphore_signal(sem_ref)
+    pl.semaphore_wait(sem_ref)
+  """
+  ref_aval = what.get_ref_aval()
+  return get_global_p.bind(what=ref_aval)
+
+
+@get_global_p.def_abstract_eval
+def _get_global_abstract_eval(*, what):
+  return what
+
+
+def _get_global_discharge_rule(in_avals, out_avals, *, what):
+  del in_avals, out_avals, what
+  raise NotImplementedError(
+      "get_global discharge is not supported in interpret mode."
+  )
+
+
+state_discharge.register_discharge_rule(get_global_p)(
+    _get_global_discharge_rule
+)
+
+
 def _get_ref_and_transforms(ref):
   if isinstance(ref, state.TransformedRef):
     return ref.ref, ref.transforms
@@ -1088,13 +1134,15 @@ def _semaphore_signal_abstract_eval(
   ) = tree_util.tree_unflatten(args_tree, avals)
   check_sem_avals(sem_aval, sem_transforms_avals, "signal")
   if value_aval.dtype != jnp.dtype("int32"):
-    raise ValueError("Must signal an int32 value.")
+    raise ValueError(f"Must signal an int32 value, but got {value_aval.dtype}")
   effs : set[effects.Effect] = set()
   if device_id_avals is not None:
     device_id_flat_avals = tree_util.tree_leaves(device_id_avals)
     for aval in device_id_flat_avals:
       if aval.dtype != jnp.dtype("int32"):
-        raise ValueError("`device_id`s must be an int32 value.")
+        raise ValueError(
+            f"`device_id`s must be an int32 value, but got {aval.dtype}"
+        )
     effs.add(pallas_core.comms_effect)
   return [], effs
 
@@ -1282,6 +1330,11 @@ def device_id_to_logical(
     # Mesh means we are passed the mesh coordinates for the device
     device_ids = tree_util.tree_leaves(device_id)
     mesh_strides = mesh_context.mesh_strides
+    if len(device_ids) != len(mesh_strides):
+      raise ValueError(
+          "Number of device ids must match the number of mesh axes, but got"
+          f" {len(device_ids)} ids for a {len(mesh_strides)}D mesh."
+      )
 
     i32 = ir.IntegerType.get_signless(32)
     if len(device_ids) == 0:

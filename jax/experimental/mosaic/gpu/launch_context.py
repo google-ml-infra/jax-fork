@@ -23,6 +23,7 @@ from typing import Any, Literal
 
 from jax._src.lib import mosaic_gpu_dialect as mgpu_dialect
 from jaxlib.mlir import ir
+from jaxlib.mlir.dialects import _gpu_ops_gen
 from jaxlib.mlir.dialects import arith
 from jaxlib.mlir.dialects import builtin
 from jaxlib.mlir.dialects import func
@@ -32,9 +33,9 @@ from jaxlib.mlir.dialects import memref
 from jaxlib.mlir.dialects import nvvm
 import numpy as np
 
+from . import fragmented_array as fa
 from . import profiler
 from . import utils
-from . import fragmented_array as fa
 
 TMA_DESCRIPTOR_BYTES = 128
 TMA_DESCRIPTOR_ALIGNMENT = 64
@@ -304,7 +305,7 @@ class Scratch:
              : (!llvm.array<256 x i8>) -> !llvm.ptr
 
   """
-  def __init__(self, gpu_launch_op: gpu.LaunchOp):
+  def __init__(self, gpu_launch_op: _gpu_ops_gen.LaunchOp):
     self.next_offset: int = 0
     self.host_init: list[Callable[[ir.Value], None]] = []
     self._ops_created = False
@@ -829,7 +830,14 @@ class LaunchContext:
           )
       idx = self.cluster_idx(collective)
       rem_collective_size = collective_size
-      for dim, slice_size in enumerate(slice_shape[:-1]):
+      has_swizzle = (
+          swizzle is not None
+          and swizzle != mgpu_dialect.SwizzlingMode.kNoSwizzle
+      )
+      # We can partition the minormost dim if there's no swizzling.
+      for dim, slice_size in enumerate(
+          slice_shape[:-1] if has_swizzle else slice_shape
+      ):
         if slice_size % rem_collective_size == 0:
           partition_dim(dim, idx, rem_collective_size)
           rem_collective_size = 1
@@ -1509,7 +1517,7 @@ def _recompute_peer_id(peer_id: ir.Value, fuel=8) -> ir.Value:
   if op.OPERATION_NAME.startswith("arith."):
     new_operands = [_recompute_peer_id(x, fuel - 1) for x in op.operands]
     result_types = [r.type for r in op.results]
-    new_attributes = {na.name: na.attr for na in op.attributes}
+    new_attributes = {na: op.attributes[na] for na in op.attributes}
     new_op = ir.Operation.create(
         op.OPERATION_NAME, result_types, new_operands, new_attributes
     )

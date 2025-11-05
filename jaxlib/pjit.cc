@@ -51,6 +51,7 @@ limitations under the License.
 #include "nanobind/stl/string.h"  // IWYU pragma: keep
 #include "nanobind/stl/string_view.h"  // IWYU pragma: keep
 #include "nanobind/stl/vector.h"  // IWYU pragma: keep
+#include "jaxlib/call_location.h"
 #include "jaxlib/config.h"
 #include "jaxlib/guard_lib.h"
 #include "jaxlib/jax_jit.h"
@@ -72,6 +73,7 @@ limitations under the License.
 #include "xla/python/ifrt/device_list.h"
 #include "xla/python/ifrt/executable.h"
 #include "xla/python/ifrt/memory.h"
+#include "xla/python/ifrt/shape.h"
 #include "xla/python/ifrt/sharding.h"
 #include "xla/python/ifrt/user_context.h"
 #include "xla/python/nb_helpers.h"
@@ -236,10 +238,10 @@ std::shared_ptr<PjitFunctionCache::Cache> PjitFunctionCache::DefaultCache() {
     nb::gil_scoped_release release;
     // Acquire a mutex to avoid problems where the gil is released during
     // cache insertion and then a second thread invalidates the cache order.
-    self->mu_.Lock();
+    self->mu_.lock();
   }
   absl::Cleanup unlock = [&self]() ABSL_UNLOCK_FUNCTION(self->mu_) {
-    self->mu_.Unlock();
+    self->mu_.unlock();
   };
   Key key;
   key.function = function;
@@ -519,8 +521,19 @@ absl::StatusOr<std::vector<xla::ifrt::ArrayRef>> PrepareIfrtInputs(
            (!py_array.committed() && sharding_num_devices == 1));
 
     if (!in_device_local_layout.is_none()) {
-      TF_ASSIGN_OR_RETURN(auto arr_layout,
-                          py_array.ifrt_array()->pjrt_layout());
+      xla::ifrt::Array* ifrt_array = py_array.ifrt_array();
+      TF_ASSIGN_OR_RETURN(auto arr_layout, ifrt_array->pjrt_layout());
+      if (arr_layout == nullptr) {
+        TF_ASSIGN_OR_RETURN(
+            xla::ifrt::Shape shard_shape,
+            ifrt_array->sharding().GetShardShape(ifrt_array->shape()));
+        TF_ASSIGN_OR_RETURN(
+            arr_layout,
+            executable.ifrt_loaded_executable()->client()->GetDefaultPjRtLayout(
+                ifrt_array->dtype(), shard_shape.dims(),
+                ifrt_array->sharding().devices()->devices().front(),
+                ifrt_array->sharding().memory_kind()));
+      }
       xla::Layout in_xc_layout = nb::cast<xla::Layout>(
           in_device_local_layout.attr("_to_xla_layout")(py_array.dtype()));
       if (in_xc_layout != arr_layout->xla_layout()) {
@@ -772,7 +785,7 @@ absl::StatusOr<nb::object> PjitFunction::Call(nb::handle callable,
     dynamic_arg_signatures.push_back(std::move(arg));
   }
 
-  xla::ifrt::UserContextScope user_context_scope(PyUserContext::Create());
+  PyUserContextScope user_context_scope;
   // A vector of [num_inputs].
   auto num_args_arrays = PrepareIfrtInputs(
       *cache_entry->executable, flat_dynamic_args, dynamic_arg_signatures,
@@ -793,6 +806,8 @@ absl::StatusOr<nb::object> PjitFunction::Call(nb::handle callable,
     execute_options.execution_stream_id =
         tsl::Env::Default()->GetCurrentThreadId();
   }
+  PopulateCallLocation(execute_options,
+                       xla::ifrt::UserContextScope::current().get());
 
   // A vector of [num_outputs].
   std::vector<xla::ifrt::ArrayRef> output_arrays;

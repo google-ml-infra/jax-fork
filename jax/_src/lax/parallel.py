@@ -27,6 +27,7 @@ from jax._src import core
 from jax._src import config
 from jax._src import dispatch
 from jax._src import dtypes
+from jax._src import effects as effects_lib
 from jax._src import tree_util
 from jax._src.sharding_impls import (SPMDAxisContext, ShardingContext,
                                      NamedSharding, PartitionSpec as P)
@@ -35,6 +36,7 @@ from jax._src.interpreters import ad
 from jax._src.interpreters import batching
 from jax._src.interpreters import mlir
 from jax._src.interpreters import pxla
+from jax._src.core import check_unreduced_args
 from jax._src.mesh import get_abstract_mesh
 from jax._src.core import abstract_token, pvary
 from jax._src.lax import control_flow
@@ -927,7 +929,8 @@ def _allreduce_effectful_abstract_eval(*args, axes, axis_index_groups):
     if len(pos_axes) != 0:
       raise ValueError(f"axis_index_groups can only be used with reductions over "
                        f"named axes, but got: {axes}")
-  core.check_avals_context_mesh(args, 'all_reduce')
+  core.check_avals_context_mesh(args, 'psum')
+  check_unreduced_args(args, 'psum')
   out_avals = [
       ShapedArray(lax._reduce_op_shape_rule(arg, axes=pos_axes), arg.dtype,
                   sharding=lax._reduce_op_sharding_rule(arg, axes=pos_axes))
@@ -942,15 +945,14 @@ def _psum_invariant_abstract_eval(name, *args, axes, axis_index_groups):
 
   assert isinstance(axes, tuple)
   _check_axis_names(axes, 'psum')
-  arg_vma = [a.vma for a in args]
-  # If intersection between arg_vma and axes is empty, error
-  if any(not set(axes) & a for a in arg_vma):
-    raise ValueError(
-        f"Collective {name} must be applied to a device-varying "
-        f"type, but got {arg_vma} for collective acting "
-        f"over axis name {axes}. Please open an issue at "
-        "https://github.com/jax-ml/jax/issues, and as a temporary "
-        "workaround pass the check_vma=False argument to `jax.shard_map`")
+  for a in args:
+    # If intersection between arg_vma and axes is empty, error
+    if not set(axes) & a.vma:
+      raise ValueError(
+          "psum is a variant->invariant collective. This means that the axis"
+          " names mentioned in `axes` passed to `psum` must be present in"
+          f" `jax.typeof(inp).vma`. Got axes={axes} and"
+          f" jax.typeof(inp).vma={a.vma}")
 
   named_axes = tuple(axis for axis in axes if not isinstance(axis, int))
   pos_axes = tuple(axis for axis in axes if isinstance(axis, int))
@@ -959,7 +961,8 @@ def _psum_invariant_abstract_eval(name, *args, axes, axis_index_groups):
       raise ValueError(
           "axis_index_groups can only be used with reductions over "
           f"named axes, but got: {axes}")
-  core.check_avals_context_mesh(args, 'all_reduce')
+  core.check_avals_context_mesh(args, name)
+  check_unreduced_args(args, name)
   out_avals = [
       core.ShapedArray(
           lax._reduce_op_shape_rule(arg, axes=pos_axes), arg.dtype,
@@ -985,6 +988,13 @@ def _check_axis_names(axes, api_name):
       raise NameError(
           f"Found an unbound axis name: {name}. To fix this, please call"
           f" {api_name} under `jax.shard_map`.")
+
+# TODO(phawkins): remove this function and flag if this doesn't break anyone.
+def _get_channel(ctx):
+  if config.jax_collectives_common_channel_id.value:
+    return mlir.COLLECTIVE_CHANNEL_ID
+  else:
+    return ctx.module_context.new_channel_id()
 
 def _allreduce_lowering(prim, pos_fn, ctx, *args, axes, axis_index_groups):
   if axis_index_groups is not None and ("tpu" in ctx.module_context.platforms):
@@ -1016,10 +1026,9 @@ def _allreduce_lowering(prim, pos_fn, ctx, *args, axes, axis_index_groups):
 
   def all_reduce(aval, x):
     if is_spmd:
-      channel = ctx.module_context.new_channel()
       other_args = dict(
           channel_handle=hlo.ChannelHandle.get(
-              channel, mlir.DEVICE_TO_DEVICE_TYPE),
+              _get_channel(ctx), mlir.DEVICE_TO_DEVICE_TYPE),
           use_global_device_ids=ir.BoolAttr.get(True))
     else:
       other_args = {}
@@ -1116,9 +1125,11 @@ def _pcollectives_lowering_common(ctx, *, axis_name, perm, op_name):
       and axis_context.manual_axes
   )
   if is_manual:
-    channel = ctx.module_context.new_channel()
     other_args = dict(
-        channel_handle=hlo.ChannelHandle.get(channel, mlir.DEVICE_TO_DEVICE_TYPE))
+        channel_handle=hlo.ChannelHandle.get(
+            _get_channel(ctx), mlir.DEVICE_TO_DEVICE_TYPE
+        )
+    )
   else:
     other_args = {}
   return full_perm, other_args
@@ -1159,6 +1170,7 @@ def _ppermute_batcher(axis_data, vals_in, dims_in, axis_name, perm):
 def _raise_to_shaped_abstract_eval(x, *, axis_name, **params):
   _check_axis_names(axis_name, 'ppermute')
   collective_vma_rule('ppermute', axis_name, x)
+  check_unreduced_args([x], 'ppermute')
   return x
 
 ppermute_p = core.Primitive('ppermute')
@@ -1205,7 +1217,7 @@ def _psend_lowering_gpu(ctx, x, *, axis_name, perm):
   return send_op.results
 
 
-mlir.lowerable_effects.add_type(SingleSideCollectiveEffect)
+effects_lib.lowerable_effects.add_type(SingleSideCollectiveEffect)
 
 
 def _psend_abstract_eval(x, *, axis_name, **params):
@@ -1304,11 +1316,11 @@ def _pbroadcast_lowering(ctx, x, *, axis_name, source):
       (SPMDAxisContext, ShardingContext),
   )
   if is_spmd:
-    # We want to emit the collective-broadcast with global device IDs and a unique
+    # We want to emit the collective-broadcast with global device IDs and a
     # channel ID, as otherwise it interprets the devices as replicas instead
     # of partitions - and XLA is configured with only a single replica.
-    channel = ctx.module_context.new_channel()
-    channel_handle = hlo.ChannelHandle.get(channel, mlir.DEVICE_TO_DEVICE_TYPE)
+    channel_handle = hlo.ChannelHandle.get(_get_channel(ctx),
+                                           mlir.DEVICE_TO_DEVICE_TYPE)
     other_args = dict(channel_handle=channel_handle)
   else:
     other_args = {}
@@ -1357,11 +1369,11 @@ def _all_to_all_lowering(
       (SPMDAxisContext, ShardingContext),
   )
   if is_spmd:
-    # We want to emit the all-gather with global device IDs and a unique
+    # We want to emit the all-gather with global device IDs and a
     # channel ID, as otherwise it interprets the devices as replicas instead
     # of partitions - and XLA is configured with only a single replica.
-    channel = ctx.module_context.new_channel()
-    channel_handle = hlo.ChannelHandle.get(channel, mlir.DEVICE_TO_DEVICE_TYPE)
+    channel_handle = hlo.ChannelHandle.get(_get_channel(ctx),
+                                           mlir.DEVICE_TO_DEVICE_TYPE)
     other_args = dict(channel_handle=channel_handle)
   else:
     other_args = {}
@@ -1476,6 +1488,7 @@ def _all_to_all_effectful_abstract_eval(
   if not isinstance(axis_name, (list, tuple)):
     axis_name = (axis_name,)
   _check_axis_names(axis_name, 'all_to_all')
+  check_unreduced_args([input_aval], 'all_to_all')
   shape = list(input_aval.shape)
   axis_size = (
       _axis_size(axis_name)
@@ -1518,7 +1531,7 @@ def _ragged_all_to_all_lowering(
       ctx.module_context.axis_context, (SPMDAxisContext, ShardingContext))
   if is_spmd:
     ragged_all_to_all_attrs['channel_id'] = ir.IntegerAttr.get(
-        ir.IntegerType.get_signless(64), ctx.module_context.new_channel()
+        ir.IntegerType.get_signless(64), _get_channel(ctx)
     )
 
   return hlo.CustomCallOp(
@@ -1637,6 +1650,7 @@ mlir.register_lowering(ragged_all_to_all_p, _ragged_all_to_all_lowering)
 batching.fancy_primitive_batchers[ragged_all_to_all_p] = _ragged_all_to_all_batched_collective
 batching.skippable_batchers[ragged_all_to_all_p] = partial(_names_in_param, 'axis_name')
 
+
 def insert_collective_pvary(axis_name, x):
   if not config._check_vma.value:
     return x
@@ -1712,7 +1726,9 @@ def all_gather(x, axis_name, *, axis_index_groups=None, axis=0, tiled=False):
     [ 4  5  6  7]]]
   """
   if not isinstance(axis_name, tuple):
-    axis_name = axis_name,
+    axis_name = (axis_name,)
+  if not axis_name:
+    return x
   axis_index_groups = _canonicalize_axis_index_groups(axis_index_groups)
   axis_size = _axis_size(axis_name, axis_index_groups)
   def bind(leaf):
@@ -1745,13 +1761,12 @@ def _all_gather_lowering(ctx, x, *, all_gather_dimension, axis_name,
   replica_groups = _replica_groups(ctx.module_context.axis_env, axis_name,
                                     axis_index_groups)
   if is_spmd:
-    # We want to emit the all-gather with global device IDs and a unique
+    # We want to emit the all-gather with global device IDs and a
     # channel ID, as otherwise it interprets the devices as replicas instead
     # of partitions - and XLA is configured with only a single replica.
-    channel = ctx.module_context.new_channel()
     other_args = dict(
         channel_handle=hlo.ChannelHandle.get(
-            channel, mlir.DEVICE_TO_DEVICE_TYPE),
+            _get_channel(ctx), mlir.DEVICE_TO_DEVICE_TYPE),
         use_global_device_ids=ir.BoolAttr.get(True))
   else:
     other_args = {}
@@ -1782,6 +1797,7 @@ def _all_gather_effectful_abstract_eval(
   if not isinstance(axis_name, (list, tuple)):
     axis_name = (axis_name,)
   _check_axis_names(axis_name, 'all_gather')
+  check_unreduced_args([x_aval], 'all_gather')
   new_shape = list(x_aval.shape)
   if tiled:
     new_shape[all_gather_dimension] *= axis_size
@@ -1880,7 +1896,9 @@ def all_gather_invariant(x, axis_name, *, axis: int = 0, tiled: bool = False):
     which is Varying -> Varying.
   """
   if not isinstance(axis_name, tuple):
-    axis_name = axis_name,
+    axis_name = (axis_name,)
+  if not axis_name:
+    return x
   axis_size = _axis_size(axis_name, None)
   axes_ = frozenset(axis_name)
   def bind(leaf):
@@ -1900,6 +1918,7 @@ def _all_gather_invariant_effectful_abstract_eval(
     x_aval, *, all_gather_dimension, axis_name, axis_size, tiled
 ):
   _check_axis_names(axis_name, 'all_gather_invariant')
+  check_unreduced_args([x_aval], 'all_gather_invariant')
   new_shape = list(x_aval.shape)
   if tiled:
     new_shape[all_gather_dimension] *= axis_size
@@ -1968,13 +1987,12 @@ def _reduce_scatter_lowering(
       (SPMDAxisContext, ShardingContext),
   )
   if is_spmd:
-    # We want to emit the all-gather with global device IDs and a unique
+    # We want to emit the all-gather with global device IDs and a
     # channel ID, as otherwise it interprets the devices as replicas instead
     # of partitions - and XLA is configured with only a single replica.
-    channel = ctx.module_context.new_channel()
     other_args = dict(
         channel_handle=hlo.ChannelHandle.get(
-            channel, mlir.DEVICE_TO_DEVICE_TYPE),
+            _get_channel(ctx), mlir.DEVICE_TO_DEVICE_TYPE),
         use_global_device_ids=ir.BoolAttr.get(True))
   else:
     other_args = {}
@@ -2006,6 +2024,7 @@ def _reduce_scatter_effectful_abstract_eval(
   if not isinstance(axis_name, (list, tuple)):
     axis_name = (axis_name,)
   _check_axis_names(axis_name, 'reduce_scatter')
+  check_unreduced_args([x_aval], 'reduce_scatter')
   new_shape = list(x_aval.shape)
   scatter_dim_input_size = x_aval.shape[scatter_dimension]
   if tiled:
@@ -2163,7 +2182,9 @@ def psum_scatter(x, axis_name, *, scatter_dimension=0, axis_index_groups=None,
    [16 18]]
   """
   if not isinstance(axis_name, tuple):
-    axis_name = axis_name,
+    axis_name = (axis_name,)
+  if not axis_name:
+    return x
   axis_size = _axis_size(axis_name, axis_index_groups)
   axis_index_groups = _canonicalize_axis_index_groups(axis_index_groups)
   def bind(leaf):
@@ -2338,3 +2359,406 @@ def _pvary_transpose_rule(cts, *args, axes, axis_index_groups):
                                          axis_index_groups=axis_index_groups)
   return tree_util.tree_unflatten(treedef, nonzero_in_cts)
 ad.deflinear2(core.pvary_p, _pvary_transpose_rule)
+
+####################### all_gather_reduced ###########################
+
+# Varying -> Reduced collective
+def all_gather_reduced(x, axis_name, *, axis: int = 0, tiled: bool = False):
+  if not isinstance(axis_name, tuple):
+    axis_name = (axis_name,)
+  if not axis_name:
+    return x
+  axis_size = _axis_size(axis_name, None)
+  def bind(leaf):
+    return all_gather_reduced_p.bind(
+        leaf,
+        all_gather_dimension=canonicalize_axis(
+            axis, np.ndim(leaf) if tiled else np.ndim(leaf) + 1),
+        axis_name=axis_name, axis_size=axis_size, tiled=tiled)
+  return tree_util.tree_map(bind, x)
+
+all_gather_reduced_p = core.Primitive('all_gather_reduced')
+
+def _all_gather_reduced_effectful_abstract_eval(
+    x_aval, *, all_gather_dimension, axis_name, axis_size, tiled
+):
+  _check_axis_names(axis_name, 'all_gather_reduced')
+  check_unreduced_args([x_aval], 'all_gather_reduced')
+  if not x_aval.vma:
+    raise ValueError('all_gather_reduced only accepts inputs that are'
+                     f' varying. Got {x_aval.str_short(True)}')
+  # If the intersection between x.vma and axis_name is empty, error
+  if not (x_aval.vma & set(axis_name)):
+    raise ValueError(
+        'all_gather_reduced is a Varying -> Reduced collective. This means '
+        f'that the {axis_name=} passed to `all_gather_reduced` must be present '
+        f'in jax.typeof(x).vma={x_aval.vma}')
+  if x_aval.sharding.spec.reduced & set(axis_name):
+    raise ValueError(
+        "all_gather_reduced's input cannot be reduced across the axis_name"
+        f" provided. Got x={x_aval.str_short(True)} and {axis_name=}")
+
+  new_shape = list(x_aval.shape)
+  if tiled:
+    new_shape[all_gather_dimension] *= axis_size
+  else:
+    new_shape.insert(all_gather_dimension, axis_size)
+
+  x_aval_s = x_aval.sharding
+  new_reduced = x_aval_s.spec.reduced | frozenset(axis_name)
+  out_sharding = x_aval_s.update(spec=x_aval_s.spec.update(reduced=new_reduced))
+  out_vma = frozenset(v for v in x_aval.vma if v not in axis_name)
+  return (x_aval.update(shape=new_shape, vma=out_vma, sharding=out_sharding),
+          {*map(core.NamedAxisEffect, axis_name)})
+all_gather_reduced_p.def_effectful_abstract_eval(
+    _all_gather_reduced_effectful_abstract_eval)
+
+
+def _all_gather_reduced_impl(x, *, all_gather_dimension, axis_name, axis_size,
+                             tiled):
+  raise NotImplementedError
+all_gather_reduced_p.def_impl(_all_gather_reduced_impl)
+
+
+def _all_gather_reduced_lowering(
+    ctx, x, *, all_gather_dimension, axis_name, axis_size, tiled,
+    platform=None):
+  return _all_gather_lowering(
+      ctx, x, all_gather_dimension=all_gather_dimension, axis_name=axis_name,
+      axis_index_groups=None, axis_size=axis_size, tiled=tiled,
+      platform=platform)
+
+mlir.register_lowering(all_gather_reduced_p, _all_gather_reduced_lowering)
+for p in ("cuda", "rocm", "tpu"):
+  mlir.register_lowering(all_gather_reduced_p,
+                         partial(_all_gather_reduced_lowering, platform=p),
+                         platform=p)
+
+def _all_gather_reduced_transpose_rule(
+    cts, x, *, all_gather_dimension, axis_name, axis_size, tiled):
+  return (unreduced_psum_scatter(cts, axis_name=axis_name,
+                                 scatter_dimension=all_gather_dimension,
+                                 tiled=tiled),)
+ad.deflinear2(all_gather_reduced_p, _all_gather_reduced_transpose_rule)
+
+def _all_gather_reduced_batched_collective(
+    axis_data, vals_in, dims_in, all_gather_dimension, axis_name, axis_size,
+    tiled):
+  raise NotImplementedError(
+      "Please file an issue at https://github.com/jax-ml/jax/issues")
+batching.fancy_primitive_batchers[all_gather_reduced_p] = _all_gather_reduced_batched_collective
+batching.skippable_batchers[all_gather_reduced_p] = partial(_names_in_param, 'axis_name')
+
+####################### unreduced_psum_scatter ###########################
+
+# Unreduced -> Varying collective
+def unreduced_psum_scatter(x, axis_name, *, scatter_dimension=0, tiled=False):
+  if not isinstance(axis_name, tuple):
+    axis_name = (axis_name,)
+  if not axis_name:
+    return x
+  axis_size = _axis_size(axis_name, None)
+  def bind(leaf):
+    return unreduced_reduce_scatter_p.bind(
+        leaf, axis_name=axis_name, scatter_dimension=scatter_dimension,
+        axis_size=axis_size, tiled=tiled)
+  return tree_util.tree_map(bind, x)
+
+unreduced_reduce_scatter_p = core.Primitive('unreduced_reduce_scatter')
+
+def _unreduced_reduce_scatter_effectful_abstract_eval(
+    x_aval, *, axis_name, scatter_dimension, axis_size, tiled
+):
+  _check_axis_names(axis_name, 'reduce_scatter')
+  if not x_aval.sharding.spec.unreduced:
+    raise ValueError('unreduced_psum_scatter only accepts inputs that are'
+                     f' unreduced. Got {x_aval.str_short(True)}')
+  # If intersection between x.unreduced & axis_name is empty, error
+  if not (x_aval.sharding.spec.unreduced & frozenset(axis_name)):
+    raise ValueError(
+        "unreduced_psum_scatter is a Unreduced -> Varying collective. This"
+        f" means that the {axis_name=} passed to `unreduced_psum_scatter` must"
+        " be present in"
+        f" jax.typeof(x).sharding.spec.unreduced={x_aval.sharding.spec.unreduced}"
+    )
+  if x_aval.vma & set(axis_name):
+    raise ValueError(
+        "unreduced_psum_scatter's input cannot be varying across the axis_name"
+        f" provided. Got x={x_aval.str_short(True)} and {axis_name=}")
+
+  new_shape = list(x_aval.shape)
+  scatter_dim_input_size = x_aval.shape[scatter_dimension]
+  if tiled:
+    if scatter_dim_input_size % axis_size != 0:
+      raise ValueError(f"tiled reduce_scatter operand scatter dimension size "
+                       f"{scatter_dim_input_size} must be divisible by "
+                       f"shard_count {axis_size}")
+    new_shape[scatter_dimension] = scatter_dim_input_size // axis_size
+  else:
+    if scatter_dim_input_size != axis_size:
+      raise ValueError(f"reduce_scatter operand scatter dimension size "
+                       f"{scatter_dim_input_size} must match shard count "
+                       f"{axis_size}")
+    del new_shape[scatter_dimension]
+
+  x_aval_s = x_aval.sharding
+  out_sharding = x_aval_s.update(spec=x_aval_s.spec.update(
+      unreduced=frozenset(i for i in x_aval_s.spec.unreduced if i not in axis_name)))
+  out_vma = x_aval.vma | set(axis_name)
+  return (x_aval.update(shape=new_shape, vma=out_vma, sharding=out_sharding),
+          {*map(core.NamedAxisEffect, axis_name)})
+unreduced_reduce_scatter_p.def_effectful_abstract_eval(
+    _unreduced_reduce_scatter_effectful_abstract_eval)
+
+
+def _unreduced_reduce_scatter_impl(
+    x, *, axis_name, scatter_dimension, axis_size, tiled):
+  raise NotImplementedError
+unreduced_reduce_scatter_p.def_impl(_unreduced_reduce_scatter_impl)
+
+def _unreduced_reduce_scatter_transpose_rule(
+    cts, x, *, axis_name, scatter_dimension, axis_size, tiled):
+  return (all_gather_reduced(cts, axis_name=axis_name, axis=scatter_dimension,
+                             tiled=tiled),)
+ad.deflinear2(unreduced_reduce_scatter_p, _unreduced_reduce_scatter_transpose_rule)
+
+def _unreduced_reduce_scatter_batcher(
+    axis_data, vals_in, dims_in, axis_name, scatter_dimension, axis_size,
+    tiled):
+  raise NotImplementedError(
+      "Please file an issue at https://github.com/jax-ml/jax/issues")
+batching.fancy_primitive_batchers[unreduced_reduce_scatter_p] = _unreduced_reduce_scatter_batcher
+batching.skippable_batchers[unreduced_reduce_scatter_p] = partial(_names_in_param, 'axis_name')
+
+def _unreduced_reduce_scatter_lowering(
+    prim, ctx, x, *, axis_name, scatter_dimension, axis_size, tiled):
+  return _reduce_scatter_lowering(
+      prim, ctx, x, axis_name=axis_name, scatter_dimension=scatter_dimension,
+      axis_size=axis_size, tiled=tiled, axis_index_groups=None)
+mlir.register_lowering(unreduced_reduce_scatter_p,
+                       partial(_unreduced_reduce_scatter_lowering, lax.add_p))
+
+############################## unreduced_psum ###########################
+
+# Unreduced -> Invariant collective
+def unreduced_psum(x, axis_name):
+  if not isinstance(axis_name, (tuple, list)):
+    axis_name = (axis_name,)
+  if not axis_name:
+    return x
+  leaves, treedef = tree_util.tree_flatten(x)
+  out_flat = unreduced_psum_p.bind(*leaves, axes=tuple(axis_name))
+  return tree_util.tree_unflatten(treedef, out_flat)
+
+unreduced_psum_p = core.Primitive('unreduced_psum')
+unreduced_psum_p.multiple_results = True
+
+def _unreduced_psum_abstract_eval(*avals, axes):
+  _check_axis_names(axes, 'psum')
+  for a in avals:
+    if not a.sharding.spec.unreduced:
+      raise ValueError('unreduced_psum only accepts inputs that are'
+                       f' unreduced. Got {a.str_short(True)}')
+    # If intersection between x.unreduced & axis_name is empty, error
+    if not (a.sharding.spec.unreduced & frozenset(axes)):
+      raise ValueError(
+          "unreduced_psum is a Unreduced -> Invariant collective. This"
+          f" means that the {axes=} passed to `unreduced_psum` must"
+          " be present in"
+          f" jax.typeof(x).sharding.spec.unreduced={a.sharding.spec.unreduced}")
+    if a.vma & set(axes):
+      raise ValueError(
+          "unreduced_psum's input cannot be varying across the "
+          f" axis_name provided. Got x={a.str_short(True)} and {axes=}")
+  if any(isinstance(a, int) for a in axes):
+    raise ValueError('unreduced_psum does not accept integer axis_name.'
+                     f' Got axis_name={axes}')
+
+  core.check_avals_context_mesh(avals, 'unreduced_psum')
+  out_avals = []
+  for a in avals:
+    a_s = a.sharding
+    out_sharding = a_s.update(spec=a_s.spec.update(
+        unreduced=frozenset(u for u in a_s.spec.unreduced if u not in axes)))
+    out_avals.append(a.update(sharding=out_sharding))
+  return out_avals, {core.NamedAxisEffect(axis) for axis in axes}
+unreduced_psum_p.def_effectful_abstract_eval(_unreduced_psum_abstract_eval)
+
+
+def _unreduced_psum_lowering(ctx, *args, axes):
+  return _allreduce_lowering(lax.add_p, lax.reduce_sum, ctx, *args,
+                             axes=axes, axis_index_groups=None)
+mlir.register_lowering(unreduced_psum_p, _unreduced_psum_lowering)
+
+def _unreduced_psum_batcher(axis_data, vals_in, dims_in, axes):
+  raise NotImplementedError
+batching.fancy_primitive_batchers[unreduced_psum_p] = _unreduced_psum_batcher
+batching.skippable_batchers[unreduced_psum_p] = partial(_names_in_param, 'axes')
+
+def _unreduced_psum_transpose_rule(cts, *args, axes):
+  def f(ct, arg):
+    assert ad.is_undefined_primal(arg)
+    return ad.Zero(arg.aval) if type(ct) is ad.Zero else ct
+  cts = map(f, cts, args)
+  nonzero_out_cts, treedef = tree_util.tree_flatten(cts)
+  nonzero_in_cts = preduced_p.bind(*nonzero_out_cts, axes=axes)
+  return tree_util.tree_unflatten(treedef, nonzero_in_cts)
+ad.deflinear2(unreduced_psum_p, _unreduced_psum_transpose_rule)
+
+############################## preduced #################################
+
+# Invariant -> Reduced no-op cast. It's the transpose of unreduced_psum.
+def preduced(x, axis_name):
+  axes = (axis_name,) if not isinstance(axis_name, tuple) else axis_name
+  if not axes:
+    return x
+  x_flat, treedef = tree_util.tree_flatten(x)
+  out_flat = preduced_p.bind(*x_flat, axes=axes)
+  return tree_util.tree_unflatten(treedef, out_flat)
+
+preduced_p = core.Primitive('preduced')
+preduced_p.multiple_results = True
+preduced_p.def_impl(lambda *args, axes: args)
+mlir.register_lowering(preduced_p, lambda ctx, *x, axes: x)
+
+def _preduced_abstract_eval(*avals, axes):
+  assert isinstance(axes, tuple)
+  _check_axis_names(axes, 'preduced')
+  check_unreduced_args(avals, 'preduced')
+  for a in avals:
+    # If there is intersection between arg_vma and axes, error
+    if a.vma & set(axes):
+      raise ValueError(
+          "preduced is a Invariant->Reduced collective. This means that the"
+          " axis names mentioned in `axes` passed to `preduced` must not be"
+          f" present in `jax.typeof(inp).vma`. Got axes={axes} and"
+          f" jax.typeof(inp).vma={a.vma}")
+    if a.sharding.spec.reduced & set(axes):
+      raise ValueError(
+          "preduced input cannot be reduced across the axis_name"
+          f" provided. Got x={a.str_short(True)} and axis_name={axes}")
+
+  out_avals = []
+  for a in avals:
+    a_s = a.sharding
+    new_reduced = a_s.spec.reduced | frozenset(axes)
+    out_sharding = a_s.update(mesh=get_abstract_mesh(),
+                              spec=a_s.spec.update(reduced=new_reduced))
+    out_avals.append(a.update(sharding=out_sharding))
+  return out_avals
+preduced_p.def_abstract_eval(_preduced_abstract_eval)
+
+def _preduced_transpose_rule(cts, *args, axes):
+  def f(ct, arg):
+    assert ad.is_undefined_primal(arg)
+    return ad.Zero(arg.aval) if type(ct) is ad.Zero else ct
+  cts = map(f, cts, args)
+  nonzero_out_cts, treedef = tree_util.tree_flatten(cts)
+  nonzero_in_cts = unreduced_psum_p.bind(*nonzero_out_cts, axes=axes)
+  return tree_util.tree_unflatten(treedef, nonzero_in_cts)
+ad.deflinear2(preduced_p, _preduced_transpose_rule)
+
+def _preduced_batcher(vals_in, dims_in, *, axes):
+  raise NotImplementedError
+batching.primitive_batchers[preduced_p] = _preduced_batcher
+
+######################## vary_unreduced_cast #######################
+
+# Varying -> Unreduced cast
+def vary_unreduced_cast(x, axis_name):
+  axes = (axis_name,) if not isinstance(axis_name, tuple) else axis_name
+  if not axis_name:
+    return x
+  return tree_util.tree_map(
+      lambda leaf: vary_unreduced_cast_p.bind(leaf, axes=axes), x)
+
+vary_unreduced_cast_p = core.Primitive('vary_unreduced_cast_p')
+vary_unreduced_cast_p.def_impl(lambda arg, *, axes: arg)
+mlir.register_lowering(vary_unreduced_cast_p, lambda ctx, x, *, axes: [x])
+
+def _vary_unreduced_cast_abstract_eval(aval, *, axes):
+  assert isinstance(axes, tuple)
+  _check_axis_names(axes, 'vary_unreduced_cast')
+  check_unreduced_args([aval], 'vary_unreduced_cast')
+  if not aval.vma:
+    raise ValueError('vary_unreduced_cast only accepts inputs that are'
+                     f' varying. Got {aval.str_short(True)}')
+  # If the intersection between aval.vma and axes is empty, error
+  if not (aval.vma & set(axes)):
+    raise ValueError(
+        "vary_unreduced_cast is a Varying->Unreduced collective. This"
+        " means that the axis names mentioned in `axes` passed to"
+        " `vary_unreduced_cast` must be present in"
+        f" `jax.typeof(x).vma`. Got axes={axes} and"
+        f" jax.typeof(x).vma={aval.vma}")
+  if aval.sharding.spec.unreduced & set(axes):
+    raise ValueError(
+        "vary_unreduced_cast input cannot be unreduced across the axis_name"
+        f" provided. Got x={aval.str_short(True)} and axis_name={axes}")
+
+  aval_s = aval.sharding
+  new_unreduced = aval_s.spec.unreduced | frozenset(axes)
+  out_sharding = aval_s.update(mesh=get_abstract_mesh(),
+                               spec=aval_s.spec.update(unreduced=new_unreduced))
+  out_vma = frozenset(i for i in aval.vma if i not in axes)
+  return aval.update(sharding=out_sharding, vma=out_vma)
+vary_unreduced_cast_p.def_abstract_eval(_vary_unreduced_cast_abstract_eval)
+
+def _vary_unreduced_cast_transpose_rule(cts, x, *, axes):
+  assert ad.is_undefined_primal(x)
+  return (reduced_vary_cast(cts, axis_name=axes),)
+ad.deflinear2(vary_unreduced_cast_p, _vary_unreduced_cast_transpose_rule)
+
+def _vary_unreduced_cast_batcher(vals_in, dims_in, *, axes):
+  raise NotImplementedError
+batching.primitive_batchers[vary_unreduced_cast_p] = _vary_unreduced_cast_batcher
+
+####################### reduced_vary_cast #############################
+
+# Reduced -> Varying cast
+def reduced_vary_cast(x, axis_name):
+  axes = (axis_name,) if not isinstance(axis_name, tuple) else axis_name
+  if not axis_name:
+    return x
+  return tree_util.tree_map(
+      lambda leaf: reduced_vary_cast_p.bind(leaf, axes=axes), x)
+
+reduced_vary_cast_p = core.Primitive('reduced_vary_cast_p')
+reduced_vary_cast_p.def_impl(lambda arg, *, axes: arg)
+mlir.register_lowering(reduced_vary_cast_p, lambda ctx, x, *, axes: [x])
+
+def _reduced_vary_cast_abstract_eval(aval, *, axes):
+  assert isinstance(axes, tuple)
+  _check_axis_names(axes, 'reduced_vary_cast')
+  if not aval.sharding.spec.reduced:
+    raise ValueError('reduced_vary_cast only accepts inputs that are'
+                     f' reduced. Got {aval.str_short(True)}')
+  # If the intersection between aval.spec.reduced and axes is empty, error
+  if not (aval.sharding.spec.reduced & set(axes)):
+    raise ValueError(
+        "reduced_vary_cast is a Reduced->Varying collective. This"
+        " means that the axis names mentioned in `axes` passed to"
+        " `reduced_vary_cast` must be present in"
+        f" `jax.typeof(x).sharding.spec.reduced`. Got axes={axes} and"
+        f" jax.typeof(x).sharding.spec.reduced={aval.sharding.spec.reduced}")
+  if aval.vma & set(axes):
+    raise ValueError(
+        "reduced_vary_cast input cannot be varying across the axis_name"
+        f" provided. Got x={aval.str_short(True)} and axis_name={axes}")
+
+  aval_s = aval.sharding
+  new_reduced = frozenset(i for i in aval_s.spec.reduced if i not in axes)
+  out_sharding = aval_s.update(mesh=get_abstract_mesh(),
+                               spec=aval_s.spec.update(reduced=new_reduced))
+  out_vma = aval.vma | frozenset(axes)
+  return aval.update(sharding=out_sharding, vma=out_vma)
+reduced_vary_cast_p.def_abstract_eval(_reduced_vary_cast_abstract_eval)
+
+def _reduced_vary_cast_transpose_rule(cts, x, *, axes):
+  assert ad.is_undefined_primal(x)
+  return (vary_unreduced_cast(cts, axis_name=axes),)
+ad.deflinear2(reduced_vary_cast_p, _reduced_vary_cast_transpose_rule)
+
+def _reduced_vary_cast_batcher(vals_in, dims_in, *, axes):
+  raise NotImplementedError
+batching.primitive_batchers[reduced_vary_cast_p] = _reduced_vary_cast_batcher

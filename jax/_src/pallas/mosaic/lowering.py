@@ -50,7 +50,7 @@ from jax._src.interpreters import partial_eval as pe
 from jax._src.lax import control_flow
 from jax._src.lax import lax as lax_internal
 from jax._src.lax.control_flow import BranchesPlatforms
-from jax._src.lib import version as jaxlib_version
+
 from jax._src.lib.mlir import ir
 from jax._src.lib.mlir.dialects import arith
 from jax._src.lib.mlir.dialects import cf
@@ -1743,9 +1743,12 @@ def _prng_key_load_lowering_rule(ctx: LoweringRuleContext, *args_flat, args_tree
 
   load_ops = []
   for i in range(key_shape[1]):
-    scalar_idx = NDIndexer(indices=(*idx.indices, 0, i),
-                           shape=ref_block_shape,
-                           int_indexer_shape=tuple())
+    ref_shape = tuple(
+        dim for dim in ref_block_shape if dim is not pallas_core.squeezed
+    )
+    scalar_idx = NDIndexer(
+        indices=(*idx.indices, 0, i), shape=ref_shape, int_indexer_shape=()
+    )
     starts, _, _, _, _ = _indexer_to_start_size_stride(
         scalar_idx,
         ref_block_shape,
@@ -1923,7 +1926,9 @@ def _masked_swap_lowering_rule(
   return result
 
 
-@register_lowering_rule(primitives.multiple_of_p)
+@register_lowering_rule(
+    primitives.multiple_of_p, kernel_types=[*tpu_core.KernelType]
+)
 def _multiple_of_lowering_rule(ctx: LoweringRuleContext, val, *, values):
   del ctx
   for multiple in values:
@@ -2448,7 +2453,7 @@ def _concatenate_lowering_rule(ctx: LoweringRuleContext, *xs, dimension):
   return tpu.concatenate(xs, dimension=dimension)
 
 
-@register_lowering_rule(lax.split_p)
+@register_lowering_rule(lax.split_p, kernel_types=[*tpu_core.KernelType])
 def _split_lowering_rule(
     ctx: LoweringRuleContext, x, *, sizes, axis
 ):
@@ -3551,6 +3556,29 @@ def _reciprocal_lowering_rule(ctx: LoweringRuleContext, x, *, approx):
   return tpu.reciprocal(x, approx=approx)
 
 
+@register_lowering_rule(tpu_primitives.stochastic_round_p)
+def _stochastic_round_lowering_rule(
+    ctx: LoweringRuleContext, x, random_bits, *, target_dtype
+):
+  if not isinstance(x.type.element_type, ir.F32Type):
+    raise ValueError("Only float32 input is supported.")
+  if target_dtype not in [
+      jnp.bfloat16,
+      jnp.float8_e5m2,
+      jnp.float8_e4m3fn,
+      jnp.float8_e4m3b11fnuz,
+  ]:
+    raise ValueError(
+        "Only bfloat16, float8_e5m2, float8_e4m3fn, and float8_e4m3b11fnuz "
+        "are supported as target dtypes."
+    )
+  (_, in_aval,) = ctx.avals_in
+  out_type = ir.VectorType.get(
+      in_aval.shape, mlir.dtype_to_ir_type(jnp.dtype(target_dtype))
+  )
+  return tpu.stochastic_convert(out_type, x, random_bits)
+
+
 @register_lowering_rule(tpu_primitives.bitcast_p)
 def _bitcast_lowering_rule(ctx: LoweringRuleContext, x, *, ty):
   del ty
@@ -3587,7 +3615,6 @@ def _alloc_value(
     aval: jax_core.AbstractValue, *, ctx: LoweringRuleContext
 ) -> ir.Value:
   if isinstance(aval, state.AbstractRef):
-    memspace = _memory_space_to_mosaic_attribute(aval.memory_space)
     if jnp.issubdtype(aval.dtype, pallas_core.semaphore_dtype):
       assert aval.memory_space == TPUMemorySpace.SEMAPHORE
       memref_type = aval_to_ir_type(
@@ -3742,7 +3769,10 @@ def _dma_start_lowering_rule(
     tree,
     device_id_type: primitives.DeviceIdType,
     priority: int,
+    add: bool,
 ):
+  if add:
+    raise NotImplementedError("DMA with add=True is not supported.")
   (
       src_ref,
       src_transforms,
@@ -3775,9 +3805,6 @@ def _dma_start_lowering_rule(
   core_id = None
   if device_id is not None:
     device_id, core_id = _device_id_to_logical(ctx, device_id, device_id_type)
-  priority_kwarg = {"priority": priority}
-  if jaxlib_version < (0, 5, 4):
-    priority_kwarg = {}
   tpu.enqueue_dma(
       src_ref,
       dst_ref,
@@ -3785,7 +3812,7 @@ def _dma_start_lowering_rule(
       source_semaphore=src_sem,
       device_id=device_id,
       core_id=core_id,
-      **priority_kwarg,
+      priority=priority,
   )
   return []
 
@@ -3907,8 +3934,10 @@ def _debug_print_rule(
 
       # TPU expects $0, $1 etc as placeholders.
       fmt = "".join(
-          f"{text}${idx}"
-          for idx, (text, _, _, _) in enumerate(string.Formatter().parse(fmt))
+          f"{text}${spec}{idx}" if field is not None else text
+          for idx, (text, field, spec, _) in enumerate(
+              string.Formatter().parse(fmt)
+          )
       )
 
     tpu.log(args, fmt, formatted=has_placeholders)

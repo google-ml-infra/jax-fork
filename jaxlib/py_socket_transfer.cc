@@ -44,10 +44,10 @@ limitations under the License.
 #include "jaxlib/py_executable.h"
 #include "jaxlib/py_user_context.h"
 #include "jaxlib/to_ifrt_sharding.h"
+#include "xla/future.h"
 #include "xla/pjrt/distributed/client.h"
 #include "xla/pjrt/distributed/key_value_store_interface.h"
 #include "xla/pjrt/pjrt_client.h"
-#include "xla/pjrt/pjrt_future.h"
 #include "xla/pjrt/status_casters.h"
 #include "xla/python/ifrt/array.h"
 #include "xla/python/ifrt/array_spec.h"
@@ -55,7 +55,6 @@ limitations under the License.
 #include "xla/python/ifrt/memory.h"
 #include "xla/python/ifrt/shape.h"
 #include "xla/python/ifrt/sharding.h"
-#include "xla/python/ifrt/user_context.h"
 #include "xla/python/nb_numpy.h"
 #include "xla/python/pjrt_ifrt/pjrt_array.h"
 #include "xla/python/pjrt_ifrt/pjrt_device.h"
@@ -70,7 +69,6 @@ limitations under the License.
 #include "xla/python/transfer/streaming_ifrt.h"
 #include "xla/python/transfer/transfer_socket.pb.h"
 #include "xla/python/types.h"
-#include "xla/python/version.h"
 #include "xla/tsl/concurrency/ref_count.h"
 #include "xla/tsl/platform/statusor.h"
 #include "xla/util.h"
@@ -239,9 +237,7 @@ class PyTransferServer {
                                                 xfer_size_, use_raw_buffers_)));
   }
 
-#if JAX_IFRT_VERSION_NUMBER >= 32
   void Reset() { server_->Reset(); }
-#endif
 
   size_t xfer_size() { return xfer_size_; }
 
@@ -295,8 +291,7 @@ void RegisterTransferServerTypes(nanobind::module_& m) {
                    "_pull_flat only supported on pjrt-ifrt clients."));
              }
 
-             xla::ifrt::UserContextScope user_context_scope(
-                 jax::PyUserContext::Create());
+             jax::PyUserContextScope user_context_scope;
              std::vector<xla::ifrt::ArraySpec> avals;
              std::vector<nb::object> shardings;
              shardings.reserve(py_avals.size());
@@ -429,12 +424,12 @@ void RegisterTransferServerTypes(nanobind::module_& m) {
                                 nb::repr(slice).c_str(), device_size)
                     .c_str());
           }
-          std::vector<xla::PjRtFuture<>> futures_per_array;
+          std::vector<xla::Future<>> futures_per_array;
           for (auto& buffer : arrs[i]->pjrt_buffers()) {
             auto raw_buffer = xla::ValueOrThrow(
                 xla::PjRtRawBuffer::CreateRawAliasOfBuffer(buffer.get()));
             tsl::RCReference<ChunkDestination> dest;
-            xla::PjRtFuture<> future;
+            xla::Future<> future;
             std::tie(dest, future) = xla::ValueOrThrow(
                 CreateSlicedRawBufferDest(raw_buffer, start, total_size));
             futures_per_array.push_back(std::move(future));
@@ -469,10 +464,8 @@ void RegisterTransferServerTypes(nanobind::module_& m) {
              }
              self.AwaitPull(uuid_cpp, arrs);
            })
-#if JAX_IFRT_VERSION_NUMBER >= 32
       .def("_reset_rendevous_table",
            [](PyTransferServer& self) { self.Reset(); })
-#endif
       .def("connect", [](PyTransferServer& self, const std::string& address) {
         return self.Connect(address);
       });
@@ -484,8 +477,7 @@ void RegisterTransferServerTypes(nanobind::module_& m) {
       xla::ThrowIfError(absl::InvalidArgumentError(
           "_pull_flat only supported on pjrt-ifrt clients."));
     }
-    xla::ifrt::UserContextScope user_context_scope(
-        jax::PyUserContext::Create());
+    jax::PyUserContextScope user_context_scope;
     auto aval = xla::ValueOrThrow(ArraySpecFromShapeDtypeStruct(py_aval));
     xla::ifrt::PjRtArray::PjRtBuffers buffers;
     auto prim_type = xla::ValueOrThrow(xla::ifrt::ToPrimitiveType(aval.dtype));

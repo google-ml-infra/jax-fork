@@ -850,7 +850,7 @@ def lower_parallel_callable(
     num_const_args = len(const_arg_avals)
     in_axes = (None,) * num_const_args + in_axes  # type: ignore
     donated_invars = (False,) * num_const_args + donated_invars  # type: ignore
-    jaxpr_avals = const_arg_avals + closed_jaxpr.in_avals  # type: ignore
+    jaxpr_avals = list(const_arg_avals) + closed_jaxpr.in_avals  # type: ignore
     shards = ShardInfo(
         tuple(const_arg_avals) + shards.sharded_avals,  # type: ignore
         shards.out_sharded_avals,
@@ -1395,7 +1395,8 @@ class ExecuteReplicated:
       out_ = []
       for i, o in zip(self.mut.out_mut, out):
         if i is not None:
-          args[i]._refs._buf._replace_with(o)  # type: ignore
+          try: args[i]._refs._buf._replace_with(o)  # type: ignore
+          except AttributeError: pass  # TODO(mattjj): remove float0
         else:
           out_.append(o)
       return out_
@@ -1749,39 +1750,60 @@ def get_default_device() -> xc.Device:
 
 def _get_and_check_device_assignment(
     shardings: Iterable[ShardingInfo],
-    devices: Sequence[xc.Device] | None,
-) -> tuple[xc.Client, tuple[xc.Device, ...]]:
+    context_devices: Sequence[xc.Device] | None,
+) -> tuple[xc.Client, tuple[xc.Device, ...] | None, int]:
   first_sharding_info = None
-  devices = () if devices is None else tuple(devices)
+  context_devices = () if context_devices is None else tuple(context_devices)
+  abstract_mesh = None
+  any_concrete_sharding = True if context_devices else False
 
   for sh, s_type, source_info in shardings:
     if isinstance(sh, UnspecifiedValue):
       continue
-    if isinstance(sh, NamedSharding) and isinstance(sh.mesh, AbstractMesh):
-      continue
-    if first_sharding_info is None:
-      first_sharding_info = (
-          (sh.mesh._flat_devices_tuple, s_type, source_info) if isinstance(sh, AUTO)
-           else (sh._device_assignment, s_type, source_info))
-    arr_device_assignment = (sh.mesh._flat_devices_tuple if isinstance(sh, AUTO)
-                             else sh._device_assignment)
-    if not devices:
-      if first_sharding_info[0] != arr_device_assignment:
-        raise stages.DeviceAssignmentMismatchError([
-            stages.DeviceAssignmentMismatch(*first_sharding_info),
-            stages.DeviceAssignmentMismatch(arr_device_assignment, s_type, source_info)])
+    elif isinstance(sh, NamedSharding) and isinstance(sh.mesh, AbstractMesh):
+      if (abstract_mesh is not None and not sh.mesh.empty and
+          abstract_mesh.size != sh.mesh.size):
+        raise ValueError("AbstractMesh should be of the same size across all "
+                         f"shardings. Got {abstract_mesh} and {sh.mesh}")
+      abstract_mesh = sh.mesh
     else:
-      if devices != arr_device_assignment:
-        raise stages.DeviceAssignmentMismatchError([
-            stages.DeviceAssignmentMismatch(devices, stages.MismatchType.CONTEXT_DEVICES, None),
-            stages.DeviceAssignmentMismatch(arr_device_assignment, s_type, source_info)])
-  if first_sharding_info is None and devices:
-    final_device_assignment = devices
+      any_concrete_sharding = True
+      arr_device_assignment = sh._device_assignment
+      if first_sharding_info is None:
+        first_sharding_info = (arr_device_assignment, s_type, source_info)
+      if not context_devices:
+        if first_sharding_info[0] != arr_device_assignment:
+          raise stages.DeviceAssignmentMismatchError([
+              stages.DeviceAssignmentMismatch(*first_sharding_info),
+              stages.DeviceAssignmentMismatch(
+                  arr_device_assignment, s_type, source_info)])
+      else:
+        if context_devices != arr_device_assignment:
+          raise stages.DeviceAssignmentMismatchError([
+              stages.DeviceAssignmentMismatch(
+                  context_devices, stages.MismatchType.CONTEXT_DEVICES, None),
+              stages.DeviceAssignmentMismatch(
+                  arr_device_assignment, s_type, source_info)])
+
+  if first_sharding_info is None and context_devices:
+    device_assignment = context_devices
   elif first_sharding_info is None:
-    final_device_assignment = (get_default_device(),)
+    device_assignment = (get_default_device(),)
   else:
-    final_device_assignment = first_sharding_info[0]  # type: ignore
-  return xb.get_device_backend(final_device_assignment[0]), final_device_assignment
+    device_assignment = first_sharding_info[0]  # type: ignore
+
+  backend = xb.get_device_backend(device_assignment[0])
+
+  if (any_concrete_sharding and abstract_mesh is not None and
+      len(device_assignment) != abstract_mesh.size):
+    raise ValueError(
+        f"AbstractMesh size: {abstract_mesh.size} does not match the"
+        f" device assignment size: {len(device_assignment)}")
+
+  if any_concrete_sharding or abstract_mesh is None:
+    return backend, device_assignment, len(device_assignment)  # type: ignore
+  else:
+    return backend, None, abstract_mesh.size
 
 MaybeSharding = Union[JSharding, UnspecifiedValue]
 
@@ -2088,36 +2110,6 @@ def get_out_layouts_via_propagation(closed_jaxpr: core.ClosedJaxpr
   return tuple(safe_map(read, jaxpr.outvars))
 
 
-def _get_num_devices(
-    shardings, device_assignment
-  ) -> tuple[int, tuple[xc.Device, ...] | None]:
-  """Number of lowering devices, and the device_assignment to use.
-
-  If all the specified shardings have an abstract mesh, then we are compiling
-  with abstract devices, and the returned device_assignment is None.
-  """
-  abstract_mesh, any_concrete_sharding = None, False
-  for s in shardings:
-    if isinstance(s, UnspecifiedValue):
-      continue
-    elif (isinstance(s, NamedSharding) and isinstance(s.mesh, AbstractMesh) and
-          not s.mesh.empty):
-      if abstract_mesh is not None and abstract_mesh.size != s.mesh.size:
-        raise ValueError("AbstractMesh should be of the same size across all "
-                         f"shardings. Got {abstract_mesh} and {s.mesh}")
-      abstract_mesh = s.mesh
-    else:
-      any_concrete_sharding = True
-  if (any_concrete_sharding and abstract_mesh is not None and
-      len(device_assignment) != abstract_mesh.size):
-    raise ValueError(
-        f"AbstractMesh size: {abstract_mesh.size} does not match the"
-        f" device assignment size: {len(device_assignment)}")
-  if any_concrete_sharding or abstract_mesh is None:
-    return len(device_assignment), device_assignment
-  return abstract_mesh.size, None
-
-
 MaybeLayout = Sequence[Union[Layout, AutoLayout, None]]
 
 
@@ -2168,7 +2160,7 @@ def hoist_constants_as_args(
   )
   num_const_args = len(const_args)
   if num_const_args:
-    global_in_avals = const_arg_avals + global_in_avals  # type: ignore
+    global_in_avals = list(const_arg_avals) + global_in_avals  # type: ignore
     ca_shardings = pjit.const_args_shardings(const_args)
     in_shardings = ca_shardings + in_shardings  # type: ignore
     ca_layouts = pjit.const_args_layouts(const_args, const_arg_avals,
@@ -2190,7 +2182,7 @@ def hoist_constants_as_args(
     else:
       arg_names = (("",) * num_const_args + all_args_info.debug_info.arg_names)
     all_args_info = AllArgsInfo(
-        const_arg_avals + all_args_info.in_avals,  # type: ignore
+        list(const_arg_avals) + all_args_info.in_avals,  # type: ignore
         all_args_info.debug_info._replace(arg_names=arg_names))
 
   return (const_args, global_in_avals, in_shardings, in_layouts, donated_invars,
@@ -2315,7 +2307,7 @@ def lower_sharding_computation(
   unique_in_shardings = util.stable_unique(in_shardings[len(const_args):])
   unique_out_shardings = util.stable_unique(out_shardings)
   # TODO(necula): Replace `None` with `source_info` for unique_const_shardings
-  backend, device_assignment = _get_and_check_device_assignment(
+  backend, device_assignment, num_devices = _get_and_check_device_assignment(
       it.chain(
           ((i, stages.MismatchType.ARG_SHARDING, None) for i in unique_in_shardings),
           ((c, stages.MismatchType.CONST_SHARDING, None) for c in unique_const_shardings),
@@ -2327,8 +2319,21 @@ def lower_sharding_computation(
   unique_in_shardings = unique_in_shardings | unique_const_shardings  # type: ignore
   del unique_const_shardings
 
+  prim_requires_devices = dispatch.jaxpr_has_prim_requiring_devices(jaxpr)
+
+  if device_assignment is None:
+    if lowering_platforms is None:
+      raise ValueError(
+          "Passing lowering_platforms via jax.export or "
+          " jit(f).trace(*args).lower(lowering_platforms=...) is required when"
+          " only AbstractMesh exists in a jitted computation.")
+    if prim_requires_devices:
+      raise ValueError(
+          "AbstractMesh cannot be used when jaxpr contains primitives that"
+          " require devices to be present during lowering.")
+
   # For device_assignment == 1, this doesn't matter.
-  if len(device_assignment) > 1:
+  if device_assignment is not None and len(device_assignment) > 1:
     rep_gs = GSPMDSharding.get_replicated(device_assignment)
     in_shardings = tuple(
         rep_gs if (isinstance(s, UnspecifiedValue) and
@@ -2338,6 +2343,7 @@ def lower_sharding_computation(
   for a in global_out_avals:
     if (a is not core.abstract_token and not a.sharding.mesh.empty and
         a.sharding.mesh.are_all_axes_explicit and
+        device_assignment is not None and
         len(device_assignment) != a.sharding.mesh.size):
       raise ValueError(
           f"Length of device assignment {len(device_assignment)} is not equal"
@@ -2349,29 +2355,6 @@ def lower_sharding_computation(
   # change this back to just read platform.
   platforms = lowering_platforms or (
       getattr(backend, "_raw_platform", backend.platform),)
-
-  prim_requires_devices = dispatch.jaxpr_has_prim_requiring_devices(jaxpr)
-
-  # TODO(yashkatariya): All device specific logic should go in compilation
-  # but this requires a big refactor. The current `_get_num_devices` logic
-  # is good enough to lower with AbstractMesh but cannot be compiled. Once
-  # I refactor, this will also work well with mesh being provided at
-  # compile time.
-  # Sets device_assignment to None if only abstractMesh and unspecified exists.
-  num_devices, device_assignment = _get_num_devices(
-      it.chain(unique_in_shardings, unique_out_shardings,
-               unique_intermediate_shardings),
-      device_assignment)
-  if device_assignment is None:
-    if lowering_platforms is None:
-      raise ValueError(
-          "Passing lowering_platforms via jax.export or "
-          " jit(f).trace(*args).lower(lowering_platforms=...) is required when"
-          " only AbstractMesh exists in a jitted computation.")
-    if prim_requires_devices:
-      raise ValueError(
-          "AbstractMesh cannot be used when jaxpr contains primitives that"
-          " require devices to be present during lowering.")
 
   device_list = _create_device_list(device_assignment)
   transfer_mem_kind_in_jaxpr = jaxpr_transfer_mem_kinds(jaxpr)
@@ -3292,10 +3275,14 @@ class MeshExecutable(stages.Executable):
       # args do not include the const args.
       # See https://docs.jax.dev/en/latest/internals/constants.html.
       outs, out_flat, args_flat = stages.Compiled.call(params, *args, **kwargs)
-      out_flat, out_tree_dispatch = reflatten_outputs_for_dispatch(
-          params.out_tree, out_flat)
-      use_fastpath = (all(isinstance(x, xc.ArrayImpl) for x in out_flat)
-                      and not self._mut)
+
+      if not params.is_high:
+        out_flat, out_tree_dispatch = reflatten_outputs_for_dispatch(
+            params.out_tree, out_flat)
+        use_fastpath = (all(isinstance(x, xc.ArrayImpl) for x in out_flat)
+                        and not self._mut)
+      else:
+        use_fastpath = False
 
       if use_fastpath:
         out_avals = [o.aval for o in out_flat]

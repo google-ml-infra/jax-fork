@@ -95,6 +95,7 @@ nanobind_pywrap_extension(
     deps = [
         "@llvm-project//mlir:CAPIIR",
         "@llvm-project//mlir:CAPILLVM",
+        "@llvm-project//mlir:CAPITarget",
         "@llvm-project//mlir:MLIRBindingsPythonNanobindHeaders",
         "@nanobind",
     ],
@@ -249,11 +250,14 @@ nanobind_pywrap_extension(
         "@llvm-project//mlir:FuncDialect",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:MLIRBindingsPythonNanobindHeaders",
+        "@llvm-project//mlir:ShapeDialect",
         "@llvm-project//mlir:Support",
-        "@local_config_python//:headers",
+        "@llvm-project//mlir:TensorDialect",
         "@nanobind",
+        "@rules_python//python/cc:current_py_cc_headers",
         "@shardy//shardy/dialect/sdy/ir:dialect",
         "@shardy//shardy/integrations/c:sdy_capi",
+        "@stablehlo//:vhlo_ops",
         "@xla//xla/pjrt:status_casters",
         "@xla//xla/python:nb_absl_span",
         "@xla//xla/service/spmd/shardy/integrations/c:xla_sdy_capi",
@@ -273,8 +277,8 @@ nanobind_pywrap_extension(
     deps = [
         "@llvm-project//mlir:CAPIIR",
         "@llvm-project//mlir:MLIRBindingsPythonNanobindHeaders",
-        "@local_config_python//:headers",
         "@nanobind",
+        "@rules_python//python/cc:current_py_cc_headers",
         "@xla//xla/mlir_hlo:CAPI",
     ],
 )
@@ -293,8 +297,8 @@ nanobind_pywrap_extension(
         "@llvm-project//mlir:CAPIIR",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:MLIRBindingsPythonNanobindHeaders",
-        "@local_config_python//:headers",
         "@nanobind",
+        "@rules_python//python/cc:current_py_cc_headers",
         "@shardy//shardy/integrations/c:sdy_capi",
     ],
 )
@@ -309,8 +313,8 @@ nanobind_pywrap_extension(
         "@llvm-project//mlir:CAPIIR",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:MLIRBindingsPythonNanobindHeaders",
-        "@local_config_python//:headers",
         "@nanobind",
+        "@rules_python//python/cc:current_py_cc_headers",
         "@shardy//shardy/integrations/c/mpmd:mpmd_capi",
     ],
 )
@@ -328,8 +332,8 @@ nanobind_pywrap_extension(
     deps = [
         "@llvm-project//mlir:CAPIIR",
         "@llvm-project//mlir:MLIRBindingsPythonNanobindHeaders",
-        "@local_config_python//:headers",
         "@nanobind",
+        "@rules_python//python/cc:current_py_cc_headers",
         "@stablehlo//:chlo_capi",
     ],
 )
@@ -344,8 +348,8 @@ nanobind_pywrap_extension(
         "@llvm-project//llvm:Support",
         "@llvm-project//mlir:CAPIIR",
         "@llvm-project//mlir:MLIRBindingsPythonNanobindHeaders",
-        "@local_config_python//:headers",
         "@nanobind",
+        "@rules_python//python/cc:current_py_cc_headers",
         "@stablehlo//:stablehlo_capi",
     ],
 )

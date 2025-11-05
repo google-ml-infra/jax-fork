@@ -12,17 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import collections
+from collections.abc import Callable
 import contextlib
 import dataclasses
 import enum
 import functools
-import gc
 import itertools
 import math
 import threading
 from typing import Any, Literal, cast
-from collections.abc import Callable
 
 import jax
 from jax import lax
@@ -31,14 +29,17 @@ from jax._src import config
 from jax._src import core as jax_core
 from jax._src import frozen_dict
 from jax._src import linear_util as lu
+from jax._src import pjit
 from jax._src import source_info_util
 from jax._src.interpreters import mlir
+from jax._src.pallas import core as pallas_core
+from jax._src.pallas import primitives
 from jax._src.pallas.mosaic import core as mosaic_core
 from jax._src.pallas.mosaic import primitives as mosaic_primitives
 from jax._src.pallas.mosaic import verification
-from jax._src.pallas import core as pallas_core
-from jax._src.pallas import primitives
-from jax._src import pjit
+from jax._src.pallas.mosaic.interpret import shared_memory as memory
+from jax._src.pallas.mosaic.interpret import vector_clock as vc
+from jax._src.pallas.mosaic.interpret.race_detection_state import RaceDetectionState
 from jax._src.state import discharge as state_discharge
 from jax._src.state import indexing
 from jax._src.state import primitives as state_primitives
@@ -166,479 +167,27 @@ def force_tpu_interpret_mode(params: InterpretParams = InterpretParams()):
 def set_tpu_interpret_mode(params: InterpretParams = InterpretParams()):
   config.pallas_tpu_interpret_mode_context_manager.set_global(params)  # type: ignore[arg-type]
 
-VectorClock = np.ndarray
 
-# Conceptually, each DMA runs on its own, independent device. Representing
-# this precisely would require vector clocks to have sizes linear in the number
-# of DMAs.
-#
-# Instead, we use approximate vector clocks of fixed size. We assign each DMA
-# a virtual core ID in the range
-#   [num_devices*num_cores_per_device, _vector_clock_size - 1],
-# and each operation of a DMA increments the corresponding coordinate in its
-# vector clock. (So the "virtual" part of a vector clock is effectively
-# counting, for each virtual core, the number of DMAs that happened-before
-# the vector clock and were assigned to that virtual core.)
-#
-# If two approximate clocks are unordered, then their corresponding events are
-# not ordered by the happens-before relation. So this approximation will not
-# introduce any false positives in detecting data races. But we may fail to
-# detect some true data races because there can be cases where two approximate
-# clocks are ordered, and we will treat the corresponding events as ordered
-# by the happens-before relation, but the corresponding events are not
-# actually ordered.
-_vector_clock_size: int
-
-def make_vector_clock(_: int) -> VectorClock:
-  del _
-  return np.zeros(_vector_clock_size, dtype=np.int32)
-
-def copy_vector_clock(x: VectorClock) -> VectorClock:
-  if x is None:
-    return None
-  return x.copy()
-
-def update_vector_clock(x: VectorClock, y: VectorClock):
-  x[:] = np.maximum(x[:], y[:])
-
-def lt(x: VectorClock, y: VectorClock) -> bool:
-  return bool((x <= y).all() & (x < y).any())
-
-def ordered(x: VectorClock, y: VectorClock) -> bool:
-  return lt(x, y) | lt(y, x)
-
-def inc_vector_clock(x: VectorClock, global_core_id: int):
-  if global_core_id >= len(x):
-    raise ValueError(f'device_id={global_core_id} is out of range for x={x}')
-  assert global_core_id < len(x)
-  x[global_core_id] += 1
-
-def _get_global_core_id(device_id, local_core_id):
-  """Computes the global core ID from the given device and local core ID."""
-  device_id = int(device_id)
-  local_core_id = int(local_core_id)
-  return device_id * _get_shared_memory().num_cores_per_device + local_core_id
-
-
-class Semaphore:
-  def __init__(self, semaphore_id=None):
-    shared_memory = _get_shared_memory()
-
-    self.id = semaphore_id
-
-    # TODO(jburnim): Use one Condition variable per device.  (Which will be
-    # easier to do when we're using single integer device IDs.)
-    self.cv = threading.Condition()
-
-    self.counts = np.zeros(shared_memory.num_cores, dtype=np.int32)
-
-    self.interpret_params = shared_memory.interpret_params
-    if self.interpret_params.detect_races:
-      # We associate a vector clock with each count in self.counts.  Whenever
-      # self.counts[i] is signaled, self.clocks[i] is updated with the vector
-      # clock of the signaling core.  Whenever core i successfully waits on
-      # self.counts[i], the vector clock of core i is updated with
-      # self.clocks[i].
-      #
-      # TODO(jburnim): Model happens-before more precisely for the case where
-      # semaphores are over-signaled.
-      self.clocks = [None] * shared_memory.num_cores
-
-  def signal(self, inc, global_core_id, clock):
-    """Signal the semaphore on `(device_id, core_id)` by `inc`.
-
-    Args:
-      inc: A positive integer.  The amount by which to increment the semaphore
-        on the target device.
-      global_core_id: The ID of the target core.
-      clock: The vector clock of the signaling device at the time of the signal.
-    """
-    global_core_id = int(global_core_id)
-    with self.cv:
-      self.counts[global_core_id] += inc
-      if self.interpret_params.detect_races:
-        if self.clocks[global_core_id] is None:
-          self.clocks[global_core_id] = copy_vector_clock(clock)
-        else:
-          update_vector_clock(self.clocks[global_core_id], clock)
-      self.cv.notify_all()
-
-  def read(self, global_core_id):
-    with self.cv:
-      return self.counts[global_core_id]
-
-  def wait(self, value, global_core_id, *, is_dma=False):
-    global_core_id = int(global_core_id)
-    shared_memory = _get_shared_memory()
-
-    # TODO(jburnim):
-    #  - If the count is larger than value, raise an error?
-    #  - If the count is equal to value, but there DMAs waiting to signal us,
-    #    raise an error?
-
-    # Simple implementation for non-DMA semaphores.
-    if not is_dma or (self.interpret_params.dma_execution_mode == "eager"):
-      with self.cv:
-        while self.counts[global_core_id] < value:
-          self.cv.wait()
-        self.counts[global_core_id] -= value
-        if self.interpret_params.detect_races:
-          clock = copy_vector_clock(self.clocks[global_core_id])
-      if self.interpret_params.detect_races:
-        with shared_memory.lock:
-          update_vector_clock(shared_memory.clocks[global_core_id], clock)
-      return
-
-    # For DMA semaphores (when dma_execution_mode=='on_wait'), while our count
-    # is not large enough we will select and partially execute pending DMAs
-    # until our count is large enough.
-    #
-    # This approach will tend to run DMAs as late as possible, as well as
-    # out-of-order.  This approach also lets us avoid the complexity of spinning
-    # up separate threads to handle executing DMAs.
-    shared_memory = _get_shared_memory()
-    while True:
-      clock = None
-      with self.cv:
-        if self.counts[global_core_id] >= value:
-          self.counts[global_core_id] -= value
-          if self.interpret_params.detect_races:
-            clock = copy_vector_clock(self.clocks[global_core_id])
-          else:
-            return
-      if clock is not None:
-        with shared_memory.lock:
-          update_vector_clock(shared_memory.clocks[global_core_id], clock)
-        return
-
-      with shared_memory.lock:
-        dma_queue = shared_memory.dmas_by_sem[self.id]
-        if len(dma_queue) > 0:
-          dma = dma_queue.pop()
-        else:
-          continue
-
-      # Only execute the DMA as far as necessary to signal us.
-      assert (dma.src_sem is self) or (dma.dst_sem is self)
-      with dma.lock:
-        if dma.virtual_device_id is None:
-          dma.virtual_device_id = np.random.randint(
-              shared_memory.num_cores, _vector_clock_size)
-
-        if dma.state == DmaState.STARTED:
-          # Do the read.
-          if self.interpret_params.detect_races:
-            inc_vector_clock(dma.clock, dma.virtual_device_id)
-          dma.data = get(dma.src_device_id,
-                         dma.src_local_core_id,
-                         dma.src_memory_space,
-                         dma.src_buffer_id,
-                         dma.src_transforms,
-                         clock=copy_vector_clock(dma.clock),
-                         src_device_id=dma.id,
-                         src_local_core_id=0,
-                         source_info=dma.source_info)
-          if self.interpret_params.detect_races:
-            inc_vector_clock(dma.clock, dma.virtual_device_id)
-          if dma.src_sem is not None:
-            data_size = dma.data.itemsize * dma.data.size
-            dma.src_sem.signal(
-                data_size,
-                global_core_id=_get_global_core_id(
-                    dma.src_device_id, dma.src_local_core_id
-                ),
-                clock=dma.clock,
-            )
-          dma.state = DmaState.READ
-
-        if dma.src_sem is self:
-          # We were only waiting for the DMA read (i.e., we're the send
-          # semaphore), so leave the DMA write for later.
-          continue
-        assert dma.state == DmaState.READ
-
-        # Do the write.
-        assert dma.dst_sem is self
-        if self.interpret_params.detect_races:
-          inc_vector_clock(dma.clock, dma.virtual_device_id)
-        store(dma.dst_device_id,
-              dma.dst_local_core_id,
-              dma.dst_memory_space,
-              dma.dst_buffer_id,
-              dma.dst_transforms,
-              dma.data,
-              clock=copy_vector_clock(dma.clock),
-              src_device_id=dma.id,
-              src_local_core_id=0,
-              source_info=dma.source_info)
-        if self.interpret_params.detect_races:
-          inc_vector_clock(dma.clock, dma.virtual_device_id)
-        data_size = dma.data.itemsize * dma.data.size
-        dma.dst_sem.signal(
-            data_size,
-            global_core_id=_get_global_core_id(
-                dma.dst_device_id, dma.dst_local_core_id
-            ),
-            clock=dma.clock,
-        )
-
-        dma.data = None
-        dma.state = DmaState.COMPLETED
-
-
-class DmaState(enum.Enum):
-  STARTED = 0
-  READ = 1
-  COMPLETED = 2
-
-@dataclasses.dataclass
-class DMA:
-  id: int
-
-  src_device_id: int
-  src_local_core_id: int
-  src_memory_space: int
-  src_buffer_id: int
-  src_transforms: tuple[Any, ...]
-  dst_device_id: int
-  dst_local_core_id: int
-  dst_memory_space: int
-  dst_buffer_id: int
-  dst_transforms: tuple[Any, ...]
-  src_sem: Semaphore
-  dst_sem: Semaphore
-
-  clock: VectorClock
-
-  source_info: source_info_util.SourceInfo | None = None
-
-  state: DmaState = DmaState.STARTED
-  data: np.ndarray | None = None
-  virtual_device_id: int | None = None
-  lock: threading.Lock = dataclasses.field(default_factory=threading.Lock)
-
-
-@dataclasses.dataclass
-class RaceDetectionState:
-  num_cores: int
-
-
-  # (memory_space, buffer_id, device_id, local_core_id) -> [(device_id, local_core_id, VectorClock, range)]
-  reads: dict = dataclasses.field(
-      default_factory=lambda: collections.defaultdict(list))
-
-  # (memory_space, buffer_id, device_id, local_core_id) -> [(device_id, local_core_id, VectorClock, range)]
-  writes: dict = dataclasses.field(
-      default_factory=lambda: collections.defaultdict(list))
-
-  lock: threading.Lock = dataclasses.field(default_factory=threading.Lock)
-
-  races_found: bool = False
-
-def _is_empty_slice(slice_or_idx: slice | int):
-  if isinstance(slice_or_idx, int) or (slice_or_idx == slice(None)):
-    return False
-
-  # NOTE: All slices here will have known size.
-  start = int(slice_or_idx.start) if slice_or_idx.start is not None else 0
-  stop = int(slice_or_idx.stop)
-  return (start < stop)
-
-def slices_overlap(slice_or_idx1: slice | int, slice_or_idx2: slice | int):
-  if isinstance(slice_or_idx1, int):
-    slice_or_idx1 = slice(slice_or_idx1, slice_or_idx1 + 1)
-  if isinstance(slice_or_idx2, int):
-    slice_or_idx2 = slice(slice_or_idx2, slice_or_idx2 + 1)
-
-  if slice_or_idx1 == slice(None):
-    return _is_empty_slice(slice_or_idx2)
-  if slice_or_idx2 == slice(None):
-    return _is_empty_slice(slice_or_idx1)
-
-  # TODO(jburnim): Handle non-zero steps.
-  assert (slice_or_idx1.step == 1) or (slice_or_idx1.step is None)
-  assert (slice_or_idx2.step == 1) or (slice_or_idx2.step is None)
-
-  # NOTE: We are only comparing slices with known stops (and sizes).
-  # Do we need to handle zero-length slices?
-  return ((slice_or_idx1.start <= slice_or_idx2.start < slice_or_idx1.stop)
-          | (slice_or_idx2.start <= slice_or_idx1.start < slice_or_idx2.stop))
-
-def ranges_overlap(range1: tuple[slice | int, ...],
-                   range2: tuple[slice | int, ...]) -> bool:
-  return all(slices_overlap(r1, r2) for r1, r2
-             in itertools.zip_longest(range1, range2, fillvalue=slice(None)))
-
-
-def check_read(
-    device_id, local_core_id, clock, buffer_key, rnge, source_info=None
-):
-  if source_info is not None:
-    user_frame = source_info_util.summarize(source_info)
-  else:
-    user_frame = 'pallas_call'
-
-  with races.lock:
-    writes = races.writes[buffer_key]
-    num_writes = len(writes)
-    races.reads[buffer_key].append(
-        (device_id, local_core_id, clock, rnge, user_frame)
-    )
-
-  for i in range(num_writes):
-    (
-        write_device_id,
-        write_local_core_id,
-        write_clock,
-        write_range,
-        write_frame,
-    ) = writes[i]
-    if ordered(write_clock, clock):
-      continue
-    if not ranges_overlap(rnge, write_range):
-      continue
-    # TODO(jburnim): When printing device IDs for reads/writes, distinguish
-    # between real device IDs vs. DMA IDs.
-    print(
-        f'RACE DETECTED\n  read of {buffer_key}[{rnge}] from {device_id},'
-        f' {local_core_id}, {user_frame}\n  write of'
-        f' {buffer_key}[{write_range}] from {write_device_id},'
-        f' {write_local_core_id} {write_frame}'
-    )
-    with races.lock:
-      races.races_found = True
-    return
-
-
-def check_write(device_id, local_core_id, clock, buffer_key, rnge, source_info=None):
-  if source_info is not None:
-    user_frame = source_info_util.summarize(source_info)
-  else:
-    user_frame = 'pallas_call'
-
-  with races.lock:
-    writes = races.writes[buffer_key]
-    reads = races.reads[buffer_key]
-    num_writes = len(writes)
-    num_reads = len(reads)
-    races.writes[buffer_key].append((device_id, local_core_id, clock, rnge, user_frame))
-
-  # TODO(jburnim): For performance, we should also probably remove any
-  # conflicting reads and writes that happened-before the current write.
-
-  for i in range(num_writes):
-    (
-        write_device_id,
-        write_local_core_id,
-        write_clock,
-        write_range,
-        write_frame,
-    ) = writes[i]
-    if ordered(write_clock, clock):
-      continue
-    if not ranges_overlap(rnge, write_range):
-      continue
-    # TODO(jburnim): When printing device IDs for reads/writes, distinguish
-    # between real device IDs vs. DMA IDs.
-    print(
-        f'RACE DETECTED\n  write of {buffer_key}[{rnge}] from {device_id},'
-        f' {local_core_id}, {user_frame}\n  write of'
-        f' {buffer_key}[{write_range}] from {write_device_id},'
-        f' {write_local_core_id}, {write_frame}'
-    )
-    with races.lock:
-      races.races_found = True
-    break
-
-  for i in range(num_reads):
-    read_device_id, read_local_core_id, read_clock, read_range, read_frame = (
-        reads[i]
-    )
-    if ordered(read_clock, clock):
-      continue
-    if not ranges_overlap(rnge, read_range):
-      continue
-    # TODO(jburnim): When printing device IDs for reads/writes, distinguish
-    # between real device IDs vs. DMA IDs.
-    print(
-        f'RACE DETECTED\n  write of {buffer_key}[{rnge}] from {device_id},'
-        f' {local_core_id}, {user_frame}\n  read of {buffer_key}[{read_range}]'
-        f' from {read_device_id}, {read_local_core_id}, {read_frame}'
-    )
-    with races.lock:
-      races.races_found = True
-    return
-
-
-@dataclasses.dataclass
-class Buffer:
-  content: np.ndarray
-  _: dataclasses.KW_ONLY
-  ref_count: int = 1
-
-  def decrease_ref_count(self):
-    # We should never decrese the `ref_count` to below zero.
-    assert self.ref_count > 0
-    self.ref_count -= 1
-
-  def has_zero_ref_count(self) -> bool:
-    return self.ref_count == 0
-
-  def size(self) -> int:
-    return self.content.itemsize * self.content.size
-
-
-@dataclasses.dataclass
-class SharedMemory:
-  interpret_params: InterpretParams
-  num_devices: int
-  num_cores_per_device: int
-  clocks: list[VectorClock]
-  barrier: threading.Barrier
-  clean_up_barrier: threading.Barrier
-
-  # (memory_space, buffer_id, device_id, local_core_id) -> NumPy array
-  mem: dict[tuple[str, int, int, int], Buffer] = dataclasses.field(
-      default_factory=dict)
-
-  # semaphore_id -> Semaphore
-  sem: dict[int, Semaphore] = dataclasses.field(default_factory=dict)
-
-  # (semaphore_id, device_id)
-  #   -> list of DMAs that will signal the semaphore on the given device
-  # TODO(jburnim): Fix uses of `dmas_by_sem` to align with the two lines of
-  # documentation above, i.e. index `dmas_by_sem` with
-  # `(semaphore_id, device_id)` (currently indexed with `semaphore_id only).
-  dmas_by_sem: dict[tuple[int, int], list[DMA]] = dataclasses.field(
-      default_factory=lambda: collections.defaultdict(list))
-
-  lock: threading.Lock = dataclasses.field(default_factory=threading.Lock)
-
-  # (device_id, local_core_id) -> next buffer ID
-  next_buffer_id: dict[tuple[int, int], int] = dataclasses.field(
-      default_factory=lambda: collections.defaultdict(lambda: 100))
-  # global_core_id -> next semaphore ID
-  next_semaphore_id: dict[int, int] = dataclasses.field(
-      default_factory=lambda: collections.defaultdict(lambda: 2000))
-
-  next_dma_id: int = 100
-
-  deallocated_bytes: int = 0
-
-  # (device_id, local_core_id) -> [(grid_index, [range])]
-  output_ranges: dict[tuple[int, int], list] = dataclasses.field(
-      default_factory=lambda: collections.defaultdict(list))
-
-  @property
-  def num_cores(self) -> int:
-    return self.num_devices * self.num_cores_per_device
+class Counter:
+  """A simple counter that is thread-safe."""
+
+  def __init__(self, initial_value: int):
+    self.value = initial_value
+    self.lock = threading.Lock()
+
+  def get_next(self):
+    with self.lock:
+      result = self.value
+      self.value += 1
+    return result
 
 
 # TODO(jburnim): Do we want to support multiple instances of SharedMemory?
 # Maybe for running multiple distinct interpreted computations in parallel?
-_shared_memory : SharedMemory | None = None
+_shared_memory: memory.SharedMemory | None = None
 _shared_memory_init_lock = threading.Lock()
-races : RaceDetectionState | None = None
+races: RaceDetectionState | None = None
+dma_id_counter: Counter | None = None
 
 def reset_tpu_interpret_mode_state():
   """Resets all global, shared state used by TPU interpret mode.
@@ -652,14 +201,17 @@ def reset_tpu_interpret_mode_state():
   debugging purposes.  In this case, the shared state must be reset before
   any further kernels are interpreted.
   """
-  global _shared_memory, races
+  global _shared_memory, races, dma_id_counter
   with _shared_memory_init_lock:
     _shared_memory = None
     races = None
+    dma_id_counter = None
 
-def _get_shared_memory() -> SharedMemory:
+
+def _get_shared_memory() -> memory.SharedMemory:
   assert _shared_memory is not None
   return _shared_memory
+
 
 def _clear_shared_memory():
   global _shared_memory
@@ -687,27 +239,40 @@ def _get_vector_clock_size(
 def _initialize_shared_memory(
     device_id, num_devices, num_cores_per_device, *, interpret_params
 ):
-  global _vector_clock_size, _shared_memory, races
+  global _shared_memory, races, dma_id_counter
   del device_id
+
   num_devices = int(num_devices)
   num_cores_per_device = int(num_cores_per_device)
   num_cores = num_devices * num_cores_per_device
+
   with _shared_memory_init_lock:
     if _shared_memory is None:
-      _vector_clock_size = _get_vector_clock_size(
+      vector_clock_size = _get_vector_clock_size(
           num_devices, num_cores_per_device, interpret_params=interpret_params
       )
-      _shared_memory = SharedMemory(
-          interpret_params=interpret_params,
+      races = RaceDetectionState(num_cores=num_cores)
+      dma_id_counter = Counter(100)
+      _shared_memory = memory.SharedMemory(
           num_devices=num_devices,
           num_cores_per_device=num_cores_per_device,
-          clocks=[make_vector_clock(num_cores) for _ in range(num_cores)],
+          out_of_bounds_reads=interpret_params.out_of_bounds_reads,
+          dma_execution_mode=interpret_params.dma_execution_mode,
+          uninitialized_memory=interpret_params.uninitialized_memory,
+          detect_races=interpret_params.detect_races,
+          vector_clock_size=vector_clock_size,
+          clocks=[
+              vc.make_vector_clock(vector_clock_size) for _ in range(num_cores)
+          ],
           barrier=threading.Barrier(
-              num_devices, action=_update_clocks_for_global_barrier),
+              num_devices, action=_update_clocks_for_global_barrier
+          ),
           clean_up_barrier=threading.Barrier(
-              num_devices, action=_clear_shared_memory))
-      races = RaceDetectionState(num_cores=num_cores)
+              num_devices, action=_clear_shared_memory
+          ),
+      )
   assert _shared_memory.num_cores == num_cores
+
 
 def _update_clocks(low_global_core_id, high_global_core_id):
   """Synchronizes the vector clocks for the cores with ids in the range between the two arguments."""
@@ -717,9 +282,10 @@ def _update_clocks(low_global_core_id, high_global_core_id):
   # accessing the same vector clocks.
   with shared_memory.lock:
     for c in shared_memory.clocks[low_global_core_id + 1 : high_global_core_id]:
-      update_vector_clock(shared_memory.clocks[low_global_core_id], c)
+      vc.update_vector_clock(shared_memory.clocks[low_global_core_id], c)
     for c in shared_memory.clocks[low_global_core_id + 1 : high_global_core_id]:
-      update_vector_clock(c, shared_memory.clocks[low_global_core_id])
+      vc.update_vector_clock(c, shared_memory.clocks[low_global_core_id])
+
 
 def _update_clocks_for_device_barrier(device_id):
   """Synchronizes the vector clocks for the cores on the given device."""
@@ -728,21 +294,25 @@ def _update_clocks_for_device_barrier(device_id):
   high_core_id = (device_id + 1) * shared_memory.num_cores_per_device
   _update_clocks(low_core_id, high_core_id)
 
+
 def _update_clocks_for_global_barrier():
   """Synchronizes all vector clocks."""
   shared_memory = _get_shared_memory()
   _update_clocks(0, shared_memory.num_cores)
 
+
 def _barrier(device_id):
-  device_id = int(device_id)
+  del device_id
   shared_memory = _get_shared_memory()
   if shared_memory.num_devices > 1:
     shared_memory.barrier.wait()
 
+
 def _clean_up_shared_memory(device_id):
-  device_id = int(device_id)
+  del device_id
   shared_memory = _get_shared_memory()
   shared_memory.clean_up_barrier.wait()
+
 
 def _check_for_revisiting(device_id, local_core_id, loop_idx, output_blocks):
   device_id = int(device_id)
@@ -752,8 +322,9 @@ def _check_for_revisiting(device_id, local_core_id, loop_idx, output_blocks):
     output_blocks = jax.tree.map(int, output_blocks)
   except:
     raise ValueError('Advanced indexers are not supported on TPU')
-  output_ranges = [_to_range(b) if b is not None else None
-                   for b in output_blocks]
+  output_ranges = [
+      _to_range(b) if b is not None else None for b in output_blocks
+  ]
 
   shared_memory = _get_shared_memory()
   past_output_ranges = shared_memory.output_ranges[(device_id, local_core_id)]
@@ -767,35 +338,37 @@ def _check_for_revisiting(device_id, local_core_id, loop_idx, output_blocks):
     if past_output_ranges[-1][1][i] == output_ranges[i]:
       continue
     # TODO(jburnim): Do something constant time instead of linear here.
-    past_idxs = [j for j, ors in enumerate(past_output_ranges)
-                 if ors[1][i] == output_ranges[i]]
+    past_idxs = [
+        j
+        for j, ors in enumerate(past_output_ranges)
+        if ors[1][i] == output_ranges[i]
+    ]
     if past_idxs:
-      first_prev_idx = past_output_ranges[past_idxs[0]][0]
-      first_prev_idx = past_output_ranges[past_idxs[-1]][0]
       raise RuntimeError(
-        f'Revisited block {output_ranges[i]} of output {i} in iteration '
-        f'{loop_idx}. The block was previously visited in iterations '
-        f'{past_output_ranges[past_idxs[0]][0]} through '
-        f'{past_output_ranges[past_idxs[-1]][0]} .')
+          f'Revisited block {output_ranges[i]} of output {i} in iteration '
+          f'{loop_idx}. The block was previously visited in iterations '
+          f'{past_output_ranges[past_idxs[0]][0]} through '
+          f'{past_output_ranges[past_idxs[-1]][0]} .'
+      )
 
   past_output_ranges.append((loop_idx, output_ranges))
+
 
 def _validate(device_id):
   device_id = int(device_id)
 
   shared_memory = _get_shared_memory()
-  local_core_ids = tuple(range(shared_memory.num_cores_per_device))
-  with shared_memory.lock:
-    for sem in shared_memory.sem.values():
-      with sem.cv:
-        for lci in local_core_ids:
-          global_core_id = _get_global_core_id(device_id, lci)
-          if sem.counts[global_core_id] != 0:
-            # TODO(jburnim): Make this raise an error, but in a way that doesn't
-            # cause other devices to hang later in `_clean_up_shared_memory`.
-            print(
-                f'Semaphore {sem.id} has non-zero count for {device_id} '
-                f' (core {lci}) at kernel exit: {sem.counts[global_core_id]}')
+  semaphores = shared_memory.get_sempahores_with_nonzero_count(device_id)
+  if semaphores:
+    sem, global_core_id = semaphores[0]
+    # TODO(jburnim): Make this raise an error, but in a way that doesn't
+    # cause other devices to hang later in `_clean_up_shared_memory`.
+    print(
+        f'Semaphore {sem.id} has non-zero count for {device_id} (global core'
+        f' {global_core_id}) at kernel exit:'
+        f' {sem.count_by_core[global_core_id]}'
+    )
+
 
 def _allocate_buffer(
     device_id: Array,
@@ -834,42 +407,35 @@ def _allocate_buffer(
     local_core_ids = (local_core_id_int,)
   del local_core_id
 
-  local_core_id_to_buffer_id : dict[int, int] = {}
-  with shared_memory.lock:
-    for lci in local_core_ids:
-      buffer_id = shared_memory.next_buffer_id[(device_id, lci)]
-      shared_memory.next_buffer_id[(device_id, lci)] = buffer_id + 1
-      if memory_space_str in ['any', 'hbm']:
-        # If allocating in HBM, only actually allocate a buffer once.
-        # The first local core (i.e. thread) that gets here allocates the
-        # buffer, but the buffer is still keyed in the shared memory with core
-        # id 0. However, since the buffer is shared across all cores, we
-        # initialize the buffer's `ref_count` with the number of cores per
-        # device. This ensures that the buffer is not deallocated until all
-        # cores have exited the scope of the allocation (e.g. have exited the
-        # body of a `run_scoped`).
-        key = (memory_space_str, buffer_id, device_id, 0)
-        if key not in shared_memory.mem:
-          shared_memory.mem[key] = Buffer(
-              val, ref_count=shared_memory.num_cores_per_device
-          )
-      else:
+  local_core_id_to_buffer_id: dict[int, int] = {}
+  for lci in local_core_ids:
+    buffer_id = shared_memory.get_next_buffer_id(device_id, lci)
+    if memory_space_str in ['any', 'hbm']:
+      # If allocating in HBM, only actually allocate a buffer once. The first
+      # local core (i.e. thread) that gets here allocates the buffer, but the
+      # buffer is still keyed in the shared memory with core ID 0. However,
+      # since the buffer is shared across all cores, we initialize the buffer's
+      # `ref_count` with the number of cores per device. This ensures that the
+      # buffer is not deallocated until all cores have exited the scope of the
+      # allocation (e.g. have exited the body of a `run_scoped`).
+      key = (memory_space_str, buffer_id, device_id, 0)
+      ref_count = shared_memory.num_cores_per_device
+    else:
+      key = (memory_space_str, buffer_id, device_id, lci)
+      ref_count = 1
+      if len(local_core_id_to_buffer_id) > 0:
         # If we are allocating more than one buffer, we must make additional
         # copies of `val` so that each buffer is a distinct ndarray.
-        if len(local_core_id_to_buffer_id) > 0:
-          val = val.copy()
-        shared_memory.mem[(memory_space_str, buffer_id, device_id, lci)] = (
-            Buffer(val)
-        )
+        val = val.copy()
 
-      local_core_id_to_buffer_id[lci] = buffer_id
+    shared_memory.allocate_buffer(key, ref_count=ref_count, value=val)
+    local_core_id_to_buffer_id[lci] = buffer_id
 
   # The buffer ids should always be kept in sync across all cores.
   assert all(
       buffer_id == local_core_id_to_buffer_id[local_core_id_int]
       for buffer_id in local_core_id_to_buffer_id.values()
   )
-
   # TODO(jburnim): Raise an error if buffer_id is too big for int16.
   return np.int16(local_core_id_to_buffer_id[local_core_id_int])
 
@@ -889,23 +455,8 @@ def _deallocate_buffer(device_id, local_core_id, memory_space, buffer_id):
   local_core_id = _local_core_id_or_zero_if_hbm(local_core_id, memory_space)
 
   shared_memory = _get_shared_memory()
-  with shared_memory.lock:
-    key = (memory_space, buffer_id, device_id, local_core_id)
-    buff = shared_memory.mem[key]
-    buff.decrease_ref_count()
-    if buff.has_zero_ref_count():
-      shared_memory.mem.pop(key)
-      shared_memory.deallocated_bytes += buff.size()
-      del buff
-
-    should_collect = shared_memory.deallocated_bytes > 100_000_000
-    if should_collect:
-      shared_memory.deallocated_bytes = 0
-
-  if should_collect:
-    # Periodic garbage collection here prevents OOMs -- although it's not clear
-    # why arrays are not getting freed without this.
-    gc.collect()
+  key = (memory_space, buffer_id, device_id, local_core_id)
+  shared_memory.deallocate_buffer(key)
 
 
 def _allocate_semaphores(
@@ -941,32 +492,22 @@ def _allocate_semaphores(
 
   if local_core_id is None:
     local_core_id_int = 0
-    global_core_ids = tuple(
-        _get_global_core_id(device_id, core_id)
-        for core_id in range(shared_memory.num_cores_per_device)
-    )
+    global_core_ids = shared_memory.get_global_core_ids(device_id)
   else:
     local_core_id_int = int(local_core_id)
-    global_core_ids = (_get_global_core_id(device_id, local_core_id_int),)
+    global_core_ids = (
+        shared_memory.get_global_core_id(device_id, local_core_id_int),
+    )
   del local_core_id
 
   global_core_id_to_semaphore_id = {}
-  with shared_memory.lock:
-    for gci in global_core_ids:
-      semaphore_id = shared_memory.next_semaphore_id[gci]
-      shared_memory.next_semaphore_id[gci] = (
-          semaphore_id + num_semaphores
-      )
+  for gci in global_core_ids:
+    semaphore_id = shared_memory.allocate_semaphores(gci, num_semaphores)
+    global_core_id_to_semaphore_id[gci] = semaphore_id
 
-      # Ensure that only one global `Semaphore` object is allocated for each
-      # `semaphore_id`.
-      for i in range(semaphore_id, semaphore_id + num_semaphores):
-        if i not in shared_memory.sem:
-          shared_memory.sem[i] = Semaphore(i)
-
-      global_core_id_to_semaphore_id[gci] = semaphore_id
-
-  global_core_id = _get_global_core_id(device_id, local_core_id_int)
+  global_core_id = shared_memory.get_global_core_id(
+      device_id, local_core_id_int
+  )
   # The semaphore ids should always be kept in sync across all cores.
   assert all(
       semaphore_id == global_core_id_to_semaphore_id[global_core_id]
@@ -984,31 +525,29 @@ def _allocate_semaphores(
   ).reshape(shape)
 
 
-TPU_MEMORY_SPACE_IDXS : dict[mosaic_core.MemorySpace | pallas_core.MemorySpace | None, int] = {
-    v: i for i, v in enumerate(mosaic_core.MemorySpace)}
-TPU_MEMORY_SPACE_IDXS[pallas_core.MemorySpace.ANY] = (
-    TPU_MEMORY_SPACE_IDXS[mosaic_core.MemorySpace.ANY])
+TPU_MEMORY_SPACE_IDXS: dict[
+    mosaic_core.MemorySpace | pallas_core.MemorySpace | None, int
+] = {v: i for i, v in enumerate(mosaic_core.MemorySpace)}
+TPU_MEMORY_SPACE_IDXS[pallas_core.MemorySpace.ANY] = TPU_MEMORY_SPACE_IDXS[
+    mosaic_core.MemorySpace.ANY
+]
 TPU_MEMORY_SPACE_NAMES = {
-    i: v.value for i, v in enumerate(mosaic_core.MemorySpace)}
+    i: v.value for i, v in enumerate(mosaic_core.MemorySpace)
+}
 
 # Default to VMEM when no memory space is specified.
-TPU_MEMORY_SPACE_IDXS[None] = (
-    TPU_MEMORY_SPACE_IDXS[mosaic_core.MemorySpace.VMEM])
+TPU_MEMORY_SPACE_IDXS[None] = TPU_MEMORY_SPACE_IDXS[
+    mosaic_core.MemorySpace.VMEM
+]
+
 
 def get_barrier_semaphore(device_id, collective_id):
   del device_id
   collective_id = int(collective_id)
-
-  # TODO(jburnim): Check/fix so that IDs for barrier semaphores do not conflict
-  # with IDs for regular or DMA semaphores.  (For example, store them in a
-  # different table.)
   shared_memory = _get_shared_memory()
-  with shared_memory.lock:
-    semaphore_id = collective_id
-    if semaphore_id not in shared_memory.sem:
-      shared_memory.sem[semaphore_id] = Semaphore()
+  shared_memory.guarantee_semaphore_with_fixed_id(collective_id)
+  return np.int16(collective_id)
 
-  return np.int16(semaphore_id)
 
 def _transform_slice_or_index(slice_or_idx):
   if isinstance(slice_or_idx, int):
@@ -1018,6 +557,7 @@ def _transform_slice_or_index(slice_or_idx):
     size = int(slice_or_idx.size)
     stride = int(slice_or_idx.stride)
     return slice(start, start + size * stride, stride)
+
 
 def _compose_slice_or_index(slice_or_idx1, slice_or_idx2):
   ret = []
@@ -1034,31 +574,41 @@ def _compose_slice_or_index(slice_or_idx1, slice_or_idx2):
       ret.append(slice_or_idx1[i])
       i += 1
     elif isinstance(slice_or_idx2[j], int):
-      ret.append(slice_or_idx1[i].start + slice_or_idx2[j] * slice_or_idx1[i].step)
+      ret.append(
+          slice_or_idx1[i].start + slice_or_idx2[j] * slice_or_idx1[i].step
+      )
       i += 1
       j += 1
     else:
-      ret.append(slice(
-          slice_or_idx1[i].start + slice_or_idx2[j].start * slice_or_idx1[i].step,
-          slice_or_idx1[i].start + slice_or_idx2[j].stop * slice_or_idx1[i].step,
-          slice_or_idx1[i].step * slice_or_idx2[j].step
-      ))
+      ret.append(
+          slice(
+              slice_or_idx1[i].start
+              + slice_or_idx2[j].start * slice_or_idx1[i].step,
+              slice_or_idx1[i].start
+              + slice_or_idx2[j].stop * slice_or_idx1[i].step,
+              slice_or_idx1[i].step * slice_or_idx2[j].step,
+          )
+      )
       i += 1
       j += 1
+
 
 def _to_range(transforms) -> tuple[slice | int, ...]:
   ret = ()
   for transform in transforms:
     # For now, assume only NDIndexer transforms.
     ret = _compose_slice_or_index(
-        ret, tuple(_transform_slice_or_index(i) for i in transform.indices))
+        ret, tuple(_transform_slice_or_index(i) for i in transform.indices)
+    )
   return ret
 
-def _to_int(x : int | Array | None) -> int | None:
+
+def _to_int(x: int | Array | None) -> int | None:
   """Converts a value to an integer, or returns None if the value is None."""
   if x is None:
     return None
   return int(x)
+
 
 def get(
     device_id,
@@ -1074,7 +624,7 @@ def get(
     clock=None,
     source_info=None,
     input_name=None,
-):
+) -> np.ndarray:
   device_id = int(device_id)
   local_core_id = int(local_core_id)
   memory_space = TPU_MEMORY_SPACE_NAMES[int(memory_space)]
@@ -1092,83 +642,83 @@ def get(
     block_indices = tuple(int(x) for x in block_indices)
     grid_loop_idx = tuple(int(x) for x in tuple(grid_loop_idx))
 
+  shared_memory = _get_shared_memory()
+
   local_core_id_for_buffer = _local_core_id_or_zero_if_hbm(
       local_core_id, memory_space
   )
-  global_core_id = _get_global_core_id(device_id, local_core_id)
+  global_core_id = shared_memory.get_global_core_id(device_id, local_core_id)
 
-  shared_memory = _get_shared_memory()
-  with shared_memory.lock:
-    read_range = _to_range(transforms)
-    if shared_memory.interpret_params.detect_races:
-      inc_vector_clock(shared_memory.clocks[global_core_id], global_core_id)
-      if clock is None:
-        clock = copy_vector_clock(shared_memory.clocks[global_core_id])
-    array = shared_memory.mem[
-        (memory_space, buffer_id, device_id, local_core_id_for_buffer)
-    ].content
-    try:
-      ret = array[read_range].copy()
-    except:
-      ret = None
+  key = (memory_space, buffer_id, device_id, local_core_id_for_buffer)
+  read_range = _to_range(transforms)
+  ret, (shape, dtype), clock_ = shared_memory.get_buffer_content(
+      key, read_range, global_core_id
+  )
+  clock = clock if clock is not None else clock_
 
-    # Compute the shape of the read value, assuming the read is fully in-bounds.
-    # TODO(jburnim): We already know this shape in the Jaxpr where we insert a
-    # callback to `get`.  Should we just pass the shape to `get`?
-    # TODO(jburnim): Move to a helper function?
-    full_read_shape = []
-    assert len(read_range) <= len(array.shape)
-    for dim_size, idx_or_slice in (
-        itertools.zip_longest(array.shape, read_range, fillvalue=None)):
-      if idx_or_slice is None:
-        full_read_shape.append(dim_size)
-      elif isinstance(idx_or_slice, int):
-        continue
+  # Compute the shape of the read value, assuming the read is fully in-bounds.
+  # TODO(jburnim): We already know this shape in the Jaxpr where we insert a
+  # callback to `get`.  Should we just pass the shape to `get`?
+  # TODO(jburnim): Move to a helper function?
+  full_read_shape = []
+  assert len(read_range) <= len(shape)
+  for dim_size, idx_or_slice in itertools.zip_longest(
+      shape, read_range, fillvalue=None
+  ):
+    assert isinstance(dim_size, int)
+    if idx_or_slice is None:
+      full_read_shape.append(dim_size)
+    elif isinstance(idx_or_slice, int):
+      continue
+    else:
+      dim_size = (idx_or_slice.stop - idx_or_slice.start) // idx_or_slice.step
+      assert isinstance(dim_size, int)
+      full_read_shape.append(dim_size)
+  full_read_shape = tuple(full_read_shape)
+
+  if (ret is None) or (full_read_shape != ret.shape):
+    if shared_memory.out_of_bounds_reads == 'raise':
+      if source_info is None:
+        ctx = contextlib.nullcontext()
       else:
-        full_read_shape.append(
-            (idx_or_slice.stop - idx_or_slice.start) // idx_or_slice.step)
-    full_read_shape = tuple(full_read_shape)
-
-    if (ret is None) or (full_read_shape != ret.shape):
-      if shared_memory.interpret_params.out_of_bounds_reads == "raise":
-        if source_info is None:
-          ctx = contextlib.nullcontext()
-        else:
-          ctx = source_info_util.user_context(
-              traceback=source_info.traceback, name_stack=source_info.name_stack
+        ctx = source_info_util.user_context(
+            traceback=source_info.traceback, name_stack=source_info.name_stack
+        )  # type: ignore[assignment]
+      with ctx:
+        if input_name is None:
+          raise IndexError(
+              'Out-of-bounds read of'
+              f' ({device_id} {local_core_id} {memory_space} {buffer_id}):'
+              f' reading [{read_range}] but buffer has shape {shape}.'
           )
-        with ctx:
-          if input_name is None:
-            raise IndexError(
-                'Out-of-bounds read of'
-                f' ({device_id} {local_core_id} {memory_space} {buffer_id}):'
-                f' reading [{read_range}] but buffer has shape {array.shape}.'
-            )
-          else:
-            # Different error message when we are reading a block of an input,
-            # to copy it to a buffer before invoking the kernel body.
-            raise IndexError(
+        else:
+          # Different error message when we are reading a block of an input,
+          # to copy it to a buffer before invoking the kernel body.
+          raise IndexError(
               f'Out-of-bounds block index {block_indices} for'
               f' input "{input_name}" in iteration {grid_loop_idx}'
               f' on device {device_id} (core {local_core_id}):'
-              f' reading [{read_range}] but input has shape {array.shape}.')
-      # out_of_bounds_reads == "uninitialized"
-      uninit_array = np.full(
-          full_read_shape,
-          _uninitialized_value(array.dtype, shared_memory.interpret_params),
-          dtype=array.dtype)
-      if ret is None:
-        ret = uninit_array
-      else:
-        uninit_array[tuple(slice(s) for s in ret.shape)] = ret
-        ret = uninit_array
+              f' reading [{read_range}] but input has shape {shape}.'
+          )
+    # out_of_bounds_reads == "uninitialized"
+    uninit_array = np.full(
+        full_read_shape,
+        _uninitialized_value(dtype, shared_memory.uninitialized_memory),
+        dtype=dtype,
+    )
+    if ret is None:
+      ret = uninit_array
+    else:
+      uninit_array[tuple(slice(s) for s in ret.shape)] = ret
+      ret = uninit_array
 
-  if shared_memory.interpret_params.detect_races:
+  if shared_memory.detect_races:
     if src_device_id is None:
       src_device_id = device_id
     if src_local_core_id is None:
       src_local_core_id = local_core_id
-    check_read(
+    assert races is not None
+    races.check_read(
         src_device_id,
         src_local_core_id,
         clock,
@@ -1178,6 +728,7 @@ def get(
     )
 
   return ret
+
 
 def store(
     device_id,
@@ -1213,48 +764,44 @@ def store(
     block_indices = tuple(int(x) for x in block_indices)
     grid_loop_idx = tuple(int(x) for x in tuple(grid_loop_idx))
 
+  shared_memory = _get_shared_memory()
+
   local_core_id_for_buffer = _local_core_id_or_zero_if_hbm(
       local_core_id, memory_space
   )
-  global_core_id = _get_global_core_id(device_id, local_core_id)
+  global_core_id = shared_memory.get_global_core_id(device_id, local_core_id)
 
-  shared_memory = _get_shared_memory()
-  with shared_memory.lock:
-    if shared_memory.interpret_params.detect_races:
-      inc_vector_clock(shared_memory.clocks[global_core_id], global_core_id)
-      if clock is None:
-        clock = copy_vector_clock(shared_memory.clocks[global_core_id])
+  key = (memory_space, buffer_id, device_id, local_core_id_for_buffer)
+  write_range = _to_range(transforms)
+  in_bounds, (shape, _), clock_ = shared_memory.store_buffer_content(
+      key, write_range, val, global_core_id
+  )
+  clock = clock if clock is not None else clock_
 
-    array = shared_memory.mem[
-        (memory_space, buffer_id, device_id, local_core_id_for_buffer)
-    ].content
-    assert array.dtype == val.dtype  # TODO(jburnim): Catch this statically.
-    write_range = _to_range(transforms)
-    # TODO(jburnim): Better error message if this raises?
-    in_bounds_shape = array[write_range].shape
-    if in_bounds_shape != val.shape:
-      if output_name is None:
-        raise ValueError(
-            'Out-of-bounds write of'
-            f' ({device_id} {local_core_id} {memory_space} {buffer_id}): writing'
-            f' [{write_range}] but buffer has shape {array.shape} .'
-         )
-      else:
-        # Different error message when we are copying a kernel buffer to a
-        # block of an output (just after a kernel invocation).
-        raise IndexError(
-            f'Out-of-bounds block index {block_indices} for'
-            f' output "{output_name}" in iteration {grid_loop_idx}'
-            f' on device {device_id} (core {local_core_id}):'
-            f' reading [{write_range}] but output has shape {array.shape}.')
-    array[write_range] = val
+  if not in_bounds:
+    if output_name is None:
+      raise ValueError(
+          'Out-of-bounds write of'
+          f' ({device_id} {local_core_id} {memory_space} {buffer_id}):'
+          f' writing [{write_range}] but buffer has shape {shape} .'
+      )
+    else:
+      # Different error message when we are copying a kernel buffer to a
+      # block of an output (just after a kernel invocation).
+      raise IndexError(
+          f'Out-of-bounds block index {block_indices} for'
+          f' output "{output_name}" in iteration {grid_loop_idx}'
+          f' on device {device_id} (core {local_core_id}):'
+          f' reading [{write_range}] but output has shape {shape}.'
+      )
 
-  if shared_memory.interpret_params.detect_races:
+  if shared_memory.detect_races:
     if src_device_id is None:
       src_device_id = device_id
     if src_local_core_id is None:
       src_local_core_id = local_core_id
-    check_write(
+    assert races is not None
+    races.check_write(
         src_device_id,
         src_local_core_id,
         clock,
@@ -1262,6 +809,7 @@ def store(
         write_range,
         source_info=source_info,
     )
+
 
 def swap(
     device_id,
@@ -1287,56 +835,39 @@ def swap(
   if mask is not None:
     assert mask.shape == val.shape
 
+  shared_memory = _get_shared_memory()
+
   local_core_id_for_buffer = _local_core_id_or_zero_if_hbm(
       local_core_id, memory_space
   )
-  global_core_id = _get_global_core_id(device_id, local_core_id)
+  global_core_id = shared_memory.get_global_core_id(device_id, local_core_id)
 
-  shared_memory = _get_shared_memory()
-  with shared_memory.lock:
-    if shared_memory.interpret_params.detect_races:
-      inc_vector_clock(shared_memory.clocks[global_core_id], global_core_id)
-      clock = copy_vector_clock(shared_memory.clocks[global_core_id])
-    array = shared_memory.mem[
-        (memory_space, buffer_id, device_id, local_core_id_for_buffer)
-    ].content
-    assert array.dtype == val.dtype  # TODO(jburnim): Catch this statically.
-    read_write_range = _to_range(transforms)
-    # TODO(jburnim): Better error message if this raises?
-    raw_result = array[read_write_range]
-    in_bounds_shape = raw_result.shape
+  key = (memory_space, buffer_id, device_id, local_core_id_for_buffer)
+  read_write_range = _to_range(transforms)
+  ret, (shape, _), clock = shared_memory.swap_buffer_content(
+      key, read_write_range, val, mask, global_core_id
+  )
+
+  if ret is None:
     if mask is None:
-      if in_bounds_shape != val.shape:
-        raise ValueError(
-            'Out-of-bounds swap of'
-            f' ({device_id} {local_core_id} {memory_space} {buffer_id}):'
-            f' swapping [{read_write_range}] but buffer has shape'
-            f' {array.shape} .'
-        )
-      array[read_write_range] = val
-      return raw_result.copy()
-
-    in_bounds_mask = np.full(mask.shape, True)
-    for i in range(len(in_bounds_shape)):
-      in_bounds_mask[in_bounds_shape[i]:] = False
-    if (~in_bounds_mask & mask).any():
+      raise ValueError(
+          'Out-of-bounds swap of'
+          f' ({device_id} {local_core_id} {memory_space} {buffer_id}):'
+          f' swapping [{read_write_range}] but buffer has shape'
+          f' {shape} .'
+      )
+    else:
       # TODO(jburnim): Include indices of out-of-bounds locations where mask
       # is True.
       raise ValueError(
           'Out-of-bounds masked swap of'
           f' ({device_id} {local_core_id} {memory_space} {buffer_id}): swapping'
-          f' [{read_write_range}] but buffer has shape {array.shape} . '
+          f' [{read_write_range}] but buffer has shape {shape} . '
       )
 
-    in_bounds_idx = tuple(slice(i) for i in in_bounds_shape)
-    result = val.copy()
-    result[in_bounds_idx] = np.where(
-        mask[in_bounds_idx], raw_result, val[in_bounds_idx])
-    array[read_write_range] = np.where(
-        mask[in_bounds_idx], val[in_bounds_idx], raw_result)
-
-  if shared_memory.interpret_params.detect_races:
-    check_write(
+  if shared_memory.detect_races:
+    assert races is not None
+    races.check_write(
         device_id,
         local_core_id,
         clock,
@@ -1344,81 +875,149 @@ def swap(
         read_write_range,
         source_info=source_info,
     )
-  return result
+  return ret
 
-def execute_dma(dma):
-  # TODO(jburnim) Eliminate duplicate code here and in Semaphore.wait.
-  shared_memory = _get_shared_memory()
-  with dma.lock:
-    assert dma.state == DmaState.STARTED
 
-    if dma.virtual_device_id is None:
-      # See comment in Semaphore.wait .
-      dma.virtual_device_id = np.random.randint(
-          shared_memory.num_cores, _vector_clock_size)
+class DmaState(enum.Enum):
+  STARTED = 0
+  READ = 1
+  COMPLETED = 2
 
-    # Do the read.
-    if shared_memory.interpret_params.detect_races:
-      inc_vector_clock(dma.clock, dma.virtual_device_id)
-    dma.data = get(dma.src_device_id,
-                   dma.src_local_core_id,
-                   dma.src_memory_space,
-                   dma.src_buffer_id,
-                   dma.src_transforms,
-                   clock=copy_vector_clock(dma.clock),
-                   src_device_id=dma.id,
-                   src_local_core_id=0,
-                   source_info=dma.source_info)
-    data_size = dma.data.itemsize * dma.data.size
 
-    # Signal the send semaphore.
-    if shared_memory.interpret_params.detect_races:
-      inc_vector_clock(dma.clock, dma.virtual_device_id)
-    if dma.src_sem is not None:
-      dma.src_sem.signal(
-          data_size,
-          global_core_id=_get_global_core_id(
-              dma.src_device_id, dma.src_local_core_id
-          ),
-          clock=dma.clock,
-      )
-    dma.state = DmaState.READ
+@dataclasses.dataclass
+class DMA:
+  id: int
 
-    # Do the write.
-    if shared_memory.interpret_params.detect_races:
-      inc_vector_clock(dma.clock, dma.virtual_device_id)
-    store(dma.dst_device_id,
-          dma.dst_local_core_id,
-          dma.dst_memory_space,
-          dma.dst_buffer_id,
-          dma.dst_transforms,
-          dma.data,
-          clock=copy_vector_clock(dma.clock),
-          src_device_id=dma.id,
+  src_device_id: int
+  src_local_core_id: int
+  src_memory_space: int
+  src_buffer_id: int
+  src_transforms: tuple[Any, ...]
+  dst_device_id: int
+  dst_local_core_id: int
+  dst_memory_space: int
+  dst_buffer_id: int
+  dst_transforms: tuple[Any, ...]
+  src_sem: memory.Semaphore | None
+  dst_sem: memory.Semaphore
+  virtual_device_id: int
+  clock: vc.VectorClock
+
+  source_info: source_info_util.SourceInfo | None = None
+
+  state: DmaState = DmaState.STARTED
+  data: np.ndarray | None = None
+  lock: threading.Lock = dataclasses.field(default_factory=threading.Lock)
+
+  @property
+  def data_size(self) -> int:
+    assert self.data is not None
+    return self.data.itemsize * self.data.size
+
+  @property
+  def detect_races(self) -> bool:
+    return self.dst_sem.detect_races
+
+  @property
+  def src_global_core_id(self) -> int:
+    return self.dst_sem.get_global_core_id(
+        self.src_device_id, self.src_local_core_id
+    )
+
+  @property
+  def dst_global_core_id(self) -> int:
+    return self.dst_sem.get_global_core_id(
+        self.dst_device_id, self.dst_local_core_id
+    )
+
+  def execute_read(self):
+    """Executes the reading part of this DMA.
+
+    Note that the caller must not hold the lock on the shared memory (because
+    `get` is called in this method).
+    """
+    # Must acquire the lock on `self` because:
+    #   - `self.state` is inspected and modified in this method.
+    #   - `self.data` is assigned in this method.
+    with self.lock:
+      if self.state != DmaState.STARTED:
+        return
+
+      if self.detect_races:
+        vc.inc_vector_clock(self.clock, self.virtual_device_id)
+
+      self.data = get(
+          self.src_device_id,
+          self.src_local_core_id,
+          self.src_memory_space,
+          self.src_buffer_id,
+          self.src_transforms,
+          clock=vc.copy_vector_clock(self.clock),
+          src_device_id=self.id,
           src_local_core_id=0,
-          source_info=dma.source_info)
-
-    # Signal the receive semaphore.
-    if shared_memory.interpret_params.detect_races:
-      inc_vector_clock(dma.clock, dma.virtual_device_id)
-    if dma.dst_sem is not None:
-      dma.dst_sem.signal(
-          data_size,
-          global_core_id=_get_global_core_id(
-              dma.dst_device_id, dma.dst_local_core_id
-          ),
-          clock=dma.clock,
+          source_info=self.source_info,
       )
 
-    dma.data = None
-    dma.state = DmaState.COMPLETED
+      if self.detect_races:
+        vc.inc_vector_clock(self.clock, self.virtual_device_id)
 
-def print_memory(device_id):
-  device_id = int(device_id)
-  if all(d == 0 for d in device_id):
-    shared_memory = _get_shared_memory()
-    with shared_memory.lock:
-      print(shared_memory.mem)
+      # Signal the send semaphore.
+      if self.src_sem is not None:
+        self.src_sem.signal(
+            self.data_size, self.src_global_core_id, clock=self.clock
+        )
+
+      self.state = DmaState.READ
+
+  def execute_write(self):
+    """Executes the writing part of this DMA.
+
+    Note that the caller must not hold the lock on the shared memory (because
+    `store` is called in this method).
+    """
+    # Must acquire the lock on `self` because:
+    #   - `self.state` is inspected and modified in this method.
+    #   - `self.data` is assigned in this method.
+    with self.lock:
+      assert self.state in (DmaState.READ, DmaState.COMPLETED)
+      if self.state == DmaState.COMPLETED:
+        return
+      assert self.data is not None
+
+      if self.detect_races:
+        vc.inc_vector_clock(self.clock, self.virtual_device_id)
+
+      store(
+          self.dst_device_id,
+          self.dst_local_core_id,
+          self.dst_memory_space,
+          self.dst_buffer_id,
+          self.dst_transforms,
+          self.data,
+          clock=vc.copy_vector_clock(self.clock),
+          src_device_id=self.id,
+          src_local_core_id=0,
+          source_info=self.source_info,
+      )
+
+      if self.detect_races:
+        vc.inc_vector_clock(self.clock, self.virtual_device_id)
+
+      self.dst_sem.signal(
+          self.data_size, self.dst_global_core_id, clock=self.clock
+      )
+
+      self.data = None
+      self.state = DmaState.COMPLETED
+
+  def execute_read_and_write(self):
+    """Executes this DMA, bot the reading and writing parts.
+
+    Note that the caller must not hold the lock on the shared memory.
+    """
+    self.execute_read()
+    self.execute_write()
+
 
 def dma_start(
     device_id,
@@ -1434,9 +1033,12 @@ def dma_start(
     dst_device_id,
     source_info=None,
 ):
+  shared_memory = _get_shared_memory()
   device_id = int(device_id)
   src_local_core_id = int(src_local_core_id)
-  src_global_core_id = _get_global_core_id(device_id, src_local_core_id)
+  src_global_core_id = shared_memory.get_global_core_id(
+      device_id, src_local_core_id
+  )
   src_memory_space, src_id = int(src_memory_space), int(src_id)
   src_transforms = jax.tree.map(int, src_transforms)
   dst_memory_space, dst_id = int(dst_memory_space), int(dst_id)
@@ -1447,103 +1049,133 @@ def dma_start(
     dst_device_id = int(dst_device_id)
   else:
     dst_device_id = device_id
+  dst_global_core_id = shared_memory.get_global_core_id(
+      dst_device_id, src_local_core_id  # Same core on destination device as on source.
+  )
 
-  shared_memory = _get_shared_memory()
-  with shared_memory.lock:
-    dst_sem = shared_memory.sem[dst_sem_id]
-    src_sem = shared_memory.sem[src_sem_id] if src_sem_id is not None else None
+  (src_sem, dst_sem), clock = shared_memory.get_semaphores_and_increment_clock(
+      (src_sem_id, dst_sem_id), src_global_core_id
+  )
 
-    clock = None
-    if shared_memory.interpret_params.detect_races:
-      inc_vector_clock(
-          shared_memory.clocks[src_global_core_id], src_global_core_id
+  assert dma_id_counter is not None
+  id = dma_id_counter.get_next()
+
+  dma = DMA(
+      id,
+      device_id,
+      src_local_core_id,
+      src_memory_space,
+      src_id,
+      src_transforms,
+      dst_device_id,
+      src_local_core_id,  # Same core on destination device as on source.
+      dst_memory_space,
+      dst_id,
+      dst_transforms,
+      src_sem,
+      dst_sem,
+      virtual_device_id = shared_memory.get_random_virtual_device_id(),
+      clock=clock,
+      source_info=source_info,
+  )
+
+  if shared_memory.dma_execution_mode == 'on_wait':
+    if src_sem_id is None:
+      shared_memory.append_semaphore_task(
+          dst_sem_id, dst_global_core_id, dma.execute_read_and_write
       )
-      clock = copy_vector_clock(shared_memory.clocks[src_global_core_id])
-    dma_id = shared_memory.next_dma_id
-    shared_memory.next_dma_id += 1
+    else:
+      shared_memory.append_semaphore_task(
+          src_sem_id, src_global_core_id, dma.execute_read
+      )
+      shared_memory.append_semaphore_task(
+          dst_sem_id,
+          dst_global_core_id,
+          # This task for the waiting semaphore with ID `dst_sem_id` may be
+          # executed before the corresponding DMA task for the sending semaphore
+          # that does the DMA read. We therefore have to append a read-and-write
+          # task here, instead of just a write task. If the reading for the DMA
+          # has already been executed, the DMA's state will indicate this and
+          # the read-write-task appended here will do the write only.
+          # (Alternatively, we could have the DMA write task wait on the
+          # `send_semphore`. This issue with this approach is that we do not
+          # know the number of bytes transferred that `send_semaphore` should be
+          # waiting for until after the reader task is done.)
+          dma.execute_read_and_write,
+      )
+    return
 
-    dma = DMA(
-        dma_id,
-        device_id,
-        src_local_core_id,
-        src_memory_space,
-        src_id,
-        src_transforms,
-        dst_device_id,
-        src_local_core_id,  # Same core on destination device as on source.
-        dst_memory_space,
-        dst_id,
-        dst_transforms,
-        src_sem,
-        dst_sem,
-        clock=clock,
-        source_info=source_info,
-    )
+  assert shared_memory.dma_execution_mode == 'eager'
+  dma.execute_read_and_write()
 
-    if shared_memory.interpret_params.dma_execution_mode == 'on_wait':
-      shared_memory.dmas_by_sem[dst_sem_id].append(dma)
-      if src_sem_id is not None:
-        shared_memory.dmas_by_sem[src_sem_id].append(dma)
-      return
-
-  assert shared_memory.interpret_params.dma_execution_mode == 'eager'
-  execute_dma(dma)
 
 def dma_wait(device_id, local_core_id, sem_id, size):
+  shared_memory = _get_shared_memory()
+
   device_id = int(device_id)
   local_core_id = int(local_core_id)
   sem_id = int(sem_id)
   size = int(size)
-  global_core_id = _get_global_core_id(device_id, local_core_id)
 
+  global_core_id = shared_memory.get_global_core_id(device_id, local_core_id)
+
+  (sem,), _ = shared_memory.get_semaphores_and_increment_clock(
+      {sem_id}, global_core_id
+  )
+  assert sem is not None
+  sem.wait(size, global_core_id, has_tasks=True)
+
+
+def semaphore_signal(
+    device_id,
+    local_core_id,
+    sem_id,
+    inc,
+    target_device_id,
+    target_local_core_id,
+):
   shared_memory = _get_shared_memory()
-  with shared_memory.lock:
-    if shared_memory.interpret_params.detect_races:
-      inc_vector_clock(shared_memory.clocks[global_core_id], global_core_id)
-    sem = shared_memory.sem[sem_id]
-  sem.wait(size, global_core_id, is_dma=True)
 
-def semaphore_signal(device_id, local_core_id, sem_id, inc, target_device_id,
-                     target_local_core_id):
   device_id = int(device_id)
   local_core_id = int(local_core_id)
   sem_id = int(sem_id)
   inc = int(inc)
-  src_global_core_id = _get_global_core_id(device_id, local_core_id)
+  src_global_core_id = shared_memory.get_global_core_id(
+      device_id, local_core_id
+  )
   if target_device_id is None:
     target_device_id = device_id
   else:
     target_device_id = int(target_device_id)
-
   if target_local_core_id is None:
     target_local_core_id = 0
 
-  shared_memory = _get_shared_memory()
-  with shared_memory.lock:
-    clock = None
-    if shared_memory.interpret_params.detect_races:
-      inc_vector_clock(
-          shared_memory.clocks[src_global_core_id], src_global_core_id
-      )
-      clock = copy_vector_clock(shared_memory.clocks[src_global_core_id])
-    sem = shared_memory.sem[sem_id]
+  (sem,), clock = shared_memory.get_semaphores_and_increment_clock(
+      {sem_id}, src_global_core_id
+  )
+  assert sem is not None
   sem.signal(
-      inc, _get_global_core_id(target_device_id, target_local_core_id), clock
+      inc,
+      shared_memory.get_global_core_id(target_device_id, target_local_core_id),
+      clock,
   )
 
+
 def semaphore_wait(device_id, local_core_id, sem_id, value):
+  shared_memory = _get_shared_memory()
+
   device_id = int(device_id)
   local_core_id = int(local_core_id)
   sem_id = int(sem_id)
   value = int(value)
-  global_core_id = _get_global_core_id(device_id, local_core_id)
+  global_core_id = shared_memory.get_global_core_id(device_id, local_core_id)
 
-  shared_memory = _get_shared_memory()
-  with shared_memory.lock:
-    if shared_memory.interpret_params.detect_races:
-      inc_vector_clock(shared_memory.clocks[global_core_id], global_core_id)
-    sem = shared_memory.sem[sem_id]
+  (sem,), _ = shared_memory.get_semaphores_and_increment_clock(
+      {sem_id}, global_core_id
+  )
+  assert sem is not None
   sem.wait(value, global_core_id)
+
 
 def _compute_transformed_shape_and_dtype(shape, dtype, transforms):
   for transform in transforms:
@@ -1679,7 +1311,8 @@ def _interpret_jaxpr(
             TPU_MEMORY_SPACE_IDXS[memory_space],
             ref,
             transforms,
-            ordered=True)
+            ordered=True,
+        )
 
       elif prim is primitives.swap_p:
         (ref, transforms, val, mask) = jax.tree.unflatten(
@@ -1697,7 +1330,8 @@ def _interpret_jaxpr(
             transforms,
             val,
             mask,
-            ordered=True)
+            ordered=True,
+        )
 
       elif prim is mosaic_primitives.delay_p:
         # TODO(jburnim): Implement this properly?
@@ -1787,13 +1421,16 @@ def _interpret_jaxpr(
         allocs = []
         for v in eqn.params['jaxpr'].invars:
           if v.aval.memory_space == mosaic_core.MemorySpace.SEMAPHORE:
-            allocs.append(callback.io_callback(
-                _allocate_semaphores,
-                jax.ShapeDtypeStruct(v.aval.shape, jnp.int16),
-                device_id,
-                local_core_id,
-                v.aval.shape,
-                ordered=True))
+            allocs.append(
+                callback.io_callback(
+                    _allocate_semaphores,
+                    jax.ShapeDtypeStruct(v.aval.shape, jnp.int16),
+                    device_id,
+                    local_core_id,
+                    v.aval.shape,
+                    ordered=True,
+                )
+            )
           else:
             if not interpret_params.allow_hbm_allocation_in_run_scoped:
               memory_space = _get_memory_space_and_raise_if_hbm(
@@ -1801,15 +1438,19 @@ def _interpret_jaxpr(
               )
             else:
               memory_space = v.aval.memory_space
-            allocs.append(callback.io_callback(
-                _allocate_buffer,
-                jax.ShapeDtypeStruct((), jnp.int16),
-                device_id,
-                local_core_id,
-                TPU_MEMORY_SPACE_IDXS[memory_space],
-                _uninitialized_array(
-                    v.aval.shape, v.aval.dtype, interpret_params),
-                ordered=True))
+            allocs.append(
+                callback.io_callback(
+                    _allocate_buffer,
+                    jax.ShapeDtypeStruct((), jnp.int16),
+                    device_id,
+                    local_core_id,
+                    TPU_MEMORY_SPACE_IDXS[memory_space],
+                    _uninitialized_array(
+                        v.aval.shape, v.aval.dtype, interpret_params
+                    ),
+                    ordered=True,
+                )
+            )
 
         out = _interpret(eqn.params['jaxpr'], *deferred_invals(), *allocs)
 
@@ -1831,7 +1472,8 @@ def _interpret_jaxpr(
                 local_core_id,
                 TPU_MEMORY_SPACE_IDXS[v.aval.memory_space],
                 a,
-                ordered=True)
+                ordered=True,
+            )
 
       elif prim is state_primitives.get_p:
         memory_space = _get_memory_space_and_raise_if_hbm(
@@ -1846,7 +1488,8 @@ def _interpret_jaxpr(
             TPU_MEMORY_SPACE_IDXS[memory_space],
             invals[0],
             jax.tree.unflatten(eqn.params['tree'], invals[1:]),
-            ordered=True)
+            ordered=True,
+        )
 
       elif prim is state_primitives.swap_p:
         memory_space = _get_memory_space_and_raise_if_hbm(
@@ -1863,7 +1506,8 @@ def _interpret_jaxpr(
             jax.tree.unflatten(eqn.params['tree'], invals[2:]),
             invals[1],
             None,
-            ordered=True)
+            ordered=True,
+        )
 
       elif prim is mosaic_primitives.dma_start_p:
         (
@@ -1893,13 +1537,16 @@ def _interpret_jaxpr(
             device_id,
             local_core_id,
             TPU_MEMORY_SPACE_IDXS[src_memory_space],
-            src, src_transforms,
+            src,
+            src_transforms,
             TPU_MEMORY_SPACE_IDXS[dst_memory_space],
-            dst, dst_transforms,
+            dst,
+            dst_transforms,
             state_discharge.transform_array(dst_sem, dst_sem_transforms),
             state_discharge.transform_array(src_sem, src_sem_transforms),
             target_device_id,
-            ordered=True)
+            ordered=True,
+        )
         out = []
 
       elif prim is mosaic_primitives.dma_wait_p:
@@ -1923,7 +1570,8 @@ def _interpret_jaxpr(
             local_core_id,
             state_discharge.transform_array(dst_sem, dst_sem_transforms),
             math.prod(read_shape) * read_dtype.itemsize,
-            ordered=True)
+            ordered=True,
+        )
         out = []
 
       elif prim is mosaic_primitives.get_barrier_semaphore_p:
@@ -1932,7 +1580,8 @@ def _interpret_jaxpr(
             jax.ShapeDtypeStruct((), jnp.int16),
             device_id,
             _get_mosaic_params(compiler_params).collective_id,
-            ordered=True)
+            ordered=True,
+        )
 
       elif prim is primitives.semaphore_signal_p:
         sem, sem_transforms, inc, target_device_id, core_index = (
@@ -1948,7 +1597,8 @@ def _interpret_jaxpr(
             inc,
             target_device_id,
             core_index,
-            ordered=True)
+            ordered=True,
+        )
         out = []
 
       elif prim is primitives.semaphore_wait_p:
@@ -1963,7 +1613,8 @@ def _interpret_jaxpr(
             local_core_id,
             state_discharge.transform_array(sem, sem_transforms),
             value,
-            ordered=True)
+            ordered=True,
+        )
         out = []
 
       elif prim is primitives.atomic_rmw_p:
@@ -2195,21 +1846,25 @@ def _get_grid_point(
     grid_point.append(li if jnp.size(coords) == 0 else coords[li])
   return jnp.array(grid_point, dtype=np.int32)
 
-def _uninitialized_value(dtype, interpret_params):
-  if interpret_params.uninitialized_memory == 'nan':
+def _uninitialized_value(dtype, uninitialized_memory: Literal['nan', 'zero']):
+  if uninitialized_memory == 'nan':
     if jnp.issubdtype(dtype, jnp.floating):
       return np.nan
     elif jnp.issubdtype(dtype, jnp.integer):
       return jnp.iinfo(dtype).max
     elif jnp.issubdtype(dtype, jnp.bool):
       return True
-  if interpret_params.uninitialized_memory == 'zero':
+  if uninitialized_memory == 'zero':
     return 0
   raise NotImplementedError(
-      interpret_params.uninitialized_memory + ' + ' + str(dtype))
+    uninitialized_memory + ' + ' + str(dtype))
 
 def _uninitialized_array(shape, dtype, interpret_params):
-  return jnp.full(shape, _uninitialized_value(dtype, interpret_params), dtype)
+  return jnp.full(
+      shape,
+      _uninitialized_value(dtype, interpret_params.uninitialized_memory),
+      dtype,
+  )
 
 def _pad_to_block_dimension(value, block_shape, interpret_params):
   """Pads values so the shape evenly divides into block dimensions.
@@ -2304,8 +1959,9 @@ def interpret_pallas_call(
     out_avals: tuple[jax_core.AbstractValue, ...],
     interpret_params: InterpretParams,
     metadata: frozen_dict.FrozenDict[str, str] | None,
+    name: str | None,
 ):
-  del debug, cost_estimate, out_avals
+  del debug, cost_estimate, out_avals, name
   del metadata  # TODO(sharadmv): Add metadata to HLO.
 
   if isinstance(mesh, mosaic_core.TensorCoreMesh):
@@ -2338,12 +1994,14 @@ def interpret_pallas_call(
       tuple(axis_indices.values()), axis_sizes)
   callback.io_callback(
       functools.partial(
-          _initialize_shared_memory, interpret_params=interpret_params),
+          _initialize_shared_memory, interpret_params=interpret_params
+      ),
       (),
       device_id,
       num_devices,
       interpret_params.num_cores_per_device,
-      ordered=True)
+      ordered=True,
+  )
 
   # Pad input arguments.
   is_squeeze_dim = [
@@ -2368,14 +2026,17 @@ def interpret_pallas_call(
   for i, var in enumerate(
       jaxpr.invars[grid_mapping.num_index_operands:][:grid_mapping.num_inputs]):
     assert var.aval.dtype == input_args[i].dtype
-    input_buffer_ids.append(callback.io_callback(
-        _allocate_buffer,
-        jax.ShapeDtypeStruct((), jnp.int16),
-        device_id,
-        None,  # local_core_id
-        TPU_MEMORY_SPACE_IDXS[mosaic_core.MemorySpace.ANY],
-        input_args[i],
-        ordered=True))
+    input_buffer_ids.append(
+        callback.io_callback(
+            _allocate_buffer,
+            jax.ShapeDtypeStruct((), jnp.int16),
+            device_id,
+            None,  # local_core_id
+            TPU_MEMORY_SPACE_IDXS[mosaic_core.MemorySpace.ANY],
+            input_args[i],
+            ordered=True,
+        )
+    )
 
   # Allocate buffers in HBM for pallas_call outputs.
   oi_alias_map = {v: k - len(scalars) for k, v in input_output_aliases}
@@ -2766,7 +2427,8 @@ def interpret_pallas_call(
             core_index,
             loop_idx,
             output_slices,
-            ordered=True)
+            ordered=True,
+        )
 
         return (
             iteration_idx + 1,
@@ -2821,7 +2483,8 @@ def interpret_pallas_call(
   # TODO(jburnim): Should we only create happens-before here from the other
   # # cores to core 0?
   callback.io_callback(
-      _update_clocks_for_device_barrier, (), device_id, ordered=True)
+      _update_clocks_for_device_barrier, (), device_id, ordered=True
+  )
 
   # Read the output from the allocated output buffers.
   ret = [
@@ -2834,19 +2497,20 @@ def interpret_pallas_call(
           0,  # local_core_id
           TPU_MEMORY_SPACE_IDXS[mosaic_core.MemorySpace.ANY],
           output_buffer_id,
-          (indexing.NDIndexer.from_indices_shape(
-              tuple(indexing.ds(0, s) for s in val.shape),
-              output_buffer_shape),),
-          ordered=True)
+          (
+              indexing.NDIndexer.from_indices_shape(
+                  tuple(indexing.ds(0, s) for s in val.shape),
+                  output_buffer_shape,
+              ),
+          ),
+          ordered=True,
+      )
       for val, output_buffer_id, output_buffer_shape in zip(
-          output_vals, output_buffer_ids, output_buffer_shapes)
+          output_vals, output_buffer_ids, output_buffer_shapes
+      )
   ]
 
-  callback.io_callback(
-      _validate,
-      (),
-      device_id,
-      ordered=True)
+  callback.io_callback(_validate, (), device_id, ordered=True)
 
   # For now, when we're done with a pallas_call, we delete the shared memory.
   # We use a barrier to ensure that all devices are done running the kernel.
@@ -2855,9 +2519,7 @@ def interpret_pallas_call(
   # work if we want to invoke successive pallas_calls that use the same
   # shared memory.
   callback.io_callback(
-      _clean_up_shared_memory,
-      (),
-      device_id,
-      ordered=True)
+      _clean_up_shared_memory, (), device_id, ordered=True
+  )
 
   return ret

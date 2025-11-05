@@ -44,6 +44,7 @@ limitations under the License.
 #include "nanobind/stl/string.h"  // IWYU pragma: keep
 #include "nanobind/stl/variant.h"  // IWYU pragma: keep
 #include "nanobind/stl/vector.h"  // IWYU pragma: keep
+#include "jaxlib/call_location.h"
 #include "jaxlib/config.h"
 #include "jaxlib/jax_jit.h"
 #include "jaxlib/nb_class_ptr.h"
@@ -612,7 +613,7 @@ absl::StatusOr<nb::object> PmapFunction::Call(nb::handle callable,
     return fallback_to_cache_miss();
   }
 
-  xla::ifrt::UserContextScope user_context_scope(PyUserContext::Create());
+  PyUserContextScope user_context_scope;
 
   // 1. Parse arguments.
   std::vector<xla::ifrt::Device*>& input_devices = cache_entry.devices;
@@ -640,6 +641,8 @@ absl::StatusOr<nb::object> PmapFunction::Call(nb::handle callable,
     execute_options.execution_stream_id =
         tsl::Env::Default()->GetCurrentThreadId();
   }
+  PopulateCallLocation(execute_options,
+                       xla::ifrt::UserContextScope::current().get());
 
   // A vector of [num_outputs].
   std::vector<xla::ifrt::ArrayRef> output_arrays;

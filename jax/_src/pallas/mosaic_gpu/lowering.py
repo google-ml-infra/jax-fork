@@ -158,11 +158,18 @@ class Resources:
         scoped_gmem_semaphores=scoped_gmem_semaphores,
     )
 
-  def __or__(self, other: Resources) -> Resources:
+  def or_(self, other: Resources, axis_names: _AxisNames) -> Resources:
     sems = self.scoped_gmem_semaphores
     other_sems = other.scoped_gmem_semaphores
-    scoped_gmem_semaphores = {key: max(sems.get(key, 0), other_sems.get(key, 0))
-                              for key in sems.keys() | other_sems.keys()}
+    scoped_gmem_semaphores = {}
+    for sem_scope in sems.keys() | other_sems.keys():
+      if _is_block_local_scope(sem_scope, axis_names):
+        value = max(sems.get(sem_scope, 0), other_sems.get(sem_scope, 0))
+      elif _is_global_scope(sem_scope, axis_names):
+        value = sems.get(sem_scope, 0) + other_sems.get(sem_scope, 0)
+      else:
+        raise RuntimeError(f"Unrecognized semaphore scope: {sem_scope}")
+      scoped_gmem_semaphores[sem_scope] = value
     return Resources(
         smem_scratch_bytes=max(
             self.smem_scratch_bytes, other.smem_scratch_bytes
@@ -204,7 +211,10 @@ def _estimate_resources(
   for eqn in jaxpr.eqns:
     # TODO(slebedev): Add support for other primitives, notably control flow.
     if rule := _resource_estimators.get(eqn.primitive):
-      rs |= rule(ctx, *(invar.aval for invar in eqn.invars), **eqn.params)
+      rs = rs.or_(
+          rule(ctx, *(invar.aval for invar in eqn.invars), **eqn.params),
+          ctx.axis_names,
+      )
       continue
     # Assume that unsupported primitives are neutral wrt resource usage,
     # unless they have a jaxpr in their params.
@@ -225,7 +235,7 @@ def _cond_resource_estimator(
 ) -> Resources:
   del args  # Unused.
   return functools.reduce(
-      lambda a, b: a | b,
+      lambda a, b: a.or_(b, ctx.axis_names),
       (_estimate_resources(ctx, branch.jaxpr) for branch in branches),
   )
 
@@ -247,8 +257,8 @@ def _while_resource_estimator(
     **params,
 ) -> Resources:
   del args, params  # Unused.
-  return _estimate_resources(ctx, cond_jaxpr.jaxpr) | _estimate_resources(
-      ctx, body_jaxpr.jaxpr
+  return _estimate_resources(ctx, cond_jaxpr.jaxpr).or_(
+      _estimate_resources(ctx, body_jaxpr.jaxpr), ctx.axis_names
   )
 
 
@@ -338,7 +348,13 @@ def _run_scoped_resource_estimator(
       # Don't need to allocate anything.
       pass
     elif aval.memory_space == gpu_core.GMEM and jnp.issubdtype(aval.dtype, pallas_core.semaphore):
-      rs += Resources(scoped_gmem_semaphores={collective_axes: aval.size})
+      if _is_block_local_scope(collective_axes, ctx.axis_names):
+        rs += Resources(scoped_gmem_semaphores={collective_axes: aval.size})
+      else:
+        raise ValueError(
+            "Only thread-collective allocations are supported in run_scoped. To"
+            " allocate global semaphores, use pl.get_global."
+        )
     else:
       raise NotImplementedError(
           f"Unsupported memory space: {aval.memory_space}")
@@ -1030,7 +1046,6 @@ def lower_jaxpr_to_module(
     # Run Python lowering passes. The remaining passes will be run in C++ in
     # jax/jaxlib/mosaic/gpu/custom_call.cc
     mgpu.infer_layout(module)  # pytype: disable=attribute-error
-    mgpu.infer_transforms(module)  # pytype: disable=attribute-error
     mgpu.lower_mgpu_dialect(
         module, launch_ctx, auto_barriers=not params.unsafe_no_auto_barriers
     )
@@ -1039,7 +1054,7 @@ def lower_jaxpr_to_module(
 
   return LoweringResult(
       module, cuda_grid, block, new_out_shapes, prof_spec,
-      scoped_semaphores_shape
+      scoped_semaphores_shape,
   )
 
 
@@ -1382,6 +1397,7 @@ def _handle_transforms(
     handle_transposes=True,
     handle_reshapes=True,
     allow_peer_refs=False,
+    allow_multicast_refs=False,
 ) -> tuple[RefOrTmemType, Sequence[state_types.Transform]]:
   # Before we handle other transforms, we resolve any possible leading
   # aliasing transform.
@@ -1403,6 +1419,7 @@ def _handle_transforms(
     return data
 
   peer_device_id = None
+  is_multicast = False
   for t in transforms:
     match t:
       case indexing.NDIndexer():
@@ -1437,7 +1454,7 @@ def _handle_transforms(
       case gpu_core.PeerMemRef(device_id, device_id_type):
         peer_device_id, other_axes = primitives.device_id_to_logical(
             ctx.module_ctx.mesh_info,
-            device_id,
+            _ensure_ir_value_device_id(device_id),
             device_id_type,
             lambda name: _axis_index_rule(ctx, axis_name=name),
         )
@@ -1446,9 +1463,17 @@ def _handle_transforms(
               "Only JAX mesh axes can be used to obtain peer references, but"
               f" got {other_axes}"
           )
+      case gpu_core.MulticastRef(_, _, _):
+        if not allow_multicast_refs:
+          raise NotImplementedError(
+              "Multicast references are not allowed in the lowering of this"
+              " primitive."
+          )
+        is_multicast = True
       case _:
         new_transforms.append(t)
   if peer_device_id is not None:
+    assert not is_multicast
     if not allow_peer_refs:
       raise NotImplementedError(
           "Peer device references are not allowed in the lowering of this"
@@ -1457,6 +1482,8 @@ def _handle_transforms(
     transformed_ref = ctx.launch_ctx.to_remote(
         transformed_ref, _ensure_ir_value(peer_device_id, jnp.int32)
     )
+  if is_multicast:
+    transformed_ref = ctx.launch_ctx.to_remote_multicast(transformed_ref)
   return transformed_ref, new_transforms
 
 
@@ -1602,8 +1629,7 @@ def _swap_lowering_rule(
     barrier = functools.partial(
         nvvm_dialect.bar_warp_sync, arith_dialect.constant(i32, -1)
     )
-  if not isinstance(value, mgpu.FragmentedArray):
-    raise TypeError(f"Can only store arrays (got {value}).")
+  value = _ensure_fa(value, ctx.avals_in[1].dtype)
 
   if not isinstance(x_ref, ir.Value) and ir.MemRefType.isinstance(x_ref):
     raise TypeError(f"Can only store to references (got {x_ref}).")
@@ -1741,6 +1767,24 @@ def _slice_lowering_rule(
     raise NotImplementedError("Strides are not supported.")
 
   return x[tuple(slice(b, e) for b, e in zip(start_indices, limit_indices))]
+
+
+@register_lowering_rule(lax.slice_p, mgpu.LoweringSemantics.Warpgroup)
+def _slice_lowering_rule_wg(
+    ctx: LoweringRuleContext, x, limit_indices, start_indices, strides
+):
+  del limit_indices
+  assert ir.VectorType.isinstance(x.type)
+  if strides is not None:
+    raise NotImplementedError("Strides are not supported.")
+  out_ty = ir.VectorType.get(
+      ctx.avals_out[0].shape, ir.VectorType(x.type).element_type
+  )
+  sizes = ctx.avals_out[0].shape
+  strides = [1] * len(start_indices)
+  return vector_dialect.extract_strided_slice(
+      out_ty, x, start_indices, sizes, strides
+  )
 
 
 @register_lowering_rule(lax.select_n_p, mgpu.LoweringSemantics.Lane)
@@ -2565,6 +2609,10 @@ def _run_scoped_lowering_rule(
   # Make sure everyone has exited previous scoped allocations. Note that we
   # don't synchronize when we exit the allocation, but only when we might want
   # to reuse its memory again.
+  if collective_axes and collective_axes != (wg_axis,):
+    raise ValueError(
+        "Only thread-collective allocations are supported in run_scoped."
+    )
   if is_multithreaded and is_thread_collective:
     gpu_dialect.barrier()
   with contextlib.ExitStack() as alloc_stack:
@@ -2701,6 +2749,33 @@ def _run_scoped_lowering_rule(
 
   assert len(outs) == len(jaxpr.outvars), (jaxpr, outs)
   return outs
+
+
+@_register_resource_estimator(primitives.get_global_p)
+def _get_global_resource_estimator(
+    ctx: ResourceEstimatorContext, *, what
+) -> Resources:
+  if what.memory_space == gpu_core.GMEM and jnp.issubdtype(
+      what.dtype, pallas_core.semaphore
+  ):
+    collective_axes = tuple(ctx.axis_names)
+    return Resources(scoped_gmem_semaphores={collective_axes: what.size})
+  raise NotImplementedError(f"get_global only supports semaphores, got {what}")
+
+
+@register_lowering_rule(primitives.get_global_p, mgpu.LoweringSemantics.Lane)
+@register_lowering_rule(
+    primitives.get_global_p, mgpu.LoweringSemantics.Warpgroup
+)
+def _get_global_lowering_rule(ctx: LoweringRuleContext, *, what):
+  if what.memory_space == gpu_core.GMEM and jnp.issubdtype(
+      what.dtype, pallas_core.semaphore
+  ):
+    collective_axes = tuple(ctx.module_ctx.axis_names)
+    return ctx.module_ctx.reserve_semaphores(
+        what.shape, collective_axes=collective_axes
+    ).__enter__()
+  raise NotImplementedError(f"get_global only supports semaphores, got {what}")
 
 
 @register_lowering_rule(discharge.run_state_p, mgpu.LoweringSemantics.Lane)
@@ -3260,6 +3335,15 @@ def _ensure_ir_value(x: Any, dtype: jnp.dtype) -> ir.Value:
   return _ir_constant(x, mgpu_utils.dtype_to_ir_type(dtype))
 
 
+def _ensure_ir_value_device_id(device_id: Any) -> ir.Value:
+  ensure_i32 = functools.partial(_ensure_ir_value, dtype=jnp.int32)
+  if isinstance(device_id, tuple):
+    return tuple(map(ensure_i32, device_id))
+  if isinstance(device_id, dict):
+    return {k: ensure_i32(v) for k, v in device_id.items()}
+  return ensure_i32(device_id)
+
+
 def _ir_constant(v: object, t: ir.Type) -> ir.Value:
   if isinstance(
       v, (np.number, np.ndarray, int, float, literals.TypedNdArray)
@@ -3384,9 +3468,14 @@ def _semaphore_read_lowering_rule(ctx: LoweringRuleContext, *args, args_tree):
     raise NotImplementedError(f"Unhandled transforms for semaphore_read: {transforms}")
   sem_ptr = mgpu.utils.memref_ptr(sem)
   i32_ty = ir.IntegerType.get_signless(32)
-  return llvm_dialect.inline_asm(
-    i32_ty, [sem_ptr], "ld.acquire.sys.u32 $0,[$1];", "=r,l", has_side_effects=True,
+  result = llvm_dialect.inline_asm(
+      i32_ty,
+      [sem_ptr],
+      "ld.acquire.sys.u32 $0,[$1];",
+      "=r,l",
+      has_side_effects=True,
   )
+  return _ensure_fa(result, jnp.int32)
 
 
 @register_lowering_rule(primitives.semaphore_signal_p, mgpu.LoweringSemantics.Lane)
@@ -3412,7 +3501,7 @@ def _semaphore_signal_lowering_rule(
   if device_id is not None:
     device_id, other_axes = primitives.device_id_to_logical(
         ctx.module_ctx.mesh_info,
-        device_id,
+        _ensure_ir_value_device_id(device_id),
         device_id_type,
         lambda name: _axis_index_rule(ctx, axis_name=name),
     )
@@ -3420,9 +3509,7 @@ def _semaphore_signal_lowering_rule(
       raise NotImplementedError(
           f"Only JAX mesh axes can be used in device_id, but found {other_axes}"
       )
-    sem_ptr = ctx.launch_ctx.to_remote(
-        sem_ptr, _ensure_ir_value(device_id, jnp.int32)
-    )
+    sem_ptr = ctx.launch_ctx.to_remote(sem_ptr, device_id)
   # TODO(apaszke): Narrow the scope from .sys to .gpu when the semaphore is local.
   val = _ir_constant(value, i32)
   # We only signal the semaphore from a single lane, which does not guarantee

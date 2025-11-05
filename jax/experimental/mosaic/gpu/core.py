@@ -13,13 +13,14 @@
 # limitations under the License.
 # ==============================================================================
 
-from collections.abc import Callable
-from collections.abc import Sequence
+from collections.abc import Callable, Iterable, Sequence
 import contextlib
 import ctypes
 import dataclasses
 import enum
+import functools
 import hashlib
+import io
 import itertools
 import math
 import os
@@ -29,14 +30,17 @@ from typing import Any, Generic, TypeVar
 import weakref
 
 import jax
+from jax._src import core as jax_core
 from jax._src import dtypes
 from jax._src import lib
+from jax._src import mesh as mesh_lib
 from jax._src import sharding_impls
 from jax._src import util as jax_util
 from jax._src.interpreters import mlir
 from jax._src.lib import mosaic_gpu_dialect as dialect
 from jaxlib.mlir import ir
 from jaxlib.mlir import passmanager
+from jaxlib.mlir.dialects import _gpu_ops_gen
 from jaxlib.mlir.dialects import arith
 from jaxlib.mlir.dialects import builtin
 from jaxlib.mlir.dialects import func
@@ -52,7 +56,6 @@ from . import layout_inference
 from . import layouts
 from . import profiler
 from . import tcgen05
-from . import transform_inference
 from . import utils
 
 # MLIR can't find libdevice unless we point it to the CUDA path
@@ -61,7 +64,7 @@ os.environ["CUDA_ROOT"] = cuda_root
 PYTHON_RUNFILES = os.environ.get("PYTHON_RUNFILES")
 
 # This tracks the latest Mosaic GPU IR version with a monthly delay.
-FWD_COMPAT_IR_VERSION = 1
+FWD_COMPAT_IR_VERSION = 2
 
 c = utils.c  # This is too common to fully qualify.
 
@@ -130,15 +133,15 @@ def supports_cross_device_collectives():
   )
 
 
-mosaic_gpu_p = jax._src.core.Primitive("mosaic_gpu_p")
+mosaic_gpu_p = jax_core.Primitive("mosaic_gpu_p")
 mosaic_gpu_p.multiple_results = True
 
 
 @mosaic_gpu_p.def_abstract_eval
 def _mosaic_gpu_abstract_eval(*_, module, out_types, inout_types):
-  del module  # Unused.
+  del module # Unused.
   return [
-      jax._src.core.ShapedArray(t.shape, t.dtype)
+      jax_core.ShapedArray(t.shape, t.dtype)
       for t in itertools.chain(out_types, inout_types)
   ]
 
@@ -153,7 +156,7 @@ def _has_communication(module, **_):
 
 # TODO(apaszke): Implement a proper system for managing kernel lifetimes
 # Maps kernel ID to the compiled kernel ASM.
-KNOWN_KERNELS: dict[bytes, str] = {}
+KNOWN_KERNELS: dict[bytes, bytes] = {}
 
 
 def _mosaic_gpu_lowering_rule(
@@ -173,7 +176,9 @@ def _mosaic_gpu_lowering_rule(
     # to physical translation, which is currently not implemented.
     if isinstance(axis_context, sharding_impls.SPMDAxisContext):
       mesh = axis_context.mesh
-      if not np.array_equal(mesh.device_ids.ravel(), np.arange(mesh.size)):
+      # Skip the check for AbstractMesh
+      if (isinstance(mesh, mesh_lib.Mesh) and
+          not np.array_equal(mesh.device_ids.ravel(), np.arange(mesh.size))):
         raise NotImplementedError(
             "Mosaic GPU only supports meshes with device ordering that follows"
             " row-major device ids."
@@ -204,7 +209,9 @@ def _mosaic_gpu_lowering_rule(
       serialize=True,
       ir_version=FWD_COMPAT_IR_VERSION if ctx.is_forward_compat() else None,
   )
-  module_asm = module.operation.get_asm(binary=True, enable_debug_info=True)
+  bytecode_buffer = io.BytesIO()
+  module.operation.write_bytecode(bytecode_buffer, desired_version=0)
+  module_asm = bytecode_buffer.getvalue()
   kernel_id = hashlib.sha256(module_asm).digest()
   # Note that this is technically only a half measure. Someone might load a
   # compiled module with a hash collision from disk. But that's so unlikely with
@@ -576,9 +583,14 @@ def _launch(
         )
   else:
     cluster_kwargs = {}
-  launch_op = gpu.LaunchOp(
-      token.type, [token], *grid_vals, *block_vals,
-      dynamicSharedMemorySize=c(smem_bytes, i32), **cluster_kwargs)
+  launch_op = _gpu_ops_gen.LaunchOp(
+      token.type,
+      [token],
+      *grid_vals,
+      *block_vals,
+      dynamicSharedMemorySize=c(smem_bytes, i32),
+      **cluster_kwargs,
+  )
   launch_op.body.blocks.append(*([index] * (12 + 2 * len(cluster_kwargs))))  # Append an empty block
   with ir.InsertionPoint(launch_op.body.blocks[0]):
     dynamic_smem = gpu.dynamic_shared_memory(
@@ -596,8 +608,16 @@ def _launch(
           c(profiler_start, index),
           lowering_semantics,
       )
+      if lowering_semantics == LoweringSemantics.Warpgroup:
+        prof_smem = dialect.with_transforms(prof_smem, ir.ArrayAttr.get([]))
+        wrap_in_custom_primitive = True
+      else:
+        wrap_in_custom_primitive = False
       prof = profiler.OnDeviceProfiler(
-          profiler_spec, prof_smem, maybe_prof_buffer
+          profiler_spec,
+          prof_smem,
+          maybe_prof_buffer,
+          wrap_in_custom_primitive,
       )
     else:
       prof = None
@@ -830,7 +850,6 @@ def _kernel_to_module(
     # Run Python lowering passes. The remaining passes will be run in C++ in
     # jax/jaxlib/mosaic/gpu/custom_call.cc
     layout_inference.infer_layout(module)  # pytype: disable=attribute-error
-    transform_inference.infer_transforms(module)  # pytype: disable=attribute-error
     dialect_lowering.lower_mgpu_dialect(module, launch_ctx)  # pytype: disable=attribute-error
 
   launch_ctx.scratch.finalize_size()
@@ -893,7 +912,12 @@ def as_gpu_kernel(
         )
 
   def bind(*args) -> Any:
-    return mosaic_gpu_p.bind(*args, module=module, out_types=out_shape, inout_types=inout_shape)
+    return mosaic_gpu_p.bind(
+        *args,
+        module=module,
+        out_types=out_shape,
+        inout_types=inout_shape,
+    )
 
   if prof_spec is not None:
     @jax.jit
@@ -931,24 +955,46 @@ def as_torch_gpu_kernel(
     module_name: str = "unknown",
     kernel_name: str | None = None,
     thread_semantics: LoweringSemantics = LoweringSemantics.Lane,
-    inout_shape = (),
+    inout_shape=(),
 ):
+  (
+      module,
+      in_shape,
+      inout_shape,
+      out_shape,
+      unwrap_output_tuple,
+      is_device_collective,
+  ) = _kernel_to_module(
+      body,
+      grid,
+      block,
+      in_shape,
+      out_shape,
+      smem_scratch_shape,
+      prof_spec,
+      cluster,
+      module_name,
+      kernel_name,
+      thread_semantics,
+      inout_shape,
+  )
+  module = _run_serde_pass(module, serialize=True, ir_version=None)
+  return _as_torch_gpu_kernel(
+      module.operation.get_asm(binary=True, enable_debug_info=True),
+      in_shape,
+      out_shape,
+      inout_shape,
+      unwrap_output_tuple=unwrap_output_tuple,
+  )
+
+
+def _compile_as_torch_gpu_kernel(module_asm: bytes):
   try:
     import torch  # type: ignore[import-not-found]  # pytype: disable=import-error
   except ImportError:
-    raise RuntimeError("as_torch_gpu_kernel requires PyTorch")
+    raise RuntimeError("Can't compile for PyTorch: import torch failed") from None
+
   torch.cuda.init()  # Make sure CUDA context is set up.
-
-  module, in_shape, inout_shape, out_shape, unwrap_output_tuple, is_device_collective = _kernel_to_module(
-      body, grid, block, in_shape, out_shape, smem_scratch_shape, prof_spec,
-      cluster, module_name, kernel_name, thread_semantics, inout_shape
-  )
-  flat_arg_types, expected_arg_treedef = jax.tree.flatten((*in_shape, *inout_shape))
-  flat_out_types, _ = jax.tree.flatten(out_shape)
-  out_treedef = jax.tree.structure((*out_shape, *inout_shape))
-
-  if is_device_collective:
-    raise RuntimeError("Kernel is a cross-device collective but no support is available for Torch.")
 
   # Get our hands on the compilation and unload functions
   try:
@@ -967,14 +1013,47 @@ def as_torch_gpu_kernel(
   unload_func.argtypes = [compile_func.restype]
   unload_func.restype = None
 
-  module = _run_serde_pass(module, serialize=True, ir_version=None)
-  module_asm = module.operation.get_asm(binary=True, enable_debug_info=True)
-  compiled = compile_func(ctypes.c_char_p(module_asm))
+  compiled = compile_func(ctypes.c_char_p(module_asm), ctypes.c_int(len(module_asm)))
   if not compiled:
     raise RuntimeError("Failed to compile the module")
   ctx, launch_ptr = compiled[0], compiled[1]
   ctx_ptr_ptr = ctypes.pointer(ctypes.c_void_p(ctx))
-  launch = ctypes.CFUNCTYPE(None, ctypes.c_void_p)(launch_ptr)
+  launch_c = ctypes.CFUNCTYPE(None, ctypes.c_void_p)(launch_ptr)
+
+  def launch(arg_ptrs, device):
+    # Allocate another buffer for args of the host-side program. This is sadly
+    # the default MLIR calling convention.
+    launch_args_ptr = (ctypes.POINTER(ctypes.c_void_p) * 3)()
+    launch_args_ptr[0] = ctx_ptr_ptr
+    launch_args_ptr[1] = ctypes.pointer(
+        torch.cuda.default_stream(device)._as_parameter_
+    )
+    launch_args_ptr[2] = ctypes.cast(
+        ctypes.pointer(ctypes.pointer(arg_ptrs)),
+        ctypes.POINTER(ctypes.c_void_p),
+    )
+    launch_c(launch_args_ptr)
+
+  return launch, functools.partial(unload_func, compiled)
+
+
+def _as_torch_gpu_kernel(
+    module_asm: bytes,
+    in_shape: Iterable[object],
+    out_shape: Iterable[object],
+    inout_shape: Iterable[object] = (),
+    *,
+    unwrap_output_tuple: bool = False,
+    _prepare_args = None,
+    _prepare_results = None,
+):
+  flat_arg_types, expected_arg_treedef = jax.tree.flatten((*in_shape, *inout_shape))
+  flat_out_types, _ = jax.tree.flatten(out_shape)
+  out_treedef = jax.tree.structure((*out_shape, *inout_shape))
+
+  launch, unload = _compile_as_torch_gpu_kernel(module_asm)
+  # _compile_as_torch_gpu_kernel checks that this succeeds
+  import torch  # type: ignore[import-not-found]  # pytype: disable=import-error
 
   def as_torch_dtype(dtype):
     # torch contains NumPy-compatible dtypes in its top namespace
@@ -1013,22 +1092,11 @@ def as_torch_gpu_kernel(
       buffers[i] = out.data_ptr()
     if num_inout_args := jax.tree.structure(inout_shape).num_leaves:
       flat_outs += flat_args[-num_inout_args:]
-    # Allocate another buffer for args of the host-side program. This is sadly
-    # the default MLIR calling convention.
-    args_ptr = (ctypes.POINTER(ctypes.c_void_p) * 3)()
-    args_ptr[0] = ctx_ptr_ptr
-    args_ptr[1] = ctypes.pointer(torch.cuda.default_stream(device)._as_parameter_)
-    args_ptr[2] = ctypes.cast(ctypes.pointer(ctypes.pointer(buffers)),
-                              ctypes.POINTER(ctypes.c_void_p))
-    launch(args_ptr)
+    launch(buffers, device)
     out = jax.tree.unflatten(out_treedef, flat_outs)
-    if unwrap_output_tuple:
-      return out[0]
-    return out
+    return out[0] if unwrap_output_tuple else out
 
   # Unload the compiled code when the Python function is destroyed.
-  def unload(_):
-    unload_func(compiled)
-  apply.destructor = weakref.ref(apply, unload)
+  apply.destructor = weakref.ref(apply, lambda _weak_ref: unload)
 
   return apply

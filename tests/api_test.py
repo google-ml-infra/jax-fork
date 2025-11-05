@@ -63,12 +63,10 @@ from jax._src.interpreters import ad as ad_internal
 from jax._src.interpreters import mlir
 from jax._src.interpreters import partial_eval as pe
 from jax._src.compilation_cache import is_persistent_cache_enabled
-from jax._src.lib import jaxlib_extension_version
 import jax._src.util as jax_util
 from jax.ad_checkpoint import checkpoint_name, checkpoint as new_checkpoint
 from jax.errors import (UnexpectedTracerError, TracerIntegerConversionError,
                         ConcretizationTypeError, TracerBoolConversionError)
-from jax.experimental import pjit
 from jax.interpreters import ad
 from jax.interpreters import batching
 import jax.numpy as jnp
@@ -94,6 +92,14 @@ class JitTest(jtu.BufferDonationTestCase):
       return
     jitted = jit(my_function)
     self.assertEqual(repr(jitted), f"<PjitFunction of {repr(my_function)}>")
+
+  def test_jit_decorator_factory(self):
+    @jit(static_argnames=['flag'])
+    def func(x, flag):
+      return x if flag else -x
+
+    self.assertEqual(func(1, True), 1)
+    self.assertEqual(func(1, False), -1)
 
   def test_fun_name(self):
     def my_function():
@@ -268,12 +274,8 @@ class JitTest(jtu.BufferDonationTestCase):
     _check_instance(self, x)
     self.assertEqual(x.devices(), {device})
 
-  @parameterized.named_parameters(
-      ('jit', jax.jit),
-      ('pjit', pjit.pjit),
-  )
   @jtu.skip_on_devices("cpu")
-  def test_jit_default_device(self, module):
+  def test_jit_default_device(self):
     if jax.device_count() == 1:
       raise unittest.SkipTest("Test requires multiple devices")
 
@@ -283,7 +285,7 @@ class JitTest(jtu.BufferDonationTestCase):
     test_device = jax.devices()[-1]
     self.assertNotEqual(system_default_device, test_device)
 
-    f = module(lambda x: x + 1)
+    f = jax.jit(lambda x: x + 1)
     self.assertEqual(f(1).devices(), system_default_devices)
 
     with jax.default_device(test_device):
@@ -298,9 +300,9 @@ class JitTest(jtu.BufferDonationTestCase):
       with jtu.ignore_warning(category=DeprecationWarning,
                               message="backend and device argument"):
         self.assertEqual(
-            module(f, device=system_default_device)(1).devices(),
+            jax.jit(f, device=system_default_device)(1).devices(),
             system_default_devices)
-        out = module(f, backend="cpu")(1)
+        out = jax.jit(f, backend="cpu")(1)
       self.assertEqual(next(iter(out.devices())).platform, "cpu")
 
       # Sticky input device overrides default_device
@@ -546,7 +548,7 @@ class JitTest(jtu.BufferDonationTestCase):
   def test_jnp_array_copy(self, argnum_type, argnum_val):
     # https://github.com/jax-ml/jax/issues/3412
 
-    @partial(jit, **{argnum_type: argnum_val})
+    @jit(**{argnum_type: argnum_val})
     def _test(array):
       return array.at[0].set(77)
 
@@ -560,7 +562,7 @@ class JitTest(jtu.BufferDonationTestCase):
 
   @jtu.device_supports_buffer_donation()
   def test_specify_donate_argnums_and_argnames(self):
-    @partial(jax.jit, donate_argnums=0, donate_argnames=('inp2', 'inp3'))
+    @jax.jit(donate_argnums=0, donate_argnames=('inp2', 'inp3'))
     def f(inp1, inp2, inp3):
       return inp1 * 2, inp2 * 2, inp3 * 2
 
@@ -578,7 +580,7 @@ class JitTest(jtu.BufferDonationTestCase):
 
   @jtu.device_supports_buffer_donation()
   def test_donate_argnames_with_args(self):
-    @partial(jax.jit, donate_argnames='inp1')
+    @jax.jit(donate_argnames='inp1')
     def f(inp1):
       return inp1 * 2
 
@@ -588,7 +590,7 @@ class JitTest(jtu.BufferDonationTestCase):
 
   @jtu.device_supports_buffer_donation()
   def test_donate_argnums_with_kwargs(self):
-    @partial(jax.jit, donate_argnums=0)
+    @jax.jit(donate_argnums=0)
     def f(inp1):
       return inp1 * 2
 
@@ -638,7 +640,7 @@ class JitTest(jtu.BufferDonationTestCase):
       ('argnums', {'donate_argnums': (0, 1)})
   )
   def test_dict_donation(self, jit_kwargs):
-    @partial(jax.jit, **jit_kwargs)
+    @jax.jit(**jit_kwargs)
     def f(z, y, x):
       return z, y, x
 
@@ -656,7 +658,7 @@ class JitTest(jtu.BufferDonationTestCase):
       ('argnums', {'donate_argnums': (0, 1)})
   )
   def test_dict_donation_args_kwargs(self, jit_kwargs):
-    @partial(jax.jit, **jit_kwargs)
+    @jax.jit(**jit_kwargs)
     def f(z, y, x):
       return z, y, x
 
@@ -951,35 +953,27 @@ class JitTest(jtu.BufferDonationTestCase):
     self.assertIsInstance(out.sharding, jax.sharding.SingleDeviceSharding)
     self.assertIsInstance(out, array.ArrayImpl)
 
-  @parameterized.named_parameters(
-      ('jit', jax.jit),
-      ('pjit', pjit.pjit)
-  )
   @jtu.skip_on_devices("cpu")
-  def test_explicit_backend(self, module):
+  def test_explicit_backend(self):
     f = lambda x: x + 1
     with jtu.ignore_warning(category=DeprecationWarning,
                             message="backend and device argument"):
-      jitted_f = module(f, backend=jtu.device_under_test())
-      jitted_f_cpu = module(f, backend="cpu")
+      jitted_f = jax.jit(f, backend=jtu.device_under_test())
+      jitted_f_cpu = jax.jit(f, backend="cpu")
 
     result = jitted_f(1.)
     result_cpu = jitted_f_cpu(1.)
     self.assertEqual(list(result.devices())[0].platform, jtu.device_under_test())
     self.assertEqual(list(result_cpu.devices())[0].platform, "cpu")
 
-  @parameterized.named_parameters(
-      ('jit', jax.jit),
-      ('pjit', pjit.pjit)
-  )
   @jtu.skip_on_devices("cpu")
-  def test_device_to_device_copy_between_backends(self, module):
+  def test_device_to_device_copy_between_backends(self):
     # b/186624243
     f = lambda x: x + 1
     with jtu.ignore_warning(category=DeprecationWarning,
                             message="backend and device argument"):
-      jitted_f = module(f, backend=jtu.device_under_test())
-      jitted_f_cpu = module(f, backend="cpu")
+      jitted_f = jax.jit(f, backend=jtu.device_under_test())
+      jitted_f_cpu = jax.jit(f, backend="cpu")
 
     x = np.arange(30).reshape(1, 10, 3)
     result = jitted_f(x)
@@ -993,7 +987,7 @@ class JitTest(jtu.BufferDonationTestCase):
   @jtu.ignore_warning(category=DeprecationWarning,
                       message="backend and device argument")
   def test_mismatched_nested_backends(self):
-    @partial(jax.jit, backend=jtu.device_under_test())
+    @jax.jit(backend=jtu.device_under_test())
     def f(x):
       return jax.jit(lambda x: x + 1, backend="cpu")(x)
 
@@ -1505,7 +1499,7 @@ class JitTest(jtu.BufferDonationTestCase):
 
   def test_jit_static_argnums_requires_type_equality(self):
     # See: https://github.com/jax-ml/jax/pull/9311
-    @partial(jit, static_argnums=(0,))
+    @jit(static_argnums=(0,))
     def f(k):
       assert python_should_be_executing
       return k
@@ -1611,7 +1605,7 @@ class APITest(jtu.JaxTestCase):
   def test_grad_wrap(self, transform):
     # Ensures that transforms wrap transformed functions with the correct signature.
 
-    @partial(jit, static_argnames=['flag'])
+    @jit(static_argnames=['flag'])
     @transform
     def my_function(x, flag):
       return x if flag else jnp.zeros_like(x)
@@ -2208,7 +2202,7 @@ class APITest(jtu.JaxTestCase):
       self.assertEqual(x.devices(), {cpu_device})
 
   def test_device_put_on_single_device_donated_buffer_fails(self):
-    @partial(jax.jit, donate_argnums=0)
+    @jax.jit(donate_argnums=0)
     def f(inp1):
       return inp1 * 2
 
@@ -2224,7 +2218,7 @@ class APITest(jtu.JaxTestCase):
       result.block_until_ready()
 
   def test_device_put_on_multi_device_donated_buffer_fails(self):
-    @partial(jax.jit, donate_argnums=0)
+    @jax.jit(donate_argnums=0)
     def f(inp1):
       return inp1 * 2
 
@@ -2968,7 +2962,7 @@ class APITest(jtu.JaxTestCase):
   def test_eval_shape_out_shardings(self):
     s = jax.sharding.SingleDeviceSharding(jax.devices()[0])
 
-    @partial(jax.jit, out_shardings=s)
+    @jax.jit(out_shardings=s)
     def f(x):
       return x * 2
 
@@ -3129,10 +3123,11 @@ class APITest(jtu.JaxTestCase):
   def test_float0_error(self):
     # float0 is incompatible with other dtypes
     float0_array = jax.grad(lambda x: x+0., allow_int=True)(1)
+    self.assertEqual(float0_array.dtype, dtypes.float0)
     error_text = "float0s do not support any operations by design"
 
     with self.assertRaisesRegex(TypeError, error_text):
-      # dispatch via Array
+      # dispatch via Array.__add__ and hence jax.numpy
       _ = float0_array + jnp.zeros(())
 
     with self.assertRaisesRegex(TypeError, error_text):
@@ -3293,7 +3288,7 @@ class APITest(jtu.JaxTestCase):
           config.enable_x64.value
           or config.explicit_x64_dtypes.value == config.ExplicitX64Mode.ALLOW
       ):
-        if config.enable_x64.value or jaxlib_extension_version >= 377:
+        if config.enable_x64.value:
           with self.assertNoWarnings():
             warn()
       elif config.explicit_x64_dtypes.value == config.ExplicitX64Mode.WARN:
@@ -4393,14 +4388,14 @@ class APITest(jtu.JaxTestCase):
     api.grad(lambda x: f(f(f(x))))(1.)
 
   def test_jit_inline(self):
-    @partial(api.jit, inline=False)
+    @api.jit(inline=False)
     def f(x):
       return x * 2
 
     jaxpr = api.make_jaxpr(f)(3)
     self.assertIn('jit', str(jaxpr))
 
-    @partial(api.jit, inline=True)
+    @api.jit(inline=True)
     def f(x):
       return x * 2
 
@@ -4425,7 +4420,7 @@ class APITest(jtu.JaxTestCase):
     # from and passed to jitted functions
     f = lambda x: 2. * x
 
-    @partial(jit, static_argnums=0)
+    @jit(static_argnums=0)
     def linearize_vjp(f, x):
       _, vjp_fun = api.vjp(f, x)
       return vjp_fun
@@ -4440,7 +4435,7 @@ class APITest(jtu.JaxTestCase):
     # from and passed to jitted functions
     f = lambda x: 2. * x
 
-    @partial(jit, static_argnums=0)
+    @jit(static_argnums=0)
     def linearize(f, x):
       _, jvp_fun = api.linearize(f, x)
       return jvp_fun
@@ -4455,7 +4450,7 @@ class APITest(jtu.JaxTestCase):
     # from and passed to jitted functions
     f = lambda x: 2. * x
 
-    @partial(jit, static_argnums=0)
+    @jit(static_argnums=0)
     def transpose(f, x):
       return api.linear_transpose(f, x)
 
@@ -4583,7 +4578,7 @@ class APITest(jtu.JaxTestCase):
     g(x, y)  # doesn't crash
 
   def test_jit_negative_static_argnums(self):
-    @partial(jax.jit, static_argnums=-1)
+    @jax.jit(static_argnums=-1)
     def g(x, y):
       assert isinstance(y, int)
       return x * y
@@ -4822,7 +4817,7 @@ class APITest(jtu.JaxTestCase):
 
   @jtu.thread_unsafe_test()  # logging is not thread-safe
   def test_cache_miss_explanations_other_static_argnums(self):
-    @partial(jax.jit, static_argnums=(0, 2))
+    @jax.jit(static_argnums=(0, 2))
     def f(x, y, z):
       return y
 
@@ -4839,7 +4834,7 @@ class APITest(jtu.JaxTestCase):
 
   @jtu.thread_unsafe_test()  # logging is not thread-safe
   def test_cache_miss_explanations_other_static_argnames(self):
-    @partial(jax.jit, static_argnames="foo")
+    @jax.jit(static_argnames="foo")
     def f(*, foo):
       return 1
 
@@ -5185,7 +5180,7 @@ class APITest(jtu.JaxTestCase):
   def test_inlined_literals_with_error(self):
     @jax.jit
     def f():
-      @partial(jax.jit, inline=True)
+      @jax.jit(inline=True)
       def g():
         return jnp.sin(1.)
       if g() > 0:
@@ -5280,7 +5275,12 @@ class APITest(jtu.JaxTestCase):
               yield inv.val
 
     def uniq(lst):
-      return {id(v): v for v in lst}.values()
+      def key(a):
+        if isinstance(a, literals.TypedNdArray):
+          return np.asarray(a)
+        else:
+          return a
+      return {id(key(v)): v for v in lst}.values()
 
     @jax.make_jaxpr
     def f():
@@ -5803,7 +5803,7 @@ class RematTest(jtu.JaxTestCase):
       u_t = u_t + u_tt * dt
       return (u, u_t)
 
-    @partial(api.jit, static_argnums=(1,))
+    @api.jit(static_argnums=(1,))
     def _multi_step(state, count, dt, c):
       f = lambda s, _: (foo(s, dt, c), _)
       return lax.scan(f, state, None, count)
@@ -6177,10 +6177,7 @@ class RematTest(jtu.JaxTestCase):
       return lax.scan(body, x, None, length=2)[0]
 
     _, f_vjp = api.vjp(f, jnp.ones((5, 5)))
-    if config.vjp3.value:
-      jaxpr_text = str(f_vjp.jaxpr)
-    else:
-      jaxpr_text = str(f_vjp.args[0].func.args[1])
+    jaxpr_text = str(f_vjp.jaxpr)
 
     # Two sine calls in the backward pass because while we don't save sines
     # within the (rematted) body function, we can save the scan carry, which
@@ -6556,10 +6553,7 @@ class RematTest(jtu.JaxTestCase):
       return lax.scan(body, x, None, length=2)[0]
 
     _, f_vjp = api.vjp(f, jnp.ones((5, 5)))
-    if config.vjp3.value:
-      jaxpr = f_vjp.jaxpr
-    else:
-      jaxpr = f_vjp.args[0].func.args[1]
+    jaxpr = f_vjp.jaxpr
     jaxpr_text = str(jaxpr)
 
     self.assertEqual(jaxpr_text.count(' sin '), 3)
@@ -6761,7 +6755,7 @@ class RematTest(jtu.JaxTestCase):
     if config.vjp3.value:
       jaxpr_text = str(f_vjp.jaxpr)
     else:
-      jaxpr_text = str(f_vjp.args[0].func.args[1])
+      jaxpr_text = str(f_vjp.jaxpr)
 
     self.assertEqual(jaxpr_text.count(' sin '), 2)
     self.assertEqual(jaxpr_text.count(' cos '), 3)
@@ -6791,10 +6785,7 @@ class RematTest(jtu.JaxTestCase):
       return lax.cond(x.sum() > 0, f, lambda x: x, x)
 
     _, f_vjp = api.vjp(f, jnp.ones((5, 5)))
-    if config.vjp3.value:
-      jaxpr = f_vjp.jaxpr
-    else:
-      jaxpr = f_vjp.args[0].func.args[1]
+    jaxpr = f_vjp.jaxpr
     jaxpr_text = str(jaxpr)
 
     self.assertEqual(jaxpr_text.count(' sin '), 2)
@@ -7825,11 +7816,26 @@ class InputSavedVJPTest(jtu.JaxTestCase):
     with self.assertRaisesRegex(Exception, "not used by the backward pass: x"):
       _ = api.si_vjp(f, [True], *primals, allow_unused=False)
 
+  def test_basic_unused_vjp3(self):
+    f = jnp.sin
+    primals = 3.,
+    y, f_vjp = api.vjp3(f, *primals)
+    x_ct, = f_vjp(1.)
+    self.assertAllClose(y, jnp.sin(3.))
+    self.assertAllClose(x_ct, jnp.cos(3.))
+    self.assertIsInstance(f_vjp.args_res[0], api.NotNeeded)  # can check if unused
+
   def test_basic_opaque(self):
     f = jnp.sin
     primals = 3.,
     with self.assertRaisesRegex(Exception, "the backward pass requires opaque"):
       _ = api.si_vjp(f, [True], *primals, allow_opaque=False)
+
+  def test_basic_opaque_vjp3(self):
+    f = jnp.sin
+    primals = 3.,
+    _, f_vjp = api.vjp3(f, *primals)
+    assert f_vjp.opaque_residuals  # can detect if opaque res are used
 
   def test_basic_pytree_error(self):
     def f(x):
@@ -7842,6 +7848,20 @@ class InputSavedVJPTest(jtu.JaxTestCase):
 
     with self.assertRaisesRegex(ValueError, "but the structures differ"):
       f_vjp(1., {'hi': 2.})
+
+  # TODO(mattjj): improve this vjp3 error message
+  # def test_basic_pytree_error_vjp3(self):
+  #   def f(x):
+  #     return [x['hi'] * x['bye']]
+
+  #   y, f_vjp = api.vjp3(f, {'hi': 2., 'bye': 3.})
+  #   arg_ct, = f_vjp([1.], {'hi': 2., 'bye': 3.})
+  #   self.assertAllClose(y, [6.])
+  #   self.assertAllClose(arg_ct, {'hi': 3., 'bye': 2.})
+
+  #   f_vjp.args_res[0] = {'hi': 2.}
+  #   with self.assertRaisesRegex(ValueError, "but the structures differ"):
+  #     f_vjp(1.)
 
   def test_fsdp(self):
     # see https://github.com/jax-ml/jax/pull/27017 for why this is called "fsdp"
@@ -7857,6 +7877,24 @@ class InputSavedVJPTest(jtu.JaxTestCase):
     y_grad = jnp.ones_like(y)
     x_grad, w_grad = f2_sivjp(y_grad, w)
     self.assertAllClose(x_grad, 2. * y_grad @ w.T)
+
+  def test_fsdp_vjp3(self):
+    # see https://github.com/jax-ml/jax/pull/27017 for why this is called "fsdp"
+    def f2(x, w):
+      x = 1. * x
+      x = x @ w
+      x = 2. * x
+      return x
+
+    x = jnp.ones((3, 4))
+    w = jnp.ones((4, 4))
+    y, f2_vjp = api.vjp3(f2, x, w)
+    f2_vjp.args_res[1] = None
+    y_grad = jnp.ones_like(y)
+    f2_vjp.args_res[1] = w
+    x_grad, w_grad = f2_vjp(y_grad)
+    self.assertAllClose(x_grad, 2. * y_grad @ w.T)
+    self.assertAllClose(w_grad, 2. * x.T @ y_grad)
     self.assertAllClose(w_grad, 2. * x.T @ y_grad)
 
   def test_doesnt_leak_symbolic_zeros(self):

@@ -25,6 +25,7 @@ from typing import Any, Protocol, cast
 from jax._src.interpreters import mlir as mlir_interpreter
 from jax._src.lib import mosaic_gpu_dialect as mgpu
 from jax._src.lib.mlir import ir
+from jax._src.lib.mlir.dialects import _gpu_ops_gen
 from jax._src.lib.mlir.dialects import arith
 from jax._src.lib.mlir.dialects import builtin
 from jax._src.lib.mlir.dialects import func
@@ -193,8 +194,7 @@ def _fragmented_array_from_ir(
 
   reverse_conversion_cast = converted_outputs[0].owner.opview
   for attribute in conversion_cast.attributes:
-    attribute = cast(ir.NamedAttribute, attribute)
-    reverse_conversion_cast.attributes[attribute.name] = attribute.attr
+    reverse_conversion_cast.attributes[attribute] = conversion_cast.attributes[attribute]
 
   registers = np.array(list(converted_outputs)).reshape(
     [attr.value for attr in conversion_cast.attributes["registers_shape"]]
@@ -592,9 +592,9 @@ def _vector_store_op_lowering_rule(
   return []
 
 
-@_register_lowering(vector.SplatOp)
+@_register_lowering(vector.BroadcastOp)
 def _vector_splat_op_lowering_rule(
-    _: LoweringContext, vector_splat_op: vector.SplatOp
+    _: LoweringContext, vector_splat_op: vector.BroadcastOp
 ) -> Sequence[ir.Value]:
 
   out_vec_ty = ir.VectorType(vector_splat_op.aggregate.type)
@@ -642,6 +642,33 @@ def _vector_shape_cast_op_lowering_rule(
   )
   a = _fragmented_array_from_ir(op.source, layout, is_signed)
   return [fragmented_array_to_ir(a.reshape(out_vec_ty.shape), out_vec_ty)]
+
+
+@_register_lowering(vector.ExtractStridedSliceOp)
+def _vector_extract_strided_slice_op_lowering_rule(
+    ctx: LoweringContext, op: vector.ExtractStridedSliceOp
+) -> Sequence[ir.Value]:
+  del ctx
+  if any(ir.IntegerAttr(s).value != 1 for s in op.strides):
+    raise NotImplementedError("`strides` must contain only 1s.")
+  [in_layout] = inference_utils.in_layouts(op)
+  [out_layout] = inference_utils.out_layouts(op)
+  assert in_layout == out_layout
+  out_vec_ty = ir.VectorType(op.result.type)
+  assert out_vec_ty.has_static_shape
+  is_signed = (
+      False if ir.IntegerType.isinstance(out_vec_ty.element_type) else None
+  )
+  a = _fragmented_array_from_ir(op.source, in_layout, is_signed)
+  indices = tuple(
+      utils.DynamicSlice(
+          ir.IntegerAttr(offset).value, ir.IntegerAttr(length).value
+      )
+      for offset, length in zip(op.offsets, op.sizes, strict=True)
+  )
+  result = a[indices]
+  assert result.layout == layouts.from_layout_attr(out_layout)
+  return [fragmented_array_to_ir(result, out_vec_ty)]
 
 
 @_register_lowering(vector.ReductionOp)
@@ -880,13 +907,15 @@ def _mgpu_async_load_op_lowering_rule(
   )
 
   gmem_slice = []
-  for idx_i32, size in zip(load_op.indices, load_op.slice_lengths):
+  for idx_i32, size in zip(load_op.indices, load_op.slice_lengths, strict=True):
     idx = arith.index_cast(ir.IndexType.get(), idx_i32)
     v = idx if size < 0 else utils.DynamicSlice(idx, size)
     gmem_slice.append(v)
 
-  if load_op.collective:
-    raise NotImplementedError("Collective loads are not supported yet.")
+  collective = [
+      gpu.Dimension(ir.IntegerAttr(axis).value)
+      for axis in load_op.collective or []
+  ]
 
   # TODO(dasenov): async_copy requires all GMEM strides except the last one
   # to be a multiple of 16 bytes. This restriction could be loosned with
@@ -902,6 +931,7 @@ def _mgpu_async_load_op_lowering_rule(
       dst_ref=unwrapped_destination,
       gmem_slice=tuple(gmem_slice),
       barrier=barrier.barrier_ref,
+      collective=collective,
       arrive=False,
       swizzle=swizzle,
       gmem_transform=transforms,
@@ -917,7 +947,7 @@ def _mgpu_async_prefetch_op_lowering_rule(
   assert ctx.launch_context is not None
 
   gmem_slice = []
-  for idx_i32, size in zip(load_op.indices, load_op.slice_lengths):
+  for idx_i32, size in zip(load_op.indices, load_op.slice_lengths, strict=True):
     idx = arith.index_cast(ir.IndexType.get(), idx_i32)
     v = idx if size < 0 else utils.DynamicSlice(idx, size)
     gmem_slice.append(v)
@@ -1401,13 +1431,29 @@ def _memref_subview_op_lowering_rule(
   swizzle, transforms = swizzle_and_transforms_from_transforms_attr(out_transforms)
   if swizzle != mgpu.SwizzlingMode.kNoSwizzle:
     source_ty = ir.MemRefType(op.source.type)
+    swizzle_elems = swizzle * 8 // utils.bitwidth(source_ty.element_type)
     source_strides, _ = source_ty.get_strides_and_offset()
-    for stride, slice, size in zip(source_strides, op.static_sizes, source_ty.shape, strict=True):
+    for stride, offset, size in zip(
+        source_strides, op.static_offsets, op.static_sizes, strict=True
+    ):
       if stride != 1:
         continue
       # A dimension with stride 1 is a minor dimension and is swizzled.
-      if slice != size:
-        raise NotImplementedError("Slicing a swizzled dimension is unsupported.")
+      if size % swizzle_elems != 0:
+        raise ValueError(
+            f"Swizzled dimension of {size=} is not a multiple of"
+            f" {swizzle_elems=}."
+        )
+      # TODO(allanrenucci): Support dynamic offsets that are divisible by
+      # `swizzle_elems`. E.g. using `utils.is_known_divisible`.
+      if ir.ShapedType.is_dynamic_size(offset):
+        raise NotImplementedError(
+            "Slicing a swizzled dynamic dimension is not supported."
+        )
+      if offset % swizzle_elems != 0:
+        raise ValueError(
+            f"subview {offset=} is not a multiple of {swizzle_elems=}."
+        )
 
   match transforms:
     case ():
@@ -1768,67 +1814,30 @@ def _async_store_tmem_op_lowering_rule(
   return []
 
 
-def inline_block(
-    block: ir.Block, args: Sequence[ir.Value], mapper: dict[ir.Value, ir.Value],
-    clone_terminator: bool, terminator_type: type[ir.OpView],
-) -> list[ir.Value]:
-  """
-  Inlines the given block at the current insertion point.
-
-  The block args are replaced with the provided `args`. If the input mapper is
-  not empty, it could further be used to replace captured values with an
-  alternative.
-
-  If `clone_terminator` is False, the terminator of the block is not cloned. If
-  `clone_terminator` is True, the terminator is cloned. This is useful when
-  inlining the block into another block. In both cases the operands of the
-  terminator are returned as results.
-  """
-  for arg, val in zip(block.arguments, args, strict=True):
-    mapper[arg] =  val
-  return_op = None
-  for op in block.operations:
-    if isinstance(op.opview, terminator_type):
-      assert return_op is None
-      return_op = op.opview
-      if not clone_terminator:
-        continue
-    # Operands not in the mapper are captured from the context.
-    new_operands = [mapper[o] if o in mapper else o for o in op.operands]
-    new_attributes = {
-        named_attr.name: named_attr.attr
-        for named_attr in op.attributes
-    }
-    new_op = ir.Operation.create(
-        name=op.name,
-        results=[res.type for res in op.results],
-        operands=new_operands,
-        attributes=new_attributes,
-    )
-    for old_result, new_result in zip(op.results, new_op.results):
-      mapper[old_result] = new_result
-
-  if return_op is None:
-    raise ValueError("A custom return op must terminate the block.")
-
-  inlined_return_values = [mapper[o] for o in return_op.operands]
-  return inlined_return_values
-
-
 @_register_lowering(mgpu.CustomPrimitiveOp)
 def _mgpu_custom_primitive_op_lowering_rule(
     ctx: LoweringContext, op: mgpu.CustomPrimitiveOp
 ) -> Sequence[ir.Value]:
   """Lowering rule for mgpu.CustomPrimitiveOp."""
   del ctx
-  # The block already contains unwrapping and wrapping conversion casts.
-  return inline_block(
-      op.body.blocks[0],
-      op.operands,
-      mapper={},
-      clone_terminator=False,
-      terminator_type=mgpu.ReturnOp,
-  )
+  block = op.body.blocks[0]
+  for arg, op in zip(block.arguments, op.operands, strict=True):
+    arg.replace_all_uses_with(op)
+
+  return_op = None
+  ip = ir.InsertionPoint.current
+  for op in block.operations:
+    if isinstance(op.opview, mgpu.ReturnOp):
+      assert return_op is None
+      return_op = op.opview
+      continue
+    op.detach_from_parent()
+    ip.insert(op)
+
+  if return_op is None:
+    raise ValueError("A custom return op must terminate the block.")
+
+  return return_op.operands
 
 
 # The metadata needed to recostruct a vector from its flattened representation.
@@ -1917,8 +1926,8 @@ def _move_scf_block_to_block_with_flattened_arguments(
       old_arg.replace_all_uses_with(new_arg)
     for op in [*old_block]:
       if not isinstance(op, last_op_type):
-        mgpu.private_operation_remove_from_parent(op)
-        mgpu.private_block_append_owned_operation(new_block, op)
+        # `append` moves the operation.
+        new_block.append(op)
         ctx.lower_op(op)
       else:
         assert out_template is None
@@ -2097,7 +2106,7 @@ def _index_switch_op_lowering_rule(
 
 
 @_register_lowering(func.FuncOp)
-@_register_lowering(gpu.LaunchOp)
+@_register_lowering(_gpu_ops_gen.LaunchOp)
 def _traverse_op_lowering_rule(
     ctx: LoweringContext, op: ir.OpView
 ) -> MlirLoweringRuleResult:

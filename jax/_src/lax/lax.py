@@ -2842,7 +2842,8 @@ def pad(operand: ArrayLike, padding_value: ArrayLike,
       as ``operand``.
     padding_config: a sequence of ``(low, high, interior)`` tuples of integers,
       giving the amount of low, high, and interior (dilation) padding to insert
-      in each dimension.
+      in each dimension. Negative values for ``low`` and ``high`` are allowed
+      and remove elements from the edges of the array.
 
   Returns:
     The ``operand`` array with padding value ``padding_value`` inserted in each
@@ -2877,6 +2878,12 @@ def pad(operand: ArrayLike, padding_value: ArrayLike,
            [-1, -1,  4,  5,  6, -1, -1],
            [-1, -1, -1, -1, -1, -1, -1],
            [-1, -1, -1, -1, -1, -1, -1]], dtype=int32)
+
+    Use negative padding to remove elements from the edges of an array:
+
+    >>> x = jnp.array([1, 2, 3, 4, 5], dtype=jnp.int32)
+    >>> lax.pad(x, 0, [(-1, -2, 0)])
+    Array([2, 3], dtype=int32)
   """
   operand, padding_value = core.standard_insert_pvary(operand, padding_value)
   return pad_p.bind(operand, padding_value, padding_config=tuple(padding_config))
@@ -3473,8 +3480,6 @@ def _delta(dtype: DTypeLike, shape: Shape, axes: Sequence[int]) -> Array:
 
 def _tri(dtype: DTypeLike, shape: Shape, offset: DimSize) -> Array:
   """Like numpy.tri, create a 2D array with ones below a diagonal."""
-  offset = _clip_int_to_valid_range(offset, np.int32,
-                                    "argument `offset` of jax.numpy.tri")
   dtype = dtypes.check_and_canonicalize_user_dtype(dtype, "tri")
   bool_tri = ge(add(broadcasted_iota(np.int32, shape, 0),
                     asarray(core.dimension_as_value(offset)).astype(np.int32)),
@@ -4484,24 +4489,13 @@ core.pp_eqn_rules[cbrt_p] = _unary_with_accuracy_pp_rule
 
 square_p = standard_unop(_int | _float | _complex, 'square')
 
-def _square_complex(x):
-  a, b = real(x), imag(x)
-  # zero square(x).real is handled explicitly for abs(a)==abs(b) cases
-  # where for finite a, 2 * a is non-finite:
-  zero_re = is_finite(a) & (eq(a, b) | eq(a, neg(b)))
-  # equivalent to a**2 - b**2 but avoids overflow errors for large a
-  # and large b cases:
-  re = mul(sub(a, b), add(a, b))
-  im = mul(mul(a, b), _const(a, 2))
-  return select(zero_re, complex(_const(a, 0), im), complex(re, im))
-
 def _square_lower_hlo(ctx, x):
-  if dtypes.issubdtype(ctx.avals_in[0].dtype, np.complexfloating):
-    return mlir.lower_fun(_square_complex, multiple_results=False)(ctx, x)
-  return [hlo.multiply(x, x)]
+  if dtypes.issubdtype(ctx.avals_in[0].dtype, np.integer):
+    return [hlo.multiply(x, x)]
+  return [chlo.square(x)]
 
 ad.defjvp2(square_p, lambda g, ans, x: mul(g, mul(_const(x, 2), x)))
-mlir.register_lowering(square_p, _square_lower_hlo)  # TODO(pearu): use chlo.square
+mlir.register_lowering(square_p, _square_lower_hlo)
 
 def _pow_dtype_rule(x, y):
   if (dtypes.issubdtype(x.dtype, np.inexact) and
@@ -4713,24 +4707,14 @@ mlir.register_lowering(sub_p, partial(_nary_lower_hlo, hlo.subtract))
 batching.ragged_prop_rules[sub_p] = batching.ragged_mask_elementwise_rule
 
 
-def _mul_transpose(ct, x, y):
-  assert ad.is_undefined_primal(x) ^ ad.is_undefined_primal(y)
-  if ad.is_undefined_primal(x):
-    if type(ct) is ad_util.Zero:
-      return [ad_util.Zero(x.aval), None]
-    else:
-      return [_unbroadcast(x.aval, mul(ct, y)), None]
-  else:
-    if type(ct) is ad_util.Zero:
-      return [None, ad_util.Zero(y.aval)]
-    else:
-      return [None, _unbroadcast(y.aval, mul(x, ct))]
-
 mul_p = standard_naryop([_num, _num], 'mul')
 ad.defjvp(mul_p,
           lambda xdot, x, y: mul(xdot, y),
           lambda ydot, x, y: mul(x, ydot))
-ad.primitive_transposes[mul_p] = _mul_transpose
+
+ad.defbilinear(mul_p, lambda ct, x, y: _unbroadcast(x.aval, mul(ct, y)),
+               lambda ct, x, y: _unbroadcast(y.aval, mul(x, ct)))
+
 mlir.register_lowering(mul_p, partial(_nary_lower_hlo, hlo.multiply))
 batching.ragged_prop_rules[mul_p] = batching.ragged_mask_elementwise_rule
 
@@ -5480,13 +5464,10 @@ def _dot_general_transpose_rhs(g, x, y, *, dimension_numbers, precision,
                                out_sharding):
   (x_contract, y_contract), (x_batch, y_batch) = dimension_numbers
   swapped_dimension_numbers = ((y_contract, x_contract), (y_batch, x_batch))
-  y_bar = _dot_general_transpose_lhs(
+  return _dot_general_transpose_lhs(
     g, y, x, dimension_numbers=swapped_dimension_numbers, precision=precision,
     preferred_element_type=preferred_element_type, out_sharding=out_sharding,
     swap_ans=True)
-  if y_bar.dtype != y.aval.dtype:
-    y_bar = _convert_element_type(y_bar, y.aval.dtype, y.aval.weak_type)
-  return y_bar
 
 
 def _dot_batch_rule(
@@ -8147,6 +8128,7 @@ def _sort_lt_comparator(*operands, num_keys=1):
   x_keys, y_keys = _operands_to_keys(*operands, num_keys=num_keys)
   p = None
   for xk, yk in zip(x_keys[::-1], y_keys[::-1]):
+    xk, yk = core.standard_insert_pvary(xk, yk)
     p = (bitwise_or(lt_to_p.bind(xk, yk), bitwise_and(eq_to_p.bind(xk, yk), p)) if p is not None
          else lt_to_p.bind(xk, yk))
   return p
@@ -8157,6 +8139,7 @@ def _sort_le_comparator(*operands, num_keys=1):
   x_keys, y_keys = _operands_to_keys(*operands, num_keys=num_keys)
   p = None
   for xk, yk in zip(x_keys[::-1], y_keys[::-1]):
+    xk, yk = core.standard_insert_pvary(xk, yk)
     p = (bitwise_or(lt_to_p.bind(xk, yk), bitwise_and(eq_to_p.bind(xk, yk), p)) if p is not None
          else le_to_p.bind(xk, yk))
   return p
@@ -9159,9 +9142,10 @@ def optimization_barrier(operand, /):
     on one of the barrier's outputs. This can be used to enforce a particular
     order of operations.
 
-    Note that this implies no ordering constraints between an operator that uses
-    one of the barrier's outputs, and an operator that directly (not through
-    the barrier) uses one of the barrier's inputs.
+    Note that all operands must be used through the barrier for this to work.
+    There are no ordering constraints between an operator that uses one of the
+    barrier's outputs, and an operator that directly (not through the barrier)
+    uses one of the barrier's inputs.
   * An optimization barrier prevents common subexpression elimination. This is
     used by JAX to implement rematerialization.
   * Optimization barriers prevent compiler fusions. That is, operations before
@@ -9205,7 +9189,8 @@ def _optimization_barrier_lowering_rule(ctx, *args):
 
 optimization_barrier_p = core.Primitive('optimization_barrier')
 optimization_barrier_p.multiple_results = True
-optimization_barrier_p.def_impl(lambda *xs: xs)
+optimization_barrier_p.def_impl(
+    partial(dispatch.apply_primitive, optimization_barrier_p))
 optimization_barrier_p.def_abstract_eval(_optimization_barrier_abstract_eval)
 mlir.register_lowering(optimization_barrier_p,
                        _optimization_barrier_lowering_rule)

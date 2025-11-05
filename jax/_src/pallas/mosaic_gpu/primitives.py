@@ -58,10 +58,7 @@ WARPGROUP_SIZE = 128
 
 
 _Ref = state.AbstractRef | state_types.TransformedRef
-Layout = gpu_core.Layout
-ParameterizedLayout = gpu_core.ParameterizedLayout
 SomeLayout = gpu_core.SomeLayout
-
 
 def _check_ref(
     aval: object, name: str, memory_space: gpu_core.MemorySpace
@@ -217,7 +214,9 @@ def _copy_smem_to_gmem_lowering(
   src, src_transforms = lowering._handle_transforms(
       ctx, src, src_transforms, handle_transposes=False
   )
-  copy_params = _extract_gmem_copy_params(dst_transforms) | _extract_smem_copy_params(src_transforms)
+  copy_params = _extract_gmem_copy_params(
+      ctx, dst_transforms, supports_multicast=True
+  ) | _extract_smem_copy_params(src_transforms)
   if ctx.module_ctx.lowering_semantics == mgpu.LoweringSemantics.Lane:
     ctx.launch_ctx.async_copy(
         src_ref=src,
@@ -272,27 +271,55 @@ def _split_gmem_slice(gmem_slice):
   return indices, slice_lengths
 
 
-def _extract_gmem_copy_params(transforms):
+def _extract_gmem_copy_params(ctx, transforms, supports_multicast=False):
   if not transforms:
     return {}
   peer_id = None
   indexers = []
   for transform in transforms:
     if isinstance(transform, gpu_core.PeerMemRef):
-      if transform.device_id_type != pallas_primitives.DeviceIdType.LOGICAL:
-        raise NotImplementedError(
-            "Only logical device ids are supported for GMEM refs."
+      peer_id, other_axes = pallas_primitives.device_id_to_logical(
+          ctx.module_ctx.mesh_info,
+          lowering._ensure_ir_value_device_id(transform.device_id),
+          transform.device_id_type,
+          lambda name: lowering._axis_index_rule(ctx, axis_name=name),
+      )
+      if other_axes:
+        raise ValueError(
+            "Only JAX mesh axes can be used to obtain peer references, but"
+            f" got {other_axes}"
         )
-      peer_id = lowering._ensure_ir_value(transform.device_id, jnp.int32)
+      continue
+    elif isinstance(transform, gpu_core.MulticastRef):
+      if not supports_multicast:
+        raise ValueError(
+            "Multicast refs are not supported by this primitive."
+        )
+      if (mesh_info := ctx.module_ctx.mesh_info) is None:
+        raise ValueError(
+            "JAX device mesh is required by multicast copies, but not defined."
+            " Use jax.set_mesh."
+        )
+      if set(transform.collective_axes) != set(mesh_info.axis_names):
+        raise NotImplementedError(
+            "Only collective_axes that include all JAX device mesh  axes are"
+            f" supported, but got {transform.collective_axes}. Make sure to"
+            f" pass collective_axes={mesh_info.axis_names}"
+        )
+      peer_id = mgpu.GLOBAL_BROADCAST
       continue
     elif isinstance(transform, indexing.NDIndexer):
       indexers.append(transform)
     else:
       raise NotImplementedError(
           "Non-indexing transforms on GMEM refs are not implemented.")
-  indexer = lowering.merge_indexers(indexers)
+  if indexers:
+    indexer = lowering.merge_indexers(indexers)
+    gmem_slice = lowering._ndindexer_indices(indexer, allow_arrays=True)
+  else:
+    gmem_slice = ()
   return dict(
-      gmem_slice=lowering._ndindexer_indices(indexer, allow_arrays=True),
+      gmem_slice=gmem_slice,
       gmem_peer_id=peer_id,
   )
 
@@ -452,7 +479,7 @@ def _copy_gmem_to_smem_lowering(
   dst, dst_transforms = lowering._handle_transforms(
       ctx, dst, dst_transforms, handle_transposes=False
   )
-  copy_params = _extract_smem_copy_params(dst_transforms) | _extract_gmem_copy_params(src_transforms)
+  copy_params = _extract_smem_copy_params(dst_transforms) | _extract_gmem_copy_params(ctx, src_transforms)
   barrier_indexer = _extract_barrier_indexer(
       barrier_transforms_treedef.unflatten(flat_barrier_transforms)
   )
@@ -550,9 +577,8 @@ def _copy_gmem_to_smem_lowering(
         **predicate_kwarg,
     )
     return ()
-
+  i32 = ir.IntegerType.get_signless(32)
   if "gmem_slice" not in copy_params:
-    i32 = ir.IntegerType.get_signless(32)
     slice_lengths = ir.MemRefType(src.type).shape
     indices = [mgpu.utils.c(0, i32)] * len(slice_lengths)
   else:
@@ -571,7 +597,9 @@ def _copy_gmem_to_smem_lowering(
       barrier_ref,
       indices,
       slice_lengths,
-      collective=ir.ArrayAttr.get([]),
+      collective=ir.ArrayAttr.get(
+          [ir.IntegerAttr.get(i32, axis) for axis in collective or []]
+      ),
   )
   return ()
 
@@ -683,7 +711,7 @@ def _async_prefetch_lowering(
     partitioned_axis,
 ):
   ref_transforms = ref_transforms_treedef.unflatten(flat_ref_transforms)
-  copy_params = _extract_gmem_copy_params(ref_transforms)
+  copy_params = _extract_gmem_copy_params(ctx, ref_transforms)
   collective = None
   if collective_axes is not None:
     collective = tuple(
@@ -2216,10 +2244,9 @@ def inline_mgpu(*, arg_types=(), return_type=None):
     raise ValueError(
         "inline_mgpu_p only supports plgpu.ShapeDtypeStruct return types."
     )
-  if not all(isinstance(r, (Layout, ParameterizedLayout, RefType)) for r in flat_arg_types):
+  if not all(isinstance(r, (SomeLayout, RefType)) for r in flat_arg_types):
     raise ValueError(
-        "inline_mgpu_p only supports only Layout, ParameterizedLayout and"
-        " RefType arg types."
+        "inline_mgpu_p only supports only SomeLayout and RefType arg types."
     )
 
   def inner(f):
@@ -2236,7 +2263,7 @@ def inline_mgpu(*, arg_types=(), return_type=None):
         if isinstance(a, state_types.TransformedRef) and isinstance(t, RefType):
           raw_flat_args.append(a.ref)
           ref_transforms.append(a.transforms)
-        elif isinstance(aval := jax_core.get_aval(a), jax_core.ShapedArray) and isinstance(t, (ParameterizedLayout, Layout)):
+        elif isinstance(aval := jax_core.get_aval(a), jax_core.ShapedArray) and isinstance(t, SomeLayout):
           raw_flat_args.append(a)
           ref_transforms.append(None)
         elif isinstance(aval, state.AbstractRef) and isinstance(t, RefType):
@@ -2313,7 +2340,7 @@ def _type_check_mgpu_lane_semantics(v, ty):
         raise ValueError(
             f"Array layout mismatch: expected {v.layout} got {ty.layout.to_mgpu()}."
         )
-    case (Layout() , mgpu.FragmentedArray()) | (ParameterizedLayout(), mgpu.FragmentedArray()):
+    case (SomeLayout(), mgpu.FragmentedArray()):
       if ty.to_mgpu() != v.layout:
         raise ValueError(f"Unexpected layout for {v} (expected: {ty})")
     case _:
@@ -2345,9 +2372,7 @@ def _type_check_mgpu_warpgroup_semantics(v: ir.Value, ty : Any):
       )
     return
 
-  if ir.VectorType.isinstance(v.type) and isinstance(
-      ty, (Layout, ParameterizedLayout)
-  ):
+  if ir.VectorType.isinstance(v.type) and isinstance(ty, SomeLayout):
     layout_attr = mgpu_inference_utils.value_layout(v)
     value_layout = mgpu_layouts.from_layout_attr(layout_attr)
     if ty.to_mgpu() != value_layout:
@@ -2491,6 +2516,52 @@ def _shape_dtype_struct_to_type_and_layout(
   return vector_type, layout
 
 
+# TODO(allanrenucci): This function is most likely broken. We need to review the
+# `inline_mgpu` lowering logic and clean it up.
+# It was moved from MGPU dialect lowering where it is not used anymore. The
+# rewrite in the dialect lowering addressed bugs in this code.
+def _inline_block(
+    block: ir.Block,
+    args: Sequence[ir.Value],
+    mapper: dict[ir.Value, ir.Value],
+) -> list[ir.Value]:
+  """Inlines the given block at the current insertion point.
+
+  The block args are replaced with the provided `args`. If the input mapper is
+  not empty, it could further be used to replace captured values with an
+  alternative.
+
+  The operands of the terminator are returned as results.
+  """
+  for arg, val in zip(block.arguments, args, strict=True):
+    mapper[arg] = val
+  return_op = None
+  for op in block.operations:
+    if isinstance(op.opview, mgpu.dialect.ReturnOp):
+      assert return_op is None
+      return_op = op.opview
+
+    # Operands not in the mapper are captured from the context.
+    new_operands = [mapper[o] if o in mapper else o for o in op.operands]
+    new_attributes = {
+        named_attr: op.attributes[named_attr] for named_attr in op.attributes
+    }
+    new_op = ir.Operation.create(
+        name=op.name,
+        results=[res.type for res in op.results],
+        operands=new_operands,
+        attributes=new_attributes,
+    )
+    for old_result, new_result in zip(op.results, new_op.results):
+      mapper[old_result] = new_result
+
+  if return_op is None:
+    raise ValueError("A custom return op must terminate the block.")
+
+  inlined_return_values = [mapper[o] for o in return_op.operands]
+  return inlined_return_values
+
+
 def _clone_custom_op_with_extra_args(
     custom_op: mgpu.dialect.CustomPrimitiveOp, extra_args: Sequence[ir.Value]
 ) -> mgpu.dialect.CustomPrimitiveOp:
@@ -2530,7 +2601,7 @@ def _clone_custom_op_with_extra_args(
   # Clone the old block, by inlining it into the new one.
   num_old_args = len(old_block.arguments)
   with ir.InsertionPoint.at_block_begin(new_block):
-    mgpu.dialect_lowering.inline_block(
+    _inline_block(
         old_block,
         list(new_block.arguments)[:num_old_args],
         mapper=dict(
@@ -2540,8 +2611,6 @@ def _clone_custom_op_with_extra_args(
                 strict=True,
             )
         ),
-        clone_terminator=True,
-        terminator_type=mgpu.dialect.ReturnOp,
     )
 
   return new_op
@@ -2568,7 +2637,7 @@ def _custom_primitive_in_specs(
         in_types.append(initial_ty)
         if mgpu_utils.is_smem_ref(initial_ty):
           in_transforms.append(_ref_type_to_transforms(t))
-      case jax_core.ShapedArray() if isinstance(t, Layout):
+      case jax_core.ShapedArray() if isinstance(t, SomeLayout):
         el_type = mgpu_utils.dtype_to_ir_type(aval.dtype)
         if len(aval.shape) == 0:
           in_types.append(el_type)
@@ -3162,14 +3231,19 @@ def _semaphore_signal_parallel_abstract_eval(*avals, args_tree):
   for sem_aval, sem_transform_avals in zip(sem_avals, sem_transforms_avals, strict=True):
     pallas_primitives.check_sem_avals(sem_aval, sem_transform_avals, "signal")
   if any(va.dtype != jnp.dtype("int32") for va in value_avals):
-    raise ValueError("Must signal an int32 value.")
+    raise ValueError(
+        "Must signal int32 values, but got"
+        f" {[aval.dtype for aval in value_avals]}"
+    )
   effs = set()
   for device_id in device_id_avals:
     if device_id is not None:
       device_id_flat_avals = tree_util.tree_leaves(device_id)
       for aval in device_id_flat_avals:
         if aval.dtype != jnp.dtype("int32"):
-          raise ValueError("`device_id`s must be int32 values.")
+          raise ValueError(
+             f"`device_id`s must be int32 values, but got {aval.dtype}"
+          )
       effs.add(pallas_core.comms_effect)
   return [], effs
 
@@ -3481,7 +3555,7 @@ def _multimem_store_abstract_eval(source, ref, *transforms_leaves, transforms_tr
     raise ValueError(f"Value dtype {source.dtype} does not match ref dtype {dtype}")
   if source.shape != shape:
     raise ValueError(f"Value shape {source.shape} does not match ref shape {shape}")
-  return [], {pallas_core.comms_effect}
+  return [], {pallas_core.comms_effect, state.WriteEffect(1)}
 
 
 @lowering.register_lowering_rule(multimem_store_p, mgpu.LoweringSemantics.Lane)
@@ -3604,3 +3678,69 @@ def multimem_load_reduce(
       collective_axes=collective_axes,
       reduction_op=reduction_op,
   )
+
+semaphore_signal_multicast_p = jax_core.Primitive("semaphore_signal_multicast")
+semaphore_signal_multicast_p.multiple_results = True
+
+def semaphore_signal_multicast(
+    semaphore,
+    value: int | jax.Array = 1,
+    *,
+    collective_axes: Hashable | tuple[Hashable, ...],
+):
+  """Signals a semaphore on all devices along collective_axes.
+
+  At the moment only signals to all devices are supported.
+
+  Args:
+    semaphore: The semaphore reference to signal.
+    value: The increment value for the semaphore.
+    collective_axes: The mesh axes to multicast the signal across.
+      Must contain all mesh axes.
+  """
+  if not isinstance(collective_axes, tuple):
+    collective_axes = (collective_axes,)
+  ref, transforms = pallas_primitives._get_ref_and_transforms(semaphore)
+  value = jnp.asarray(value, dtype=jnp.int32)
+  args = [ref, transforms, value]
+  flat_args, args_tree = tree_util.tree_flatten(args)
+  return semaphore_signal_multicast_p.bind(
+      *flat_args,
+      args_tree=args_tree,
+      collective_axes=collective_axes,
+  )
+
+
+@semaphore_signal_multicast_p.def_effectful_abstract_eval
+def _semaphore_signal_multicast_abstract_eval(*avals, args_tree, collective_axes):
+  del collective_axes  # Unused.
+  sem, _, _ = tree_util.tree_unflatten(args_tree, avals)
+  pallas_primitives.check_sem_avals(sem, None, "semaphore_signal_multicast")
+  return (), {pallas_core.comms_effect}
+
+
+@lowering.register_lowering_rule(semaphore_signal_multicast_p, mgpu.LoweringSemantics.Lane)
+def _semaphore_signal_multicast_lowering(
+    ctx: lowering.LoweringRuleContext, *args, args_tree, collective_axes
+):
+  i32 = ir.IntegerType.get_signless(32)
+  sem, transforms, value = tree_util.tree_unflatten(args_tree, args)
+  sem, sem_transforms = lowering._handle_transforms(ctx, sem, transforms)
+  if sem_transforms:
+    raise NotImplementedError(
+        f"Unhandled transforms for semaphore_signal_multicast: {sem_transforms}"
+    )
+  if not isinstance(collective_axes, (tuple, list)):
+    collective_axes = (collective_axes,)
+  if (mesh_info := ctx.module_ctx.mesh_info) is None:
+    raise ValueError("collective_axes requires a mesh context")
+  if set(collective_axes) != set(mesh_info.axis_names):
+    raise ValueError(
+        f"collective_axes {collective_axes} must equal entire mesh axes {mesh_info.axis_names}"
+    )
+  multi_ref = ctx.launch_ctx.to_remote_multicast(sem)
+  if ctx.module_ctx.auto_barriers:
+    mgpu_utils.warpgroup_barrier()
+  val = lowering._ir_constant(value, i32)
+  mgpu_utils.SemaphoreRef.signal_multimem(mgpu_utils.memref_ptr(multi_ref.ref), val)
+  return ()

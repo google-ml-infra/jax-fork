@@ -69,13 +69,13 @@ limitations under the License.
 #include "jaxlib/to_ifrt_sharding.h"
 #include "jaxlib/traceback.h"
 #include "jaxlib/util.h"
+#include "xla/future.h"
 #include "xla/layout.h"
 #include "xla/layout_util.h"
 #include "xla/pjrt/exceptions.h"
 #include "xla/pjrt/lru_cache.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/pjrt/pjrt_compiler.h"
-#include "xla/pjrt/pjrt_future.h"
 #include "xla/pjrt/pjrt_layout.h"
 #include "xla/pjrt/status_casters.h"
 #include "xla/primitive_util.h"
@@ -99,6 +99,7 @@ limitations under the License.
 #include "xla/python/pjrt_ifrt/pjrt_dtype.h"
 #include "xla/python/safe_static_init.h"
 #include "xla/python/types.h"
+#include "xla/python/version.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
 #include "xla/status_macros.h"
@@ -474,7 +475,7 @@ PyArray_Storage::PyArray_Storage(nb::object aval, bool weak_type,
                                  nb::object sharding, bool committed,
                                  nb_class_ptr<PyClient> py_client,
                                  ifrt::ArrayRef ifrt_array,
-                                 xla::PjRtFuture<> result_status)
+                                 xla::Future<> result_status)
     : aval(std::move(aval)),
       weak_type(weak_type),
       dtype(std::move(dtype)),
@@ -511,13 +512,13 @@ void PyInit_helper(PyArray self, nb::object aval, nb::object sharding,
   Construct(reinterpret_cast<PyArrayObject*>(self.ptr()), aval,
             nb::cast<bool>(aval.attr("weak_type")), std::move(dtype),
             std::move(shape), std::move(sharding), committed, py_client,
-            std::move(ifrt_array), xla::PjRtFuture<>());
+            std::move(ifrt_array), xla::Future<>());
 }
 
 void PyArray::PyInit(PyArray self, nb::object aval, nb::object sharding,
                      absl::Span<const PyArray> py_arrays, bool committed,
                      bool skip_checks) {
-  xla::ifrt::UserContextScope user_context_scope(PyUserContext::Create());
+  PyUserContextScope user_context_scope;
   if (skip_checks) {
     PyInit_helper(self, aval, sharding, py_arrays, committed);
   } else {
@@ -532,7 +533,7 @@ void PyArray::PyInit(PyArray self, nb::object aval, nb::object sharding,
 PyArray PyArray::MakeFromSingleDeviceArray(nb_class_ptr<PyClient> py_client,
                                            ifrt::ArrayRef ifrt_array,
                                            bool weak_type, bool committed,
-                                           xla::PjRtFuture<> result_status) {
+                                           xla::Future<> result_status) {
   if (!llvm::isa<ifrt::SingleDeviceSharding>(ifrt_array->sharding())) {
     throw xla::XlaRuntimeError(xla::InvalidArgument(
         "Constructing single device jax.Array from non-single "
@@ -601,16 +602,16 @@ PyArray PyArrayResultHandler::Call(absl::Span<const PyArray> py_arrays) const {
                      py_device_list.status().ToString())
             .c_str());
   }
-  xla::ifrt::UserContextScope user_context_scope(PyUserContext::Create());
+  PyUserContextScope user_context_scope;
   return Call(py_device_list.value()->py_client(),
               CreateIfRtArrayFromSingleDeviceShardedPyArrays(
                   dtype_, shape_, py_arrays, sharding_),
-              xla::PjRtFuture<>());
+              xla::Future<>());
 }
 
 PyArray PyArrayResultHandler::Call(nb_class_ptr<PyClient> py_client,
                                    ifrt::ArrayRef ifrt_array,
-                                   xla::PjRtFuture<> result_status) const {
+                                   xla::Future<> result_status) const {
   return PyArray(aval_, weak_type_, dtype_, shape_, sharding_,
                  std::move(py_client), std::move(ifrt_array), committed_,
                  skip_checks_, std::move(result_status));
@@ -618,14 +619,20 @@ PyArray PyArrayResultHandler::Call(nb_class_ptr<PyClient> py_client,
 
 PyArray PyArrayResultHandler::Call(PyArray py_array) const {
   return Call(py_array.py_client(), tsl::FormRef(py_array.ifrt_array()),
-              xla::PjRtFuture<>());
+              xla::Future<>());
 }
 
 PyArray::PyArray(nb::object aval, bool weak_type, xla::nb_dtype dtype,
                  std::vector<int64_t> shape, nb::object sharding,
                  nb_class_ptr<PyClient> py_client, ifrt::ArrayRef ifrt_array,
                  bool committed, bool skip_checks,
-                 xla::PjRtFuture<> result_status) {
+                 xla::Future<> result_status) {
+  if (ifrt_array->user_context() == nullptr && Traceback::IsEnabled()) {
+    throw nb::value_error(
+        "Expecting an IFRT `Array` to have a user context, but got a null "
+        "user context. Use `jax::PyUserContextScope` to set a user context for "
+        "operations producing IFRT `Array`s.");
+  }
   auto* self =
       PyArray_tp_new(reinterpret_cast<PyTypeObject*>(type_), nullptr, nullptr);
   m_ptr = self;
@@ -655,6 +662,13 @@ nb::object PyArray::CheckAndRearrange(const absl::Span<const PyArray> py_arrays,
 }
 
 void PyArray::SetIfrtArray(ifrt::ArrayRef ifrt_array) {
+  if (ifrt_array != nullptr && ifrt_array->user_context() == nullptr &&
+      Traceback::IsEnabled()) {
+    throw nb::value_error(
+        "Expecting an IFRT `Array` to have a user context, but got a null "
+        "user context. Use `jax::PyUserContextScope` to set a user context for "
+        "operations producing IFRT `Array`s.");
+  }
   GetStorage().ifrt_array = std::move(ifrt_array);
 }
 
@@ -810,7 +824,7 @@ absl::StatusOr<PyArray> PyArray::FullyReplicatedShard() {
 }
 
 absl::Status PyArray::BlockUntilReady() const {
-  xla::ifrt::UserContextScope user_context_scope(jax::PyUserContext::Create());
+  PyUserContextScope user_context_scope;
   absl::Status status;
   {
     nb::gil_scoped_release gil_release;
@@ -1067,6 +1081,7 @@ absl::StatusOr<nb::object> CudaArrayInterfaceToBuffer(
         }
       }()));
 
+  bool has_custom_layout;
   std::vector<int64_t> minor_to_major(ndim);
   if (cai.contains("strides") && !cai["strides"].is_none() && data_value != 0) {
     std::iota(minor_to_major.begin(), minor_to_major.end(), 0);
@@ -1076,6 +1091,7 @@ absl::StatusOr<nb::object> CudaArrayInterfaceToBuffer(
           "CUDA Array Interface `shape` and `strides` dimensionalities are "
           "inconsistent");
     }
+    has_custom_layout = true;
     absl::c_sort(minor_to_major, [&](int a, int b) {
       // If two dimensions have the same stride, prefer the major-to-minor
       // interpretation of the ordering, since that's what JAX wants.
@@ -1094,6 +1110,7 @@ absl::StatusOr<nb::object> CudaArrayInterfaceToBuffer(
       stride *= dimensions[d];
     }
   } else {
+    has_custom_layout = false;
     std::iota(minor_to_major.rbegin(), minor_to_major.rend(), 0);
   }
   xla::Shape shape = xla::ShapeUtil::MakeShapeWithDenseLayout(
@@ -1119,9 +1136,16 @@ absl::StatusOr<nb::object> CudaArrayInterfaceToBuffer(
     throw xla::XlaRuntimeError(
         "This operation is implemented for a PjRt-compatible backend only.");
   }
-  xla::ifrt::UserContextScope user_context_scope(PyUserContext::Create());
+  PyUserContextScope user_context_scope;
+#if JAX_IFRT_VERSION_NUMBER >= 34
+  TF_ASSIGN_OR_RETURN(
+      auto ifrt_array,
+      ifrt_client->CreatePjRtArray(std::move(pjrt_buffer), has_custom_layout));
+#else
+  (void)has_custom_layout;
   TF_ASSIGN_OR_RETURN(auto ifrt_array,
                       ifrt_client->CreatePjRtArray(std::move(pjrt_buffer)));
+#endif
   return PyArray::MakeFromSingleDeviceArray(std::move(client),
                                             std::move(ifrt_array), false, true);
 }
@@ -1224,7 +1248,7 @@ absl::StatusOr<std::vector<PyArray>> PyArray::BatchedCopyToDeviceWithSharding(
   };
   absl::flat_hash_map<BatchedCopyToDeviceWithShardingKey, Batch> batches;
 
-  xla::ifrt::UserContextScope user_context_scope(PyUserContext::Create());
+  PyUserContextScope user_context_scope;
   {
     tsl::profiler::TraceMe results_traceme(
         "BatchedCopyToDeviceWithSharding create batch");
@@ -1343,7 +1367,7 @@ absl::StatusOr<PyArray> PyArray::BatchedDevicePut(
 
   GlobalPyRefManager()->CollectGarbage();
 
-  xla::ifrt::UserContextScope user_context_scope(PyUserContext::Create());
+  PyUserContextScope user_context_scope;
   auto n_devices = dst_devices.size();
 
   DevicePutOptions options;
@@ -1526,7 +1550,7 @@ absl::Status PyArray::BatchedBlockUntilReady(std::vector<nb::object> objs) {
   }
 
   GlobalPyRefManager()->CollectGarbage();
-  xla::ifrt::UserContextScope user_context_scope(jax::PyUserContext::Create());
+  PyUserContextScope user_context_scope;
   absl::Status status;
   {
     nb::gil_scoped_release gil_release;
@@ -1840,7 +1864,7 @@ absl::StatusOr<std::pair<nb::object, bool>> PyHostValue::AsNumPyArray(
     }
   }
 
-  xla::ifrt::UserContextScope user_context_scope(jax::PyUserContext::Create());
+  PyUserContextScope user_context_scope;
   TF_RETURN_IF_ERROR(CopyToHostAsync(dynamic_shape_holder, ifrt_array));
   absl::Status status;
   if (!ready_.IsReady()) {
@@ -1926,7 +1950,7 @@ absl::Status PyHostValue::CopyStringArrayToHostAsync(
   // of the `AsNumPyArray` call.
   string_array_contents_ =
       std::make_shared<std::vector<absl::Cord>>(shape.num_elements());
-  xla::ifrt::UserContextScope user_context_scope(PyUserContext::Create());
+  PyUserContextScope user_context_scope;
   ready_ = ifrt_array->CopyToHostBuffer(string_array_contents_->data(),
                                         /*byte_strides=*/std::nullopt,
                                         ifrt::ArrayCopySemantics::kAlwaysCopy);
@@ -1995,9 +2019,9 @@ absl::Status PyHostValue::CopyToHostAsync(
   // knows better about an efficient layout for the host buffer. It will be
   // useful to revisit the semantics of xla::PjRtBuffer::ToLiteral() to see if
   // it is desirable for the runtime to choose the layout.
-  xla::ifrt::UserContextScope user_context_scope(PyUserContext::Create());
+  PyUserContextScope user_context_scope;
   ready_ = ifrt_array->CopyToHostBuffer(value_.mutable_data(), strides,
-                                        ifrt::ArrayCopySemantics::kReuseInput);
+                                        ifrt::ArrayCopySemantics::kAlwaysCopy);
   // Make sure the destination of the copy remains alive until the copy is done.
   value_.inc_ref();
   ready_.OnReady([array{value_.ptr()}](absl::Status status) {

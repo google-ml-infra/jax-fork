@@ -217,7 +217,7 @@ associated transforms.
 def body(..., scratch_ref):
   # Asynchronous copy will reformat the GMEM data to match the SMEM transforms
   plgpu.copy_gmem_to_smem(..., scratch_ref, barrier)
-  barrier.wait()
+  plgpu.barrier_wait(barrier)
   plgpu.wgmma(..., scratch_ref)  # wgmma only accepts properly transformed refs
   ...
 ```
@@ -838,6 +838,29 @@ If collective_axes is not specified or does not include the Pallas thread axis,
 each thread would get its own private copy of the scratch variable. This is
 usually undesired and not supported at the moment.
 
+### Global (grid-wide) allocations using `pl.get_global`
+
+Sometimes, it is useful to allocate [semaphores](#semaphore) in a way that enables them to be
+shared by all the parallel program instances. For example, when the number of
+parallel instances is small enough that the kernel is persistent. Such allocations
+are possible using `pl.get_global`:
+
+```python
+def body(out_ref):
+  sem_ref = pl.get_global(plgpu.SemaphoreType.REGULAR)
+  block_id = lax.axis_index("x")
+  @pl.when(block_id == 0)
+  def _():
+    pl.semaphore_signal(sem_ref)  # Block 0 signals
+  @pl.when(block_id == 1)
+  def _():
+    pl.semaphore_wait(sem_ref)  # Block 1 waits
+    out_ref[...] = jnp.ones_like(out_ref)
+
+out_shape = jax.ShapeDtypeStruct((128,), jnp.float32)
+plgpu.kernel(body, out_shape=out_shape, grid=(2,), grid_names=("x",))()
+```
+
 ## Synchronization structures and primitives
 
 In this section, we go over the most important functions and data structures
@@ -1012,11 +1035,102 @@ def barrier_scope(barrier_ref):
 
 ### `ClusterBarrier`
 
-TODO
+`ClusterBarrier` is very similar to `Barrier`, only used to synchronize across
+block clusters, instead of threads within a single block. This is always
+necessary when the blocks in the cluster collaborate on shared resources.
+Below we outline some of the more common cases when `ClusterBarrier` is necessary
+to ensure correctness.
+
+#### Reusing SMEM for collective async copies
+
+In the following example, `ClusterBarrier` ensures that both blocks are done
+using `x_smem` before it is overwritten. Without the barrier, one of the blocks
+would be able to run ahead and start overwriting `x_smem` by entering the
+collective copy before the other block is done reading from it.
+
+```python
+def collective_smem_reuse(x_gmem, x_gmem2, y_gmem, x_smem, local_barrier, cluster_barrier):
+  plgpu.copy_gmem_to_smem(x_gmem, x_smem, local_barrier, collective_axes="cluster")
+  plgpu.barrier_wait(local_barrier)  # x_smem is ready to be used once the local wait completes
+  y_gmem[0] = x_smem[...]
+  plgpu.barrier_arrive(cluster_barrier)
+  plgpu.barrier_wait(cluster_barrier)  # x_smem can only be reused once the cluster barrier completes
+  plgpu.copy_gmem_to_smem(x_gmem2, x_smem, local_barrier, collective_axes="cluster")
+  plgpu.barrier_wait(local_barrier)  # x_smem is ready to be used once the local wait completes
+  y_gmem[1] = x_smem[...]
+```
+
+#### Reusing TMEM for collective MMAs on Blackwell
+
+This example works very similarly to the one before, only this time TMEM is the
+shared resource. One block issues collective MMAs for both of them, but they both
+need to safely complete a read from TMEM before it can be reused for another
+collective MMA.
+
+```python
+def collective_tmem_reuse(acc_tmem, lhs_ref, rhs_ref, mma_barrier, cluster_barrier):
+  leader_block = lax.axis_index("cluster") == 0
+  @pl.when(leader_block)
+  def _do_mma():
+    plgpu.tcgen05_mma(
+        acc_tmem, lhs_ref.at[0], rhs_ref.at[0], mma_barrier,
+        accumulate=False, collective_axis="x",
+    )
+  plgpu.barrier_wait(mma_barrier)
+  do_something(plgpu.async_load_tmem(acc_tmem))
+  plgpu.wait_load_tmem()  # Ensure the load is complete.
+  plgpu.barrier_arrive(cluster_barrier)
+  plgpu.barrier_wait(cluster_barrier)  # acc_tmem can only be reused once the cluster barrier completes
+  @pl.when(leader_block)
+  def _do_mma():
+    plgpu.tcgen05_mma(
+        acc_tmem, lhs_ref.at[1], rhs_ref.at[1], mma_barrier,
+        accumulate=False, collective_axis="x",
+    )
+  ...
+```
 
 ### `Semaphore`
 
-TODO
+Semaphores are powerful synchronization structures, primarily used to
+synchronize across different blocks, potentially running on different devices.
+For synchronization between threads within a single block, it is preferable to
+use `Barrier`s, while for cluster synchronization it is preferable to use
+`ClusterBarrier`s. Semaphores are implemented as 32-bit atomic counters located in
+GMEM that support the following operations:
+
+* {py:func}`pl.semaphore_signal <jax.experimental.pallas.semaphore_signal>`,
+  which atomically increments the semaphore. Any effects performed by the thread
+  before the signal (including reads or writes to remote memory over NVLINK) are
+  guaranteed to complete before the signal is visible on the target device.
+* {py:func}`pl.semaphore_wait <jax.experimental.pallas.semaphore_wait>`, which
+  blocks the thread until the semaphore reaches _at least_ the desired value, at
+  which point the value is atomically decreased and the thread is awoken. The
+  function can be optionally called with `decrement=False`, which will wake the
+  thread as soon as the value is at least the requested value, but the value of
+  the semaphore will not be decreased. The non-decrementing version is a bit
+  more efficient.
+
+Here we present a small example kernel that exchanges two small shards between
+two devices:
+
+```python
+def exchange_shards(x_ref, y_ref, done_sem):
+  other_dev_id = 1 - lax.axis_index("x")  # We assume two devices
+  neighbor_ref = plgpu.remote_ref(y_ref, other_dev_id)
+  neighbor_ref[...] = x_ref[...]  # This will write over NVLINK
+  pl.semaphore_signal(done_sem, device_id=other_dev_id)  # Signal that the write is complete
+  pl.semaphore_wait(done_sem)  # Wait for the other device to write to our memory
+
+mesh = jax.make_mesh((2,), ("x",))
+y = jax.jit(
+    jax.shard_map(
+      lambda x: plgpu.kernel(exchange_shards, out_shape=x,
+                             scratch_shapes=[plgpu.Semaphore.REGULAR])(x),
+      mesh=mesh, in_specs=P("x"), out_specs=P("x"), check_vma=False,
+    )
+)(x)
+```
 
 ## Cluster launch control
 
@@ -1102,7 +1216,226 @@ that contains iteration info, and optionally supports carry values.
 
 ## Asynchronous copies
 
-TODO
+Modern GPUs can directly and asynchronously copy data between GMEM and SMEM without
+involving registers. Starting from the Hopper generation, the copies can even
+be offloaded to a special hardware unit called the Tensor Memory Accelerator (TMA),
+which is what Mosaic uses to implement them.
+
+### GMEM to SMEM copies
+
+To schedule an asynchronous GMEM to SMEM copy, use {py:func}`plgpu.copy_gmem_to_smem <jax.experimental.pallas.mosaic_gpu.copy_gmem_to_smem>`. The function takes three operands: a source ref,
+a destination ref and a `Barrier`. Once the copy is complete, a single arrival will
+be observed on the barrier, as if `plgpu.barrier_arrive(barrier)` was called by a background thread:
+
+```python
+def body(in_gmem_ref, out_gmem_ref, smem_ref, barrier):
+  plgpu.copy_gmem_to_smem(in_gmem_ref, smem_ref, barrier)
+  plgpu.barrier_wait(barrier)
+  ...
+
+plgpu.kernel(
+  body,
+  out_shape=...,
+  scratch_shapes=[plgpu.SMEM(x.shape, x.dtype), plgpu.Barrier()],
+)
+```
+
+A single barrier can be used to synchronize multiple copies, but it has to be
+allocated with a higher `arrival_count`:
+
+```python
+def body(in_gmem_ref, in_gmem_ref2, out_gmem_ref, smem_ref, smem_ref2, barrier):
+  plgpu.copy_gmem_to_smem(in_gmem_ref, smem_ref, barrier)
+  plgpu.copy_gmem_to_smem(in_gmem_ref2, smem_ref2, barrier)
+  plgpu.barrier_wait(barrier)  # Awaits both copies
+  ...
+
+plgpu.kernel(
+  body,
+  out_shape=...,
+  # Barrier is allocated with 2 arrivals.
+  scratch_shapes=[plgpu.SMEM(x.shape, x.dtype), plgpu.Barrier(num_arrivals=2)],
+)
+```
+
+#### Collective copies
+
+When using block clusters, the asynchronous transfers feature a _multicast_ option,
+meaning that multiple blocks from the cluster can collectively load the same input.
+In some sense, this can be seen as a guaranteed L2 hit for all participating blocks,
+as it allows for better sharing of the limited HBM bandwidth.
+
+```{warning}
+When using collective copies, all blocks along the specified cluster axes must
+issue the same collective copy for the program to be valid. It is not allowed to
+only issue it from one block but not from others and it will result in undefined
+behavior (most likely a deadlock).
+```
+
+```{warning}
+When using collective copies, you need to be extra careful about reusing the SMEM
+buffers. The different blocks in the cluster might finish using them at different
+points in time but the first block that issues the next collective copy can overwrite
+the data still used by other blocks. See the [`ClusterBarrier` section](#clusterbarrier)
+for examples for how to make this safe.
+```
+
+```python
+def body(in_gmem_ref, in_gmem_ref2, out_gmem_ref, smem_ref, smem_ref2, barrier):
+  block_id = lax.axis_index("cluster")
+  # Both blocks in the cluster load the same data into smem_ref, so we can use
+  # a collective copy here.
+  plgpu.copy_gmem_to_smem(in_gmem_ref, smem_ref, barrier, collective_axes="cluster")
+  # Each block in the cluster loads a different slice of in_gmem_ref2, so we
+  # are not allowed to use collective copies.
+  plgpu.copy_gmem_to_smem(in_gmem_ref2.at[block_id], smem_ref2, barrier)
+  plgpu.barrier_wait(barrier)  # Awaits both copies
+  ...
+
+plgpu.kernel(
+  body,
+  out_shape=...,
+  # Barrier is allocated with 2 arrivals.
+  scratch_shapes=[plgpu.SMEM(x.shape, x.dtype), plgpu.Barrier(num_arrivals=2)],
+)
+```
+
+#### Collective partitioned copies (Blackwell only)
+
+In the Blackwell generations, collective copies that involve clusters of two
+blocks can be _partitioned_ by passing an additional `partitioned_axis` argument.
+When specified, the GMEM reference is expected to be double the size of the
+destination SMEM reference along the specified dimension. The destination in the
+first block will be overwritten with the first half of the GMEM ref, while the
+second block will receive the second half.
+
+This by itself would be equivalent to performing two non-collective copies on
+different input slices, but there's one crucial difference: only the barrier in
+the first block will receive the arrival once both copies complete. The barrier
+argument in the second block is ignored and the second block cannot use it to
+await the completion of the transfer.
+
+Arguably, this is a bit of a surprising feature, but it makes sense in the
+context of collective MMAs on Blackwell. There, each block is responsible for
+loading the operands into SMEM, but only the first block awaits the
+completion of the transfers and issues the MMA instructions. The second block
+usually waits on the completion of the MMA to indicate that the transfer is done,
+and the SMEM data has been read out, implying that it can safely overwrite it.
+
+### SMEM to GMEM copies
+
+To schedule an asynchronous GMEM to SMEM copy, use {py:func}`plgpu.copy_smem_to_gmem <jax.experimental.pallas.mosaic_gpu.copy_smem_to_gmem>`. As opposed to the other direction, this primitive
+only takes in the source and destination references. To await the completion of
+the copy, use the {py:func}`plgpu.wait_smem_to_gmem <jax.experimental.pallas.mosaic_gpu.wait_smem_to_gmem>`.
+
+The synchronization scheme for SMEM to GMEM copies is a little unexpected in that
+they cannot be awaited in arbitrary orders. `plgpu.wait_smem_to_gmem` takes as
+an argument the number of most recent copies **you do not want to await**, or equivalently
+the number of asynchronous SMEM to GMEM copies that you still want to allow
+to run:
+
+```python
+def copy_out(x_smem, y_smem, x_gmem, y_gmem):
+  plgpu.copy_smem_to_gmem(x_smem, x_gmem)
+  plgpu.copy_smem_to_gmem(y_smem, y_gmem)
+  plgpu.wait_smem_to_gmem(1, wait_read_only=True)
+  # At this point we know that the data of x_smem has been read, but we don't
+  # yet know that x_gmem contains the updated data.
+  plgpu.wait_smem_to_gmem(1)
+  # At this point we know that the x_smem -> x_gmem copy is done, but we know
+  # nothing about the y_smem -> y_gmem copy.
+  plgpu.wait_smem_to_gmem(0)
+  # At this point we know that both copies are complete.
+```
+
+Note that an SMEM to GMEM copy can only ever be awaited in the same thread that
+has issued it. `wait_smem_to_gmem` returns immediately if no copies have been
+issued or they have all completed.
+
+#### Only awaiting the read from SMEM
+
+Another option is that you can either await the copy being committed to GMEM
+You can choose to wait until the copy is fully written into GMEM
+(in a way that will be visible to following reads), or you can only await the
+data being read from SMEM by specifying `wait_read_only` in the wait function.
+This allows for a faster reuse of SMEM buffers if you don't intend to read back
+the data sent to GMEM just yet.
+
+#### Grouping multiple copies
+
+When `copy_smem_to_gmem` receives `commit_group=False` as an argument, it cannot
+be awaited until {py:func}`plgpu.commit_group <jax.experimental.pallas.mosaic_gpu.commit_group>`
+is called explicitly, or another `copy_smem_to_gmem` without that argument is issued.
+All SMEM to GMEM copies since the last commit are grouped together as a single awaitable unit:
+
+```python
+def copy_out(x_smem, y_smem, x_gmem, y_gmem):
+  plgpu.copy_smem_to_gmem(x_smem, x_gmem, commit_group=False)
+  plgpu.copy_smem_to_gmem(y_smem, y_gmem)  # Implicitly commits both copies
+  plgpu.wait_smem_to_gmem(1)
+  # At this point we only know that no SMEM to GMEM copies other than the two
+  # above are active.
+  plgpu.wait_smem_to_gmem(0)
+  # Only now we know that both copies above have completed.
+```
+
+### Asynchronous gathers
+
+On Blackwell GPUs, the TMA engine has an additional mode that allows for an efficient
+implementation of gathers along the first dimension on a 2D matrix. Using this
+mode is actually very simple. The 1D array of indices should be loaded into
+a `plgpu.Layout.TMA_GATHER_INDICES` layout, and the source GMEM reference
+has to be indexed with that array using the `.at` operator:
+
+```python
+@functools.partial(
+    self.pallas_call,
+    out_shape=jax.ShapeDtypeStruct(out_shape, dtype),
+    out_specs=plgpu.BlockSpec(memory_space=plgpu.SMEM, transforms=transforms),
+    in_specs=(
+        pl.BlockSpec(memory_space=plgpu.GMEM),
+        pl.BlockSpec(memory_space=plgpu.SMEM),
+    ),
+    scratch_shapes=[plgpu.Barrier()],
+)
+def kernel(x_ref_gmem, idx_ref, o_ref, barrier_ref):
+  idxs = plgpu.load(idx_ref, (), layout=plgpu.Layout.TMA_GATHER_INDICES)
+  plgpu.copy_gmem_to_smem(x_ref_gmem.at[idxs], o_ref, barrier_ref)
+  plgpu.barrier_wait(barrier_ref)
+```
+
+The `plgpu.copy_gmem_to_smem` automatically recognizes that the reference has
+been sliced with an array and will use the gather TMA instructions to implement
+the copy.
+
+### NVLINK transfers
+
+Asynchronous copies in either direction support GMEM references returned from
+`plgpu.peer_ref`, which makes it possible to perform NVLINK transfers asynchronously.
+
+```python
+def exchange_shards(x_ref, y_ref, smem_ref, local_barrier, done_sem):
+  plgpu.copy_gmem_to_smem(x_ref, smem_ref, local_barrier)  # Local copy
+  plgpu.barrier_wait(local_barrier)
+  other_dev_id = 1 - lax.axis_index("x")  # We assume two devices
+  neighbor_ref = plgpu.remote_ref(y_ref, other_dev_id)
+  plgpu.copy_smem_to_gmem(smem_ref, neighbor_ref)
+  plgpu.wait_smem_to_gmem(0)  # Wait for the asynchronous write to complete
+  pl.semaphore_signal(done_sem, device_id=other_dev_id)  # Signal that the write is complete
+  pl.semaphore_wait(done_sem)  # Wait for the other device to write to our memory
+
+mesh = jax.make_mesh((2,), ("x",))
+y = jax.jit(
+    jax.shard_map(
+      lambda x: plgpu.kernel(
+          exchange_shards,
+          out_shape=x,
+          scratch_shapes=[x, plgpu.Barrier(), plgpu.Semaphore.REGULAR]
+      )(x),
+      mesh=mesh, in_specs=P("x"), out_specs=P("x"), check_vma=False,
+    )
+)(x)
+```
 
 ## Inline Mosaic GPU
 
@@ -1138,3 +1471,33 @@ generated low-level code:
   setting `MOSAIC_GPU_LLVM_DEBUG_ONLY=serialize-to-llvm`, and both environment
   variables compose. Like `MOSAIC_GPU_LLVM_DEBUG_ONLY`, this environment
   variable is only available in debug builds.
+
+## Calling kernels from PyTorch
+
+The {py:func}`plgpu.as_torch_kernel <jax.experimental.pallas.mosaic_gpu.as_torch_kernel>`
+decorator wraps a Pallas:MGPU kernel to allow invoking it with PyTorch tensors.
+It accepts CUDA tensors as inputs and returns newly allocated CUDA tensors
+on the same device.
+
+Example:
+
+```python
+import functools
+import jax
+import jax.numpy as jnp
+import torch
+
+@functools.partial(
+    pl.pallas_call, out_shape=jax.ShapeDtypeStruct([128], jnp.int32)
+)
+def add_kernel(x_ref, y_ref, o_ref):
+  o_ref[...] = x_ref[...] + y_ref[...]
+
+x = torch.arange(128, dtype=torch.int32, device="cuda")
+y = x * x
+out = plgpu.as_torch_kernel(add_kernel)(x, y)
+```
+
+`plgpu.as_torch_kernel` only supports functions that contain a single kernel
+invocation (e.g. via `pl.pallas_call` or `plgpu.kernel`), and no calls to
+other JAX operations, e.g. from {mod}`jax.numpy`.

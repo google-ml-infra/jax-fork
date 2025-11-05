@@ -49,8 +49,9 @@ def pallas_call_lowering(
     cost_estimate: pallas_core.CostEstimate | None,
     out_avals: tuple[jax_core.AbstractValue, ...],
     metadata: frozen_dict.FrozenDict[str, str] | None,
+    name: str | None,
 ):
-  del metadata  # TODO(sharadmv): Add metadata to HLO.
+  del metadata, name  # TODO(sharadmv): Add metadata to HLO.
   debug_info = jaxpr.debug_info
   del interpret, out_avals
   if grid_mapping.num_dynamic_grid_bounds:
@@ -114,7 +115,8 @@ def pallas_call_lowering(
       out_types=lowering_result.new_out_shapes,
       inout_types=(),
       input_output_aliases=input_output_aliases,
-      use_custom_barrier=False, # False until we add get_barrier_semaphore() feature
+      # False until we add get_barrier_semaphore() feature.
+      use_custom_barrier=False,
   )
   if (prof_spec := lowering_result.profiler_spec) is not None:
     *outs, prof_buffer = outs
