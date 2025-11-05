@@ -33,11 +33,10 @@ jobs:
           echo "Building the project..."
           sleep 10
           echo "Build complete...."
-          exit 1
 
   test:
-    runs-on: linux-arm64-t2a-16
-    container: 'us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build-arm64:latest'
+    runs-on: linux-x86-n2-16
+    container: 'us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build:latest'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
