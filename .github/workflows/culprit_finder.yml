@@ -1,10 +1,6 @@
 name: Culprit Finder Workflow
 
 on:
-  push:
-    branches:
-      - daniel/culprit-finder
-
   workflow_dispatch:
     inputs:
       workflow-to-debug:
