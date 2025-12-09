@@ -24,7 +24,7 @@ concurrency:
 permissions: {}
 jobs:
   build:
-    runs-on: linux-x86-n2-16
+    runs-on: linux-x86-ct4p-240-4tpu
     container: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build:infrastructure-public-image-fc1b94362c5e
     strategy:
       matrix:
@@ -36,5 +36,7 @@ jobs:
       uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0
       with:
         persist-credentials: false
-    - name: Wait For Connection
-      run: sleep 100
+    - name: Install TPU
+      run: pip install -U "jax[tpu]"
+    - name: Test
+      run: python -c "import jax; print(jax.devices())"
