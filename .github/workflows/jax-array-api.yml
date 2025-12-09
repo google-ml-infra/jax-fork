@@ -36,6 +36,6 @@ jobs:
       with:
         persist-credentials: false
     - name: Install TPU
-      run: pip install -U "jax[tpu]"
+      run: python -m pip install -U "jax[tpu]"
     - name: Test
       run: python -c "import jax; print(jax.devices())"
