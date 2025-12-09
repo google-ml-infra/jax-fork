@@ -27,7 +27,7 @@ jobs:
     runs-on: linux-x86-ct4p-240-4tpu
     strategy:
       matrix:
-        python-version: [3.11]
+        python-version: [3.12]
     env:
       PYTHON: "python${{ matrix.python-version }}"
     steps:
@@ -37,7 +37,7 @@ jobs:
         persist-credentials: false
     - uses: actions/setup-python@v6
       with:
-        python-version: '3.11' 
+        python-version: ${{ matrix.python-version }}
     - name: Install TPU
       run: python -m pip install jax[tpu] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
     - name: Test
