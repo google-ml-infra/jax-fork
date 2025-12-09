@@ -25,7 +25,6 @@ permissions: {}
 jobs:
   build:
     runs-on: linux-x86-ct4p-240-4tpu
-    container: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build:infrastructure-public-image-fc1b94362c5e
     strategy:
       matrix:
         python-version: [3.11]
