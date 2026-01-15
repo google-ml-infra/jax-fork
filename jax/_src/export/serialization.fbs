@@ -82,20 +82,59 @@ enum DType: byte {
   key_unsafe_rbg = 29,
 }
 
+enum MemorySpace: byte {
+  Missing = 0,  // default if missing (pre 11/25/2025)
+  Device = 1,
+  Host = 2,
+  Any = 3,
+}
+
+enum AxisType: byte {
+  Missing = 0,  // default if missing (pre 1/15/2026)
+  Auto = 1,
+  Explicit = 2,
+  Manual = 3,
+}
+
+table AbstractMesh {
+  axis_sizes: [uint32];
+  axis_names: [string];
+  axis_types: [AxisType];
+}
+
+table PartitionSpecOneAxis {
+  axes: [string];  // [] = None, ['x'] = 'x', ['x', 'y'] = ('x', 'y')
+}
+
+table PartitionSpec {
+  partitions: [PartitionSpecOneAxis];
+  reduced: [string];
+  unreduced: [string];
+}
+
+table NamedSharding {
+  mesh: AbstractMesh;
+  spec: PartitionSpec;
+  memory_kind: string;
+}
+
 table AbstractValue {
   kind: AbstractValueKind;
   shape: [string];  // Support shape polymorphism
   dtype: DType;
+  memory_space: MemorySpace;
 }
 
 enum ShardingKind: byte {
-  unspecified,
-  hlo_sharding,
+  unspecified = 0,
+  hlo_sharding = 1,
+  named_sharding = 2,  // Added 1/15/2026
 }
 
 table Sharding {
   kind: ShardingKind;
-  hlo_sharding_proto: [byte];
+  hlo_sharding_proto: [byte];  // if kind == hlo_sharding
+  named_sharding: NamedSharding;  // if kind == named_sharding; added 1/15/2026
 }
 
 table Effect {
@@ -119,6 +158,7 @@ table Exported {
   /// Note that this field has different semantics and purpose from
   /// `mlir_module_serialization_version`, which encodes
   /// the calling convention of the `mlir_module_serialized`.
+  /// See comments in serialization.py for more details.
   serialization_version: uint16;
 
   function_name: string;
@@ -126,7 +166,7 @@ table Exported {
   in_avals: [AbstractValue];
   out_tree: PyTreeDef;
   out_avals: [AbstractValue];
-  nr_devices: short;
+  nr_devices_short: short;  // Deprecated as of 11/25/2025
   in_shardings: [Sharding];
   out_shardings: [Sharding];
 
@@ -142,6 +182,7 @@ table Exported {
   uses_global_constants: bool;
 
   vjp: Exported;
+  nr_devices: uint32 = 0;  // Added 11/25/2025
 }
 
 root_type Exported;

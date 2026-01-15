@@ -20,6 +20,7 @@ limitations under the License.
 #include <cstdint>
 #include <iterator>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>  // NOLINT
 #include <unordered_map>
@@ -33,6 +34,7 @@ limitations under the License.
 #include "absl/synchronization/mutex.h"
 #include "absl/synchronization/notification.h"
 #include "nanobind/nanobind.h"
+#include "nanobind/stl/optional.h"  // IWYU pragma: keep
 #include "nanobind/stl/shared_ptr.h"  // IWYU pragma: keep
 #include "nanobind/stl/string.h"  // IWYU pragma: keep
 #include "nanobind/stl/vector.h"  // IWYU pragma: keep
@@ -106,12 +108,18 @@ struct HashableKey {
 class WeakrefLRUCache : public std::enable_shared_from_this<WeakrefLRUCache> {
  public:
   WeakrefLRUCache(nb::callable cache_context_fn, nb::callable fn,
-                  int64_t maxsize)
-      : cache_context_fn_(cache_context_fn), fn_(fn), lru_list_(maxsize) {}
+                  int64_t maxsize, std::optional<nb::callable> explain)
+      : cache_context_fn_(cache_context_fn),
+        fn_(fn),
+        lru_list_(std::make_shared<Cache::LRUList>(maxsize)),
+        explain_(explain) {}
 
   nb::object Call(nb::object weakref_key, nb::args args, nb::kwargs kwargs);
 
+  void EvictWeakref(nb::object weakref_key);
+
   std::vector<nb::object> GetKeys();
+  std::vector<nb::object> GetKeysLocked();
 
   struct CacheInfo {
     int64_t hits;
@@ -182,6 +190,7 @@ class WeakrefLRUCache : public std::enable_shared_from_this<WeakrefLRUCache> {
   using Cache = xla::LRUCache<Key, std::shared_ptr<CacheEntry>>;
 
   struct WeakrefCacheValue {
+    std::shared_ptr<Cache::LRUList> lru_list;
     std::shared_ptr<Cache> cache;
   };
 
@@ -199,14 +208,18 @@ class WeakrefLRUCache : public std::enable_shared_from_this<WeakrefLRUCache> {
   std::shared_ptr<Cache> GetCache(WeakrefCacheKey key) {
     WeakrefCacheValue& value = entries_[key];
     if (!value.cache) {
-      value.cache = std::make_shared<Cache>(&lru_list_);
+      value.lru_list = lru_list_;
+      value.cache = std::make_shared<Cache>(lru_list_.get());
     }
     return value.cache;
   }
 
+  WeakrefCacheKey MakeWeakrefKey(const nb::object& weakref_key);
+
   nb::callable cache_context_fn_;
   nb::callable fn_;
-  Cache::LRUList lru_list_;
+  std::shared_ptr<Cache::LRUList> lru_list_;
+  std::optional<nb::callable> explain_;
   std::unordered_map<WeakrefCacheKey, WeakrefCacheValue, WeakrefKeyHash,
                      WeakrefKeyEq>
       entries_;
@@ -222,17 +235,8 @@ class WeakrefLRUCache : public std::enable_shared_from_this<WeakrefLRUCache> {
   static int tp_clear(PyObject* self);
 };
 
-nb::object WeakrefLRUCache::Call(nb::object weakref_key, nb::args args,
-                                 nb::kwargs kwargs)
-    ABSL_NO_THREAD_SAFETY_ANALYSIS {
-  nb::object context = cache_context_fn_();
-
-  // We precompute all of the hash values needed by the various maps rather
-  // than computing them during the std::unordered_map insertions. At the very
-  // least, MSVC's std::unordered_map has undefined behavior if the hash
-  // function throws an exception
-  // (https://learn.microsoft.com/en-us/cpp/standard-library/unordered-map-class?view=msvc-170#emplace).
-  Key key(context, args, kwargs);
+WeakrefLRUCache::WeakrefCacheKey WeakrefLRUCache::MakeWeakrefKey(
+    const nb::object& weakref_key) {
   size_t wrcache_hash = static_cast<size_t>(nb::hash(weakref_key));
 
   // No hash computations after this point.
@@ -263,7 +267,31 @@ nb::object WeakrefLRUCache::Call(nb::object weakref_key, nb::args args,
         cache->entries_.erase(it);
       });
   nb::weakref weakref = nb::weakref(weakref_key, weakref_gc_callback);
-  WeakrefCacheKey wrcache_key{weakref, wrcache_hash};
+  return WeakrefCacheKey{std::move(weakref), wrcache_hash};
+}
+
+void WeakrefLRUCache::EvictWeakref(nb::object weakref_key) {
+  auto it = entries_.find(MakeWeakrefKey(weakref_key));
+  if (it == entries_.end()) {
+    return;
+  }
+  // Create temp-var to avoid re-entrant erase.
+  auto tmp = std::move(it->second);
+  entries_.erase(it);
+}
+
+nb::object WeakrefLRUCache::Call(nb::object weakref_key, nb::args args,
+                                 nb::kwargs kwargs)
+    ABSL_NO_THREAD_SAFETY_ANALYSIS {
+  nb::object context = cache_context_fn_();
+  // We precompute all of the hash values needed by the various maps rather
+  // than computing them during the std::unordered_map insertions. At the very
+  // least, MSVC's std::unordered_map has undefined behavior if the hash
+  // function throws an exception
+  // (https://learn.microsoft.com/en-us/cpp/standard-library/unordered-map-class?view=msvc-170#emplace).
+  Key key(context, args, kwargs);
+  auto wrcache_key = MakeWeakrefKey(weakref_key);
+
   std::shared_ptr<Cache> cache_ptr = GetCache(wrcache_key);
   Cache& cache = *cache_ptr;
   ++total_queries_;
@@ -271,10 +299,10 @@ nb::object WeakrefLRUCache::Call(nb::object weakref_key, nb::args args,
   bool inserted = false;
   std::shared_ptr<CacheEntry> entry;
   if (mu_holder_thread_id_.load() == std::this_thread::get_id()) {
-    auto error_string = absl::StrCat(
-        "Reentrant call to weakref_lru_cache. Key: ",
-        nb::cast<std::string>(nb::repr(weakref_key)),
-        nb::cast<std::string>(nb::repr(args)));
+    auto error_string =
+        absl::StrCat("Reentrant call to weakref_lru_cache. Key: ",
+                     nb::cast<std::string>(nb::repr(weakref_key)),
+                     nb::cast<std::string>(nb::repr(args)));
     PyErr_SetString(PyExc_RecursionError, error_string.c_str());
     throw nb::python_error();
   }
@@ -285,26 +313,40 @@ nb::object WeakrefLRUCache::Call(nb::object weakref_key, nb::args args,
 
     // Acquire a mutex to avoid problems where the gil is released during
     // cache insertion and then a second thread invalidates the cache order.
-    mu_.Lock();
+    mu_.lock();
     mu_holder_thread_id_.store(std::this_thread::get_id());
   }
+  std::vector<nb::object> miss_keys;
+  nb::object explainer;
   {
     // GetOrCreateIfAbsent calls into Python hash and equality functions,
     // which may throw exceptions. The use of absl::Cleanup ensures mu_ is
     // released if that happens.
     absl::Cleanup unlock = [this]() ABSL_UNLOCK_FUNCTION(mu_) {
       mu_holder_thread_id_.store(std::thread::id());
-      mu_.Unlock();
+      mu_.unlock();
     };
-    entry = cache.GetOrCreateIfAbsent(key, [&inserted](const Key& key) {
-      inserted = true;
-      return std::make_shared<CacheEntry>();
-    });
+    entry = cache.GetOrCreateIfAbsent(
+        key, [this, &miss_keys, &inserted, &explainer](const Key& key) {
+          inserted = true;
+          if (explain_.has_value()) {
+            explainer = (*explain_)();
+            if (!explainer.is_none()) {
+              miss_keys = GetKeysLocked();
+            } else {
+              explainer = nb::object();
+            }
+          }
+          return std::make_shared<CacheEntry>();
+        });
   }
   if (!entry->completed.HasBeenNotified()) {
     if (inserted) {
       ++misses_;
       absl::Cleanup notify = [&] { entry->completed.Notify(); };
+      if (explainer) {
+        explainer(miss_keys, weakref_key, *args, **kwargs);
+      }
       entry->result = fn_(weakref_key, *args, **kwargs);
       entry->has_result = true;
     } else {
@@ -330,18 +372,21 @@ nb::object WeakrefLRUCache::Call(nb::object weakref_key, nb::args args,
 }
 
 std::vector<nb::object> WeakrefLRUCache::GetKeys() {
+  absl::MutexLock l(mu_);
+  return GetKeysLocked();
+}
+std::vector<nb::object> WeakrefLRUCache::GetKeysLocked() {
   std::vector<nb::object> results;
-  mu_.Lock();
   for (const auto& [wr_key, wr_value] : entries_) {
     wr_value.cache->ForEach([&results, &wr_key](
                                 const Key& key,
                                 const std::shared_ptr<CacheEntry>& value) {
+      if (!value->completed.HasBeenNotified()) { return; }
       nb::tuple result =
           nb::make_tuple(*wr_key.ref, key.context(), key.args(), key.kwargs());
       results.push_back(std::move(result));
     });
   }
-  mu_.Unlock();
   return results;
 }
 
@@ -349,8 +394,8 @@ WeakrefLRUCache::CacheInfo WeakrefLRUCache::GetCacheInfo() const {
   CacheInfo result;
   result.hits = total_queries_ - misses_;
   result.misses = misses_;
-  result.maxsize = lru_list_.Capacity();
-  result.currsize = lru_list_.Size();
+  result.maxsize = lru_list_->Capacity();
+  result.currsize = lru_list_->Size();
   return result;
 }
 
@@ -374,6 +419,7 @@ void WeakrefLRUCache::Clear() {
   WeakrefLRUCache* cache = nb::inst_ptr<WeakrefLRUCache>(self);
   Py_VISIT(cache->cache_context_fn_.ptr());
   Py_VISIT(cache->fn_.ptr());
+  if (cache->explain_) { Py_VISIT(cache->explain_->ptr()); }
   for (const auto& [wr_key, wr_value] : cache->entries_) {
     Py_VISIT(wr_key.ref.ptr());
     int rval = 0;
@@ -401,6 +447,7 @@ void WeakrefLRUCache::Clear() {
   cache->Clear();
   cache->cache_context_fn_.reset();
   cache->fn_.reset();
+  cache->explain_ = std::nullopt;
   return 0;
 }
 
@@ -416,6 +463,7 @@ NB_MODULE(weakref_lru_cache, m) {
                                   nb::is_weak_referenceable(),
                                   nb::type_slots(WeakrefLRUCache::slots_))
           .def("__call__", &WeakrefLRUCache::Call, nb::lock_self())
+          .def("evict_weakref", &WeakrefLRUCache::EvictWeakref, nb::lock_self())
           .def("cache_keys", &WeakrefLRUCache::GetKeys, nb::lock_self())
           .def("cache_info", &WeakrefLRUCache::GetCacheInfo, nb::lock_self())
           .def("cache_clear", &WeakrefLRUCache::Clear, nb::lock_self());
@@ -432,10 +480,15 @@ NB_MODULE(weakref_lru_cache, m) {
       });
   m.def(
       "weakref_lru_cache",
-      [](nb::callable cache_context_fn, nb::callable fn, int64_t maxsize) {
-        return std::make_shared<WeakrefLRUCache>(cache_context_fn, fn, maxsize);
+      [](nb::callable cache_context_fn, nb::callable fn,
+         std::optional<int64_t> maxsize, std::optional<nb::callable> explain) {
+        return std::make_shared<WeakrefLRUCache>(
+            cache_context_fn, fn,
+            maxsize.value_or(std::numeric_limits<int>::max()), explain);
       },
-      nb::arg("cache_context_fn"), nb::arg("fn"), nb::arg("maxsize") = 2048);
+      nb::arg("cache_context_fn"), nb::arg("fn"),
+      nb::arg("maxsize").none() = 2048,
+      nb::arg("explain") = std::optional<nb::callable>());
 }
 
 }  // namespace jax

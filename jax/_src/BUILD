@@ -689,6 +689,7 @@ pytype_strict_library(
         ":shard_map",
         ":sharding",
         ":sharding_impls",
+        ":source_info_util",
         ":tree_util",
         ":util",
         ":xla_bridge",
@@ -795,10 +796,13 @@ pytype_strict_library(
         ":effects",
         ":mesh",
         ":mlir",
+        ":named_sharding",
+        ":partition_spec",
         ":sharding",
         ":sharding_impls",
         ":source_info_util",
         ":stages",
+        ":traceback_util",
         ":tree_util",
         ":typing",
         ":util",
@@ -816,6 +820,7 @@ pytype_strict_library(
         ":batching",
         ":core",
         ":effects",
+        ":frozen_dict",
         ":hashable_array",
         ":layout",
         ":mlir",
@@ -835,6 +840,7 @@ pytype_strict_library(
         ":dtypes",
         ":lax",
         ":tree_util",
+        ":typing",
         ":util",
     ] + py_deps("numpy"),
 )
@@ -933,7 +939,6 @@ pytype_strict_library(
     name = "batching",
     srcs = ["interpreters/batching.py"],
     deps = [
-        ":ad",
         ":ad_util",
         ":config",
         ":core",
@@ -1070,7 +1075,6 @@ pytype_strict_library(
     visibility = ["//jax:internal"] + jax_visibility("pretty_printer"),
     deps = [
         ":config",
-        ":util",
         "//jax/_src/lib",
     ],
 )
@@ -1082,6 +1086,23 @@ pytype_strict_library(
         ":traceback_util",
         ":xla_bridge",
         "//jax/_src/lib",
+    ],
+)
+
+pytype_strict_library(
+    name = "pmap",
+    srcs = ["pmap.py"],
+    deps = [
+        ":api",
+        ":core",
+        ":lax",
+        ":mesh",
+        ":shard_map",
+        ":stages",
+        ":traceback_util",
+        ":tree_util",
+        ":util",
+        ":xla_bridge",
     ],
 )
 
@@ -1163,9 +1184,16 @@ pytype_strict_library(
     deps = [
         ":ad",
         ":ad_util",
+        ":api",
+        ":api_util",
+        ":batching",
+        ":config",
         ":core",
+        ":custom_derivatives",
+        ":dtypes",
         ":effects",
         ":partial_eval",
+        ":state_types",
         ":tree_util",
         ":util",
     ],
@@ -1253,6 +1281,7 @@ pytype_strict_library(
     deps = [
         ":config",
         ":core",
+        ":deprecations",
         ":internal_mesh_utils",
         ":mesh",
         ":named_sharding",
@@ -1289,7 +1318,6 @@ pytype_strict_library(
     ]),
     deps = [
         ":api",
-        ":batching",
         ":config",
         ":core",
         ":cudnn",
@@ -1297,7 +1325,6 @@ pytype_strict_library(
         ":deprecations",
         ":dtypes",
         ":lax",
-        ":mlir",
         ":named_sharding",
         ":numpy",
         ":partition_spec",
@@ -1341,7 +1368,6 @@ pytype_strict_library(
     name = "sharding_specs",
     srcs = ["sharding_specs.py"],
     deps = [
-        ":config",
         ":op_shardings",
         ":util",
         "//jax/_src/lib",
@@ -1402,6 +1428,7 @@ pytype_strict_library(
         ":traceback_util",
         ":tree_util",
         ":typing",
+        "//jax/_src/lib",
     ] + py_deps("numpy"),
 )
 
@@ -1429,6 +1456,7 @@ pytype_strict_library(
     deps = [
         ":config",
         ":util",
+        "//jax/_src/lib",
     ],
 )
 
@@ -1562,8 +1590,23 @@ pytype_strict_library(
 pytype_strict_library(
     name = "ref",
     srcs = ["ref.py"],
-    deps = [
-        ":core",
-        ":typing",
+    deps = [":core"],
+)
+
+pytype_strict_library(
+    name = "stateful_rng",
+    srcs = [
+        "stateful_rng.py",
     ],
+    deps = [
+        ":api_util",
+        ":core",
+        ":dtypes",
+        ":lax",
+        ":numpy",
+        ":random",
+        ":ref",
+        ":tree_util",
+        ":typing",
+    ] + py_deps("numpy"),
 )

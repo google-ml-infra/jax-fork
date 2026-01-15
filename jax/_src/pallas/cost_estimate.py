@@ -18,7 +18,7 @@ import math
 from typing import Any
 from collections.abc import Sequence
 
-import jax
+from jax._src import tree_util
 from jax._src import api_util
 from jax._src import core as jax_core
 from jax._src import custom_derivatives
@@ -89,7 +89,7 @@ def estimate_cost(fun, *args, **kwargs) -> pallas_core.CostEstimate:
   Returns:
     A pallas_core.CostEstimate object containing the cost estimate.
   """
-  flattened_args, treedef = jax.tree.flatten(args)
+  flattened_args, treedef = tree_util.tree_flatten(args)
   partial_fun = functools.partial(fun, **kwargs)
   wrapped_fun, _ = api_util.flatten_fun_nokwargs(
       lu.wrap_init(partial_fun,
@@ -205,10 +205,12 @@ def dot_general_cost_rule(ctx: Context,
   assert len(lhs_batch_dims) == len(rhs_batch_dims)
   flops = 1
   # Flops along a contracting dim is 2*dim (addition and multiplication)
+  contracting_flops = 1
   for i in range(len(lhs_contracting_dims)):
     lhs_dim, rhs_dim = lhs_contracting_dims[i], rhs_contracting_dims[i]
     assert x_shape[lhs_dim] == y_shape[rhs_dim]
-    flops *= 2 * x_shape[lhs_dim]
+    contracting_flops *= x_shape[lhs_dim]
+  flops *= 2 * contracting_flops
   # Now we handle all other dimensions.
   for i, lhs_dim in enumerate(x_shape):
     if i in lhs_contracting_dims:

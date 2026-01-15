@@ -17,6 +17,7 @@
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
+  from jaxlib.mlir.dialects import _gpu_ops_gen as _gpu_ops_gen
   from jaxlib.mlir.dialects import arith as arith
   from jaxlib.mlir.dialects import builtin as builtin
   from jaxlib.mlir.dialects import cf as cf
@@ -35,6 +36,7 @@ if TYPE_CHECKING:
 else:
   from jax._src import lazy_loader as _lazy
   __getattr__, __dir__, __all__ = _lazy.attach("jaxlib.mlir.dialects", [
+      "_gpu_ops_gen",
       "arith",
       "builtin",
       "cf",
@@ -53,11 +55,7 @@ else:
   ])
   del _lazy
 
-# TODO(joelwee): Remove this once jaxlib 0.8 is the minimum.
-try:
-  from jaxlib.mlir.dialects import mpmd
-except ImportError:
-  mpmd: Any = None  # type: ignore[no-redef]
+from jaxlib.mlir.dialects import mpmd
 from jaxlib.mlir.dialects import sdy
 
 # Alias that is set up to abstract away the transition from MHLO to StableHLO.

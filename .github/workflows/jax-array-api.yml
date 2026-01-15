@@ -10,8 +10,13 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
-  cancel-in-progress: true
+  # Don't cancel in-progress jobs for main branches.
+  cancel-in-progress: ${{ github.ref != 'main' }}
 permissions: {}
+
+env:
+  UV_DEFAULT_INDEX: "https://us-python.pkg.dev/ml-oss-artifacts-published/pypi-mirror/simple"
+
 jobs:
   build:
     runs-on: linux-x86-n4-16
@@ -23,11 +28,11 @@ jobs:
       PYTHON: "python${{ matrix.python-version }}"
     steps:
     - name: Checkout jax
-      uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0
+      uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3  # v6.0.0
       with:
         persist-credentials: false
     - name: Checkout array-api-tests
-      uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0
+      uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3  # v6.0.0
       with:
         repository: data-apis/array-api-tests
         ref: '2025.05.23'
@@ -35,8 +40,9 @@ jobs:
         path: 'array-api-tests'
         persist-credentials: false
     - name: Install dependencies
+      # TODO(jakevdp) remove numpy pin once ml_dtypes 0.6 is released
       run: |
-        $PYTHON -m uv pip install --system .[ci] pytest-xdist -r array-api-tests/requirements.txt
+        $PYTHON -m uv pip install --system .[ci] "numpy<2.4.0" pytest-xdist -r array-api-tests/requirements.txt
     - name: Run the test suite
       env:
         ARRAY_API_TESTS_MODULE: jax.numpy

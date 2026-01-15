@@ -46,6 +46,11 @@ class AUTO:
     return SdyArray(mesh_shape=self.mesh.shape_tuple,
                     dim_shardings=dim_shardings)
 
+  @property
+  def _device_assignment(self):
+    return self.mesh._flat_devices_tuple
+
+
 class UnspecifiedValue:
   def __repr__(self):
     return "UnspecifiedValue"
@@ -103,6 +108,7 @@ class NamedSharding(JSharding.Sharding):
   Args:
     mesh: A :class:`jax.sharding.Mesh` object.
     spec: A :class:`jax.sharding.PartitionSpec` object.
+    memory_kind: A string indicating the memory kind of the sharding.
 
   Examples:
 
@@ -226,6 +232,14 @@ class NamedSharding(JSharding.Sharding):
       num_partitions *= mesh_shape[name]
     return num_partitions == 1
 
+  @functools.cached_property
+  def replicated_axes(self) -> frozenset[MeshAxisName]:
+    flat_spec = frozenset(
+        s for s in flatten_spec(self.spec)
+        if s is not None and s is not PartitionSpec.UNCONSTRAINED)
+    return frozenset(self.mesh.axis_names) - (
+        flat_spec | self.spec.unreduced | self.spec.reduced)
+
   def with_memory_kind(self, kind: str) -> NamedSharding:
     return self.update(memory_kind=kind)
 
@@ -261,6 +275,16 @@ class NamedSharding(JSharding.Sharding):
                     unreduced_axes=self.spec.unreduced)
 
 NamedSharding.__module__ = 'jax.sharding'
+
+def flatten_spec(spec):
+  out = []
+  for s in spec:
+    if isinstance(s, tuple):
+      out.extend(s)
+    else:
+      out.append(s)
+  return out
+
 
 def get_array_mapping(
     axis_resources: PartitionSpec | AUTO | UnspecifiedValue
@@ -492,19 +516,6 @@ def _check_unique_resources(pspec: PartitionSpec, arg_name: str, mesh=None
             f' for {mesh_lib.show_axes(multiple_uses)}'),
         mesh=mesh, pspec=pspec)
 
-def check_pspec_mix_axis_type(mesh, pspec):
-  for spec in pspec:
-    if isinstance(spec, tuple):
-      if all(mesh._name_to_type[spec[0]] == mesh._name_to_type[p]
-             for p in spec):
-        continue
-      if any(mesh._name_to_type[p] == AxisType.Manual for p in spec):
-        raise ValueError(
-            'Tuple subset of `PartitionSpec` cannot contain `Manual` mixed'
-            f' with `Auto` or `Explicit`. Got pspec {pspec} and subset'
-            f' {spec} with axis types:'
-            f' ({", ".join(str(mesh._name_to_type[p]) for p in spec)})')
-
 def _check_mesh_resource_axis(mesh, pspec):
   for p in pspec:
     if p is PartitionSpec.UNCONSTRAINED or p is None:
@@ -515,7 +526,6 @@ def _check_mesh_resource_axis(mesh, pspec):
         raise ValueError(
             f"Resource axis: {r} of {pspec} "
             f"is not found in mesh: {tuple(mesh.shape.keys())}.")
-  check_pspec_mix_axis_type(mesh, pspec)
   if (AxisType.Auto not in mesh.axis_types and
       PartitionSpec.UNCONSTRAINED in pspec):
     raise ValueError(
@@ -529,10 +539,10 @@ def _check_mesh_unreduced(mesh, pspec):
       raise ValueError(
           f'Unreduced axes {u} is not found in {mesh.axis_names=}. '
           f'Got {pspec=}')
-    if mesh._name_to_type[u] in (AxisType.Auto, AxisType.Manual):
+    if mesh._name_to_type[u] == AxisType.Auto:
       raise ValueError(
-          'Unreduced axes can only refer to mesh axes that is of type'
-          f' `Explicit`. Got unreduced axes: {pspec.unreduced} and'
+          'Unreduced axes can only refer to mesh axes that are of type'
+          f' `Explicit` or `Manual`. Got unreduced axes: {pspec.unreduced} and'
           f' mesh: {mesh}')
 
   for u in pspec.reduced:
@@ -540,8 +550,8 @@ def _check_mesh_unreduced(mesh, pspec):
       raise ValueError(
           f'Reduced axes {u} is not found in {mesh.axis_names=}. '
           f'Got {pspec=}')
-    if mesh._name_to_type[u] in (AxisType.Auto, AxisType.Manual):
+    if mesh._name_to_type[u] == AxisType.Auto:
       raise ValueError(
-          'Reduced axes can only refer to mesh axes that is of type'
-          f' `Explicit`. Got reduced axes: {pspec.reduced} and'
+          'Reduced axes can only refer to mesh axes that are of type'
+          f' `Explicit` or `Manual`. Got reduced axes: {pspec.reduced} and'
           f' mesh: {mesh}')

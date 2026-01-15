@@ -35,6 +35,7 @@ from jax._src import dtypes
 from jax._src import test_util as jtu
 from jax._src import util
 from jax._src.lax import lax as lax_internal
+from jax._src.numpy import indexing
 
 config.parse_flags_with_absl()
 
@@ -67,7 +68,7 @@ def check_grads(f, args, order, atol=None, rtol=None, eps=None):
   jtu.check_vjp(f, partial(jax.vjp, f), args, atol, rtol, eps)
 
 
-STATIC_INDEXING_TESTS = [
+STATIC_SLICE_TESTS = [
   ("OneIntIndex", [
     IndexSpec(shape=(3,), indexer=1, out_shape=()),
     IndexSpec(shape=(3, 3), indexer=0, out_shape=(3,)),
@@ -101,13 +102,6 @@ STATIC_INDEXING_TESTS = [
     IndexSpec(shape=(10, 8), indexer=slice(3, 1, -1), out_shape=(2, 8)),
     IndexSpec(shape=(10, 8), indexer=slice(0, 8, -1), out_shape=(0, 8)),
     IndexSpec(shape=(10, 8), indexer=slice(None, None, -1), out_shape=(10, 8)),
-  ]),
-  ("SliceIndexClamping", [
-    IndexSpec(shape=(10,), indexer=slice(2, 11, 1), out_shape=(8,)),
-    IndexSpec(shape=(10,), indexer=slice(11, 12, 1), out_shape=(0,)),
-    IndexSpec(shape=(10,), indexer=slice(-11, -2, 1), out_shape=(8,)),
-    IndexSpec(shape=(10,), indexer=slice(-2, -12, -1), out_shape=(9,)),
-    IndexSpec(shape=(10,), indexer=slice(12, -12, -1), out_shape=(10,)),
   ]),
   ("OneSliceIndexNonUnitStride", [
     IndexSpec(shape=(10,), indexer=slice(0, 8, 2), out_shape=(4,)),
@@ -156,6 +150,13 @@ STATIC_INDEXING_TESTS = [
     IndexSpec(shape=(3, 4, 5), indexer=(0, Ellipsis), out_shape=(4, 5)),
     IndexSpec(shape=(3, 4, 5), indexer=(Ellipsis, 2, 3), out_shape=(3,)),
   ]),
+  ("SliceIndexClamping", [
+    IndexSpec(shape=(10,), indexer=slice(2, 11, 1), out_shape=(8,)),
+    IndexSpec(shape=(10,), indexer=slice(11, 12, 1), out_shape=(0,)),
+    IndexSpec(shape=(10,), indexer=slice(-11, -2, 1), out_shape=(8,)),
+    IndexSpec(shape=(10,), indexer=slice(-2, -12, -1), out_shape=(9,)),
+    IndexSpec(shape=(10,), indexer=slice(12, -12, -1), out_shape=(10,)),
+  ]),
   ("NoneIndex", [
     IndexSpec(shape=(), indexer=None, out_shape=(1,)),
     IndexSpec(shape=(), indexer=(None, None), out_shape=(1, 1)),
@@ -165,12 +166,18 @@ STATIC_INDEXING_TESTS = [
     IndexSpec(shape=(3, 4), indexer=(Ellipsis, None), out_shape=(3, 4, 1)),
     IndexSpec(shape=(3, 4), indexer=(0, None, Ellipsis), out_shape=(1, 4)),
     IndexSpec(shape=(3, 4, 5), indexer=(1, None, Ellipsis), out_shape=(1, 4, 5)),
+    IndexSpec(shape=(3, 4, 5), indexer=(1, None, slice(None), None), out_shape=(1, 4, 1, 5)),
   ]),
   ("EmptyIndex", [
     IndexSpec(shape=(), indexer=(), out_shape=()),
     IndexSpec(shape=(3,), indexer=(), out_shape=(3,)),
     IndexSpec(shape=(3, 4), indexer=(), out_shape=(3, 4)),
   ]),
+]
+
+
+STATIC_INDEXING_TESTS = [
+  *STATIC_SLICE_TESTS,
   ("TupleOfIntAndSliceAndIntArray", [
     IndexSpec(shape=(3, 2, 3), indexer=(0, slice(None), np.arange(3)),
               out_shape=(3, 2)),
@@ -230,6 +237,11 @@ ADVANCED_INDEXING_TESTS = [
   ("ArrayOfInts", [
     IndexSpec(shape=(3,), indexer=np.array([0, 1, 0]), out_shape=(3,)),
     IndexSpec(shape=(3, 4, 5), indexer=np.array([ 0, -1]), out_shape=(2, 4, 5)),
+  ]),
+  ("TupleOfEmptyList", [
+    IndexSpec(shape=(3, 4), indexer=([],), out_shape=(0, 4)),
+    IndexSpec(shape=(3, 4), indexer=([], 0), out_shape=(0,)),
+    IndexSpec(shape=(3, 4), indexer=([], []), out_shape=(0,)),
   ]),
   ("TupleOfListsOfPythonInts", [
     IndexSpec(shape=(3, 4, 5), indexer=([0, 1],), out_shape=(2, 4, 5)),
@@ -428,6 +440,80 @@ MIXED_ADVANCED_INDEXING_TESTS = MIXED_ADVANCED_INDEXING_TESTS_NO_REPEATS + [
 ]
 
 MODES = ["clip", "drop", "promise_in_bounds"]
+
+
+class IndexingStrategyTest(jtu.JaxTestCase):
+  """Tests for arr.static_slice[...]"""
+
+  @jtu.sample_product(
+    [dict(name=name, shape=shape, indexer=indexer)
+     for name, index_specs in STATIC_SLICE_TESTS
+     for shape, indexer, _ in index_specs],
+    dtype=all_dtypes,
+    strategy=[indexing.IndexingStrategy.AUTO,
+              indexing.IndexingStrategy.DYNAMIC_SLICE,
+              indexing.IndexingStrategy.STATIC_SLICE,
+              indexing.IndexingStrategy.GATHER],
+    mode=[None, "clip", "promise_in_bounds"],
+  )
+  def test_simple_indexing(self, name, shape, dtype, indexer, strategy, mode):
+    del name # unused within test
+    tuple_indexer = indexer if isinstance(indexer, tuple) else (indexer,)
+    if (strategy == indexing.IndexingStrategy.STATIC_SLICE and
+        any(isinstance(i, np.ndarray) for i in tuple_indexer)):
+      self.skipTest("array indices not supported with STATIC_SLICE.")
+    if (strategy == indexing.IndexingStrategy.DYNAMIC_SLICE and
+        any(isinstance(i, slice) and not (i.step is None or i.step in [-1, 1])
+            for i in tuple_indexer)):
+      self.skipTest("non-unit step sizes not supported with DYNAMIC_SLICE")
+
+    rng = jtu.rand_default(self.rng())
+    args_maker = lambda: [rng(shape, dtype)]
+    np_fun = lambda x: np.asarray(x)[indexer]
+    jnp_fun = partial(indexing.rewriting_take, idx=indexer, strategy=strategy, mode=mode)
+    self._CheckAgainstNumpy(np_fun, jnp_fun, args_maker)
+    self._CompileAndCheck(jnp_fun, args_maker)
+
+  @jtu.sample_product(
+    shape=[(3, 4), (3, 5, 2)],
+    dtype=all_dtypes,
+    indexer=[(-2,), (-1, -2), (10,), (10, 1)],
+    strategy=[indexing.IndexingStrategy.AUTO,
+              indexing.IndexingStrategy.DYNAMIC_SLICE,
+              indexing.IndexingStrategy.STATIC_SLICE,
+              indexing.IndexingStrategy.GATHER],
+    normalize_indices=[True, False]
+  )
+  def test_simple_indexing_oob(self, shape, dtype, indexer, strategy, normalize_indices):
+    """Test negative and out-of-bound index handling for indexing strategies."""
+    rng = jtu.rand_default(self.rng())
+    args_maker = lambda: [rng(shape, dtype)]
+    if normalize_indices:
+      np_indexer = tuple(np.clip(i, -size, size - 1)
+                         for i, size in zip(indexer, shape))
+    else:
+      np_indexer = tuple(np.clip(i, 0, size - 1)
+                         for i, size in zip(indexer, shape))
+    np_fun = lambda x: np.asarray(x)[np_indexer]
+    jnp_fun = partial(indexing.rewriting_take, idx=indexer, strategy=strategy,
+                      normalize_indices=normalize_indices, mode='clip')
+    self._CheckAgainstNumpy(np_fun, jnp_fun, args_maker)
+    self._CompileAndCheck(jnp_fun, args_maker)
+
+  @parameterized.parameters(
+      ((2,), -4, IndexError, "index -4 out of bounds for axis 0 with size 2"),
+      ((2,), 4, IndexError, "index 4 out of bounds for axis 0 with size 2"),
+      ((2, 3), np.index_exp[:, 4], IndexError, "index 4 out of bounds for axis 1 with size 3"),
+      ((2, 3), np.index_exp[..., -4], IndexError, "index -4 out of bounds for axis 1 with size 3"),
+      ((2, 3, 5), np.index_exp[3, :, 0], IndexError, "index 3 out of bounds for axis 0 with size 2"),
+      ((2, 3), ([1, 2], 0), TypeError, "static_slice: indices must be static scalars or slices."),
+      ((2, 3), (np.arange(2), 0), TypeError, "static_slice: indices must be static scalars or slices."),
+      ((2, 3), (1, 2, 3), IndexError, "Too many indices: array is 2-dimensional, but 3 were indexed"),
+  )
+  def test_slice_oob_indexing_fails(self, shape, idx, err, msg):
+    arr = jnp.zeros(shape)
+    with self.assertRaisesRegex(err, msg):
+      indexing.rewriting_take(arr, idx, strategy=indexing.IndexingStrategy.STATIC_SLICE)
 
 
 class IndexingTest(jtu.JaxTestCase):
@@ -907,42 +993,49 @@ class IndexingTest(jtu.JaxTestCase):
 
   def testSimpleIndexingUsesSlice(self):
     jaxpr = jax.make_jaxpr(lambda x: x[:2, :2])(jnp.ones((3, 4)))
-    self.assertEqual(len(jaxpr.jaxpr.eqns), 1)
-    self.assertEqual(jaxpr.jaxpr.eqns[-1].primitive, lax.slice_p)
+    eqn, = jaxpr.jaxpr.eqns
+    self.assertEqual(eqn.primitive, lax.slice_p)
+    self.assertIsNone(eqn.params['strides'])
 
     jaxpr = jax.make_jaxpr(lambda x: x[0, :2, 1])(jnp.ones((3, 4, 5)))
-    self.assertEqual(len(jaxpr.jaxpr.eqns), 2)
-    self.assertEqual(jaxpr.jaxpr.eqns[-2].primitive, lax.slice_p)
-    self.assertEqual(jaxpr.jaxpr.eqns[-1].primitive, lax.squeeze_p)
+    slice_eqn, squeeze_eqn = jaxpr.jaxpr.eqns
+    self.assertEqual(slice_eqn.primitive, lax.slice_p)
+    self.assertEqual(squeeze_eqn.primitive, lax.squeeze_p)
+    self.assertIsNone(slice_eqn.params['strides'])
 
     jaxpr = jax.make_jaxpr(lambda x: x[0, 0])(jnp.ones((3, 4, 5)))
-    self.assertEqual(len(jaxpr.jaxpr.eqns), 2)
-    self.assertEqual(jaxpr.jaxpr.eqns[-2].primitive, lax.slice_p)
-    self.assertEqual(jaxpr.jaxpr.eqns[-1].primitive, lax.squeeze_p)
+    slice_eqn, squeeze_eqn = jaxpr.jaxpr.eqns
+    self.assertEqual(slice_eqn.primitive, lax.slice_p)
+    self.assertEqual(squeeze_eqn.primitive, lax.squeeze_p)
+    self.assertIsNone(slice_eqn.params['strides'])
 
     jaxpr = jax.make_jaxpr(lambda x: x[:, 1])(jnp.ones((3, 4, 5)))
-    self.assertEqual(len(jaxpr.jaxpr.eqns), 2)
-    self.assertEqual(jaxpr.jaxpr.eqns[-2].primitive, lax.slice_p)
-    self.assertEqual(jaxpr.jaxpr.eqns[-1].primitive, lax.squeeze_p)
+    slice_eqn, squeeze_eqn = jaxpr.jaxpr.eqns
+    self.assertEqual(slice_eqn.primitive, lax.slice_p)
+    self.assertEqual(squeeze_eqn.primitive, lax.squeeze_p)
+    self.assertIsNone(slice_eqn.params['strides'])
 
     # Indexing with `Ellipsis` is not lowered to `gather` ...
     jaxpr = jax.make_jaxpr(lambda x: x[..., 0])(jnp.ones((3, 4, 5)))
-    self.assertLen((jaxpr.jaxpr.eqns), 2)
-    self.assertEqual(jaxpr.jaxpr.eqns[-2].primitive, lax.slice_p)
-    self.assertEqual(jaxpr.jaxpr.eqns[-1].primitive, lax.squeeze_p)
+    slice_eqn, squeeze_eqn = jaxpr.jaxpr.eqns
+    self.assertEqual(slice_eqn.primitive, lax.slice_p)
+    self.assertEqual(squeeze_eqn.primitive, lax.squeeze_p)
+    self.assertIsNone(slice_eqn.params['strides'])
 
     # ... even when the ellipsis expands to no dimensions.
     jaxpr = jax.make_jaxpr(lambda x: x[..., 0:1])(jnp.ones((3,)))
-    self.assertLen((jaxpr.jaxpr.eqns), 1)
-    self.assertEqual(jaxpr.jaxpr.eqns[-1].primitive, lax.slice_p)
+    eqn, = jaxpr.jaxpr.eqns
+    self.assertEqual(eqn.primitive, lax.slice_p)
+    self.assertIsNone(eqn.params['strides'])
     jaxpr = jax.make_jaxpr(lambda x: x[0:1, ...])(jnp.ones((3,)))
-    self.assertLen((jaxpr.jaxpr.eqns), 1)
-    self.assertEqual(jaxpr.jaxpr.eqns[-1].primitive, lax.slice_p)
+    eqn, = jaxpr.jaxpr.eqns
+    self.assertEqual(eqn.primitive, lax.slice_p)
+    self.assertIsNone(eqn.params['strides'])
 
     # Simple reverses lower to lax.rev_p
     jaxpr = jax.make_jaxpr(lambda x: x[:, ::-1])(jnp.ones((3, 4)))
-    self.assertEqual(len(jaxpr.jaxpr.eqns), 1)
-    self.assertEqual(jaxpr.jaxpr.eqns[0].primitive, lax.rev_p)
+    eqn, = jaxpr.jaxpr.eqns
+    self.assertEqual(eqn.primitive, lax.rev_p)
 
     # Non-static indices produce a dynamic slice
     jaxpr = jax.make_jaxpr(lambda x, i: x[i])(jnp.ones((4,)), 2)
@@ -987,10 +1080,10 @@ class IndexingTest(jtu.JaxTestCase):
                                 "index .* is out of bounds for axis .* with size 0"):
       _ = np.ones((2, 0))[0, 0]  # The numpy error
     with self.assertRaisesRegex(IndexError,
-                                "index is out of bounds for axis .* with size 0"):
+                                "index .* out of bounds for axis .* with size 0"):
       _ = x[0, 0]  # JAX indexing
     with self.assertRaisesRegex(IndexError,
-                                "index is out of bounds for axis .* with size 0"):
+                                "index .* out of bounds for axis .* with size 0"):
       jax.jit(lambda i: x[0, i])(0)  # JAX indexing under jit
 
   def testBooleanIndexingWithEmptyResult(self):
@@ -1284,12 +1377,27 @@ class IndexingTest(jtu.JaxTestCase):
   def testWrongNumberOfIndices(self):
     with self.assertRaisesRegex(
         IndexError,
-        "Too many indices: 0-dimensional array indexed with 1 regular index."):
+        "Too many indices: array is 0-dimensional, but 1 were indexed"):
       jnp.array(1)[0]
     with self.assertRaisesRegex(
         IndexError,
-        "Too many indices: 1-dimensional array indexed with 2 regular indices."):
+        "Too many indices: array is 1-dimensional, but 2 were indexed"):
       jnp.zeros(3)[:, 5]
+
+  @jtu.sample_product(shape=[(), (1,)])
+  def testIndexDtypePromotion(self, shape):
+    # Regression test for https://github.com/jax-ml/jax/issues/31396
+    numbers = jnp.arange(1000)[:, None]
+    idx = jnp.int8(0).reshape(shape)
+    expected = np.array(999).reshape(shape)
+    self.assertArraysEqual(numbers[999, idx], expected)
+
+  def testIndexingTypedNdArray(self):
+    x = jnp.arange(4)
+    i = dtypes.canonicalize_value(np.array([2, 0, 1]))
+    result = x[i]
+    expected = x[jnp.asarray(i)]
+    self.assertArraysEqual(result, expected)
 
 
 def _broadcastable_shapes(shape):
@@ -1794,6 +1902,55 @@ class IndexedUpdateTest(jtu.JaxTestCase):
 
     self.assertArraysEqual(jax.jacrev(f)(x, i), expected)
     self.assertArraysEqual(jax.jacrev(jax.vmap(f, (None, 0)))(x, i), expected)
+
+@jtu.with_config(jax_check_static_indices=True)
+class ValidateIndicesTest(jtu.JaxTestCase):
+  @parameterized.parameters(
+      ((2,), -4, IndexError, "index -4 out of bounds for axis 0 with size 2"),
+      ((2,), 4, IndexError, "index 4 out of bounds for axis 0 with size 2"),
+      ((2, 3), np.index_exp[:, 4], IndexError, "index 4 out of bounds for axis 1 with size 3"),
+      ((2, 3), np.index_exp[..., -4], IndexError, "index -4 out of bounds for axis 1 with size 3"),
+      ((2, 3, 5), np.index_exp[3, :, 0], IndexError, "index 3 out of bounds for axis 0 with size 2"),
+      ((2, 3, 5), np.index_exp[:5, :, 6], IndexError, "index 6 out of bounds for axis 2 with size 5"),
+      ((2, 3, 5), np.index_exp[:, [1, 2], 6], IndexError, "index 6 out of bounds for axis 2 with size 5"),
+      ((2, 3, 5), np.index_exp[np.arange(3), 6, None], IndexError, "index 6 out of bounds for axis 1 with size 3"),
+      ((2, 3), (1, 2, 3), IndexError, "Too many indices: array is 2-dimensional, but 3 were indexed"),
+  )
+  def test_out_of_bound_indices(self, shape, idx, err, msg):
+    """Test that out-of-bound indexing """
+    arr = jnp.zeros(shape)
+
+    with self.subTest("eager"):
+      with self.assertRaisesRegex(err, msg):
+        arr[idx]
+
+    with self.subTest("jit"):
+      with self.assertRaisesRegex(err, msg):
+        jax.jit(lambda x: x[idx])(arr)
+
+    with self.subTest("arr.at[idx].get()"):
+      with self.assertRaisesRegex(err, msg):
+        arr.at[idx].get()
+
+  @jtu.sample_product(
+    [dict(name=name, shape=shape, indexer=indexer)
+     for name, index_specs in STATIC_INDEXING_TESTS
+     for shape, indexer, _ in index_specs],
+    dtype=all_dtypes
+  )
+  def test_simple_indexing(self, name, shape, dtype, indexer):
+    """Test that in-bound indexing works correctly."""
+    rng = jtu.rand_default(self.rng())
+    args_maker = lambda: [rng(shape, dtype)]
+    np_fun = lambda x: np.asarray(x)[indexer]
+    jnp_fun = lambda x: jnp.asarray(x)[indexer]
+    self._CheckAgainstNumpy(np_fun, jnp_fun, args_maker)
+    self._CompileAndCheck(jnp_fun, args_maker)
+
+    # Tests x.at[...].get(...) as well.
+    jnp_fun = lambda x: jnp.asarray(x).at[indexer].get()
+    self._CheckAgainstNumpy(np_fun, jnp_fun, args_maker)
+    self._CompileAndCheck(jnp_fun, args_maker)
 
 if __name__ == "__main__":
   absltest.main(testLoader=jtu.JaxTestLoader())

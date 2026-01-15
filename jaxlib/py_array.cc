@@ -47,6 +47,7 @@ limitations under the License.
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/str_join.h"
+#include "absl/strings/string_view.h"
 #include "absl/types/span.h"
 #include "llvm/Support/Casting.h"
 #include "nanobind/nanobind.h"
@@ -69,13 +70,13 @@ limitations under the License.
 #include "jaxlib/to_ifrt_sharding.h"
 #include "jaxlib/traceback.h"
 #include "jaxlib/util.h"
+#include "xla/future.h"
 #include "xla/layout.h"
 #include "xla/layout_util.h"
 #include "xla/pjrt/exceptions.h"
 #include "xla/pjrt/lru_cache.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/pjrt/pjrt_compiler.h"
-#include "xla/pjrt/pjrt_future.h"
 #include "xla/pjrt/pjrt_layout.h"
 #include "xla/pjrt/status_casters.h"
 #include "xla/primitive_util.h"
@@ -99,6 +100,7 @@ limitations under the License.
 #include "xla/python/pjrt_ifrt/pjrt_dtype.h"
 #include "xla/python/safe_static_init.h"
 #include "xla/python/types.h"
+#include "xla/python/version.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
 #include "xla/status_macros.h"
@@ -117,6 +119,8 @@ namespace nb = nanobind;
 
 namespace jax {
 namespace {
+
+nb::object& tracer_class = *new nb::object();
 
 xla::PjRtBuffer* GetPjrtBuffer(ifrt::Array* ifrt_array) {
   auto* arr = llvm::dyn_cast_or_null<ifrt::PjRtCompatibleArray>(ifrt_array);
@@ -253,11 +257,10 @@ struct PyBaseArrayObject {
 #endif  // PY_VERSION_HEX < 0x030C0000
 };
 
-extern "C" void PyBaseArray_tp_dealloc(PyBaseArrayObject* self) {
+extern "C" void PyBaseArray_tp_dealloc(PyObject* self) {
   PyObject_GC_UnTrack(self);
-  PyObject_ClearWeakRefs((PyObject*)self);
   PyTypeObject* tp = Py_TYPE(self);
-  tp->tp_free((PyObject*)self);
+  tp->tp_free(self);
   Py_DECREF(tp);
 }
 
@@ -474,7 +477,7 @@ PyArray_Storage::PyArray_Storage(nb::object aval, bool weak_type,
                                  nb::object sharding, bool committed,
                                  nb_class_ptr<PyClient> py_client,
                                  ifrt::ArrayRef ifrt_array,
-                                 xla::PjRtFuture<> result_status)
+                                 xla::Future<> result_status)
     : aval(std::move(aval)),
       weak_type(weak_type),
       dtype(std::move(dtype)),
@@ -511,13 +514,13 @@ void PyInit_helper(PyArray self, nb::object aval, nb::object sharding,
   Construct(reinterpret_cast<PyArrayObject*>(self.ptr()), aval,
             nb::cast<bool>(aval.attr("weak_type")), std::move(dtype),
             std::move(shape), std::move(sharding), committed, py_client,
-            std::move(ifrt_array), xla::PjRtFuture<>());
+            std::move(ifrt_array), xla::Future<>());
 }
 
 void PyArray::PyInit(PyArray self, nb::object aval, nb::object sharding,
                      absl::Span<const PyArray> py_arrays, bool committed,
                      bool skip_checks) {
-  xla::ifrt::UserContextScope user_context_scope(PyUserContext::Create());
+  PyUserContextScope user_context_scope;
   if (skip_checks) {
     PyInit_helper(self, aval, sharding, py_arrays, committed);
   } else {
@@ -532,7 +535,7 @@ void PyArray::PyInit(PyArray self, nb::object aval, nb::object sharding,
 PyArray PyArray::MakeFromSingleDeviceArray(nb_class_ptr<PyClient> py_client,
                                            ifrt::ArrayRef ifrt_array,
                                            bool weak_type, bool committed,
-                                           xla::PjRtFuture<> result_status) {
+                                           xla::Future<> result_status) {
   if (!llvm::isa<ifrt::SingleDeviceSharding>(ifrt_array->sharding())) {
     throw xla::XlaRuntimeError(xla::InvalidArgument(
         "Constructing single device jax.Array from non-single "
@@ -582,18 +585,21 @@ PyArray PyArray::MakeFromIfrtArrayAndSharding(nb_class_ptr<PyClient> py_client,
                  std::move(ifrt_array), committed, skip_checks);
 }
 
-PyArrayResultHandler::PyArrayResultHandler(nb::object aval, nb::object sharding,
-                                           bool committed, bool skip_checks)
+PyArrayResultHandler::PyArrayResultHandler(
+    nb::object aval, nb::object sharding, bool committed, bool skip_checks,
+    std::vector<nanobind::callable> wrappers)
     : aval_(std::move(aval)),
       sharding_(std::move(sharding)),
       committed_(committed),
-      skip_checks_(skip_checks) {
+      skip_checks_(skip_checks),
+      wrappers_(std::move(wrappers)) {
   weak_type_ = nb::cast<bool>(aval_.attr("weak_type"));
   dtype_ = nb::cast<xla::nb_dtype>(aval_.attr("dtype"));
   shape_ = nb::cast<std::vector<int64_t>>(aval_.attr("shape"));
 }
 
-PyArray PyArrayResultHandler::Call(absl::Span<const PyArray> py_arrays) const {
+nanobind::object PyArrayResultHandler::Call(
+    absl::Span<const PyArray> py_arrays) const {
   auto py_device_list = GetPyDeviceList(sharding_);
   if (!py_device_list.ok()) {
     throw nb::value_error(
@@ -601,31 +607,42 @@ PyArray PyArrayResultHandler::Call(absl::Span<const PyArray> py_arrays) const {
                      py_device_list.status().ToString())
             .c_str());
   }
-  xla::ifrt::UserContextScope user_context_scope(PyUserContext::Create());
+  PyUserContextScope user_context_scope;
   return Call(py_device_list.value()->py_client(),
               CreateIfRtArrayFromSingleDeviceShardedPyArrays(
                   dtype_, shape_, py_arrays, sharding_),
-              xla::PjRtFuture<>());
+              xla::Future<>());
 }
 
-PyArray PyArrayResultHandler::Call(nb_class_ptr<PyClient> py_client,
-                                   ifrt::ArrayRef ifrt_array,
-                                   xla::PjRtFuture<> result_status) const {
-  return PyArray(aval_, weak_type_, dtype_, shape_, sharding_,
-                 std::move(py_client), std::move(ifrt_array), committed_,
-                 skip_checks_, std::move(result_status));
+nanobind::object PyArrayResultHandler::Call(nb_class_ptr<PyClient> py_client,
+                                            ifrt::ArrayRef ifrt_array,
+                                            xla::Future<> result_status) const {
+  nanobind::object result =
+      PyArray(aval_, weak_type_, dtype_, shape_, sharding_,
+              std::move(py_client), std::move(ifrt_array), committed_,
+              skip_checks_, std::move(result_status));
+  for (auto& cb : wrappers_) {
+    result = cb(std::move(result));
+  }
+  return result;
 }
 
-PyArray PyArrayResultHandler::Call(PyArray py_array) const {
+nanobind::object PyArrayResultHandler::Call(PyArray py_array) const {
   return Call(py_array.py_client(), tsl::FormRef(py_array.ifrt_array()),
-              xla::PjRtFuture<>());
+              xla::Future<>());
 }
 
 PyArray::PyArray(nb::object aval, bool weak_type, xla::nb_dtype dtype,
                  std::vector<int64_t> shape, nb::object sharding,
                  nb_class_ptr<PyClient> py_client, ifrt::ArrayRef ifrt_array,
                  bool committed, bool skip_checks,
-                 xla::PjRtFuture<> result_status) {
+                 xla::Future<> result_status) {
+  if (ifrt_array->user_context() == nullptr && Traceback::IsEnabled()) {
+    throw nb::value_error(
+        "Expecting an IFRT `Array` to have a user context, but got a null "
+        "user context. Use `jax::PyUserContextScope` to set a user context for "
+        "operations producing IFRT `Array`s.");
+  }
   auto* self =
       PyArray_tp_new(reinterpret_cast<PyTypeObject*>(type_), nullptr, nullptr);
   m_ptr = self;
@@ -655,6 +672,13 @@ nb::object PyArray::CheckAndRearrange(const absl::Span<const PyArray> py_arrays,
 }
 
 void PyArray::SetIfrtArray(ifrt::ArrayRef ifrt_array) {
+  if (ifrt_array != nullptr && ifrt_array->user_context() == nullptr &&
+      Traceback::IsEnabled()) {
+    throw nb::value_error(
+        "Expecting an IFRT `Array` to have a user context, but got a null "
+        "user context. Use `jax::PyUserContextScope` to set a user context for "
+        "operations producing IFRT `Array`s.");
+  }
   GetStorage().ifrt_array = std::move(ifrt_array);
 }
 
@@ -779,8 +803,9 @@ absl::Status PyArray::set_arrays(nb::object obj) {
   TF_ASSIGN_OR_RETURN(
       auto array,
       py_client()->ifrt_client()->AssembleArrayFromSingleDeviceArrays(
-          ifrt::Shape(shape()), std::move(ifrt_sharding),
-          absl::MakeSpan(ifrt_arrays), ifrt::ArrayCopySemantics::kReuseInput,
+          ifrt_arrays[0]->dtype(), ifrt::Shape(shape()),
+          std::move(ifrt_sharding), absl::MakeSpan(ifrt_arrays),
+          ifrt::ArrayCopySemantics::kReuseInput,
           ifrt::SingleDeviceShardSemantics::kAddressableShards));
   SetIfrtArray(std::move(array));
   return absl::OkStatus();
@@ -810,7 +835,7 @@ absl::StatusOr<PyArray> PyArray::FullyReplicatedShard() {
 }
 
 absl::Status PyArray::BlockUntilReady() const {
-  xla::ifrt::UserContextScope user_context_scope(jax::PyUserContext::Create());
+  PyUserContextScope user_context_scope;
   absl::Status status;
   {
     nb::gil_scoped_release gil_release;
@@ -1067,6 +1092,7 @@ absl::StatusOr<nb::object> CudaArrayInterfaceToBuffer(
         }
       }()));
 
+  bool has_custom_layout;
   std::vector<int64_t> minor_to_major(ndim);
   if (cai.contains("strides") && !cai["strides"].is_none() && data_value != 0) {
     std::iota(minor_to_major.begin(), minor_to_major.end(), 0);
@@ -1076,6 +1102,7 @@ absl::StatusOr<nb::object> CudaArrayInterfaceToBuffer(
           "CUDA Array Interface `shape` and `strides` dimensionalities are "
           "inconsistent");
     }
+    has_custom_layout = true;
     absl::c_sort(minor_to_major, [&](int a, int b) {
       // If two dimensions have the same stride, prefer the major-to-minor
       // interpretation of the ordering, since that's what JAX wants.
@@ -1094,6 +1121,7 @@ absl::StatusOr<nb::object> CudaArrayInterfaceToBuffer(
       stride *= dimensions[d];
     }
   } else {
+    has_custom_layout = false;
     std::iota(minor_to_major.rbegin(), minor_to_major.rend(), 0);
   }
   xla::Shape shape = xla::ShapeUtil::MakeShapeWithDenseLayout(
@@ -1119,9 +1147,10 @@ absl::StatusOr<nb::object> CudaArrayInterfaceToBuffer(
     throw xla::XlaRuntimeError(
         "This operation is implemented for a PjRt-compatible backend only.");
   }
-  xla::ifrt::UserContextScope user_context_scope(PyUserContext::Create());
-  TF_ASSIGN_OR_RETURN(auto ifrt_array,
-                      ifrt_client->CreatePjRtArray(std::move(pjrt_buffer)));
+  PyUserContextScope user_context_scope;
+  TF_ASSIGN_OR_RETURN(
+      auto ifrt_array,
+      ifrt_client->CreatePjRtArray(std::move(pjrt_buffer), has_custom_layout));
   return PyArray::MakeFromSingleDeviceArray(std::move(client),
                                             std::move(ifrt_array), false, true);
 }
@@ -1224,7 +1253,7 @@ absl::StatusOr<std::vector<PyArray>> PyArray::BatchedCopyToDeviceWithSharding(
   };
   absl::flat_hash_map<BatchedCopyToDeviceWithShardingKey, Batch> batches;
 
-  xla::ifrt::UserContextScope user_context_scope(PyUserContext::Create());
+  PyUserContextScope user_context_scope;
   {
     tsl::profiler::TraceMe results_traceme(
         "BatchedCopyToDeviceWithSharding create batch");
@@ -1307,12 +1336,15 @@ absl::StatusOr<std::vector<PyArray>> PyArray::BatchedCopyToDeviceWithSharding(
   tsl::profiler::TraceMe results_traceme(
       "BatchedCopyToDeviceWithSharding create results");
   for (auto& [i, ifrt_array] : ifrt_arrays) {
+    TF_ASSIGN_OR_RETURN(nb_class_ptr<PyDeviceList> dst_device_list,
+                        GetPyDeviceList(dst_shardings[i]));
+    nb_class_ptr<PyClient> py_client = dst_device_list->py_client();
     const auto& py_array = py_arrays[i];
     absl::Span<const int64_t> shape_span = py_array.shape();
     results[i] =
         PyArray(py_array.aval(), py_array.weak_type(), py_array.dtype(),
                 std::vector<int64_t>(shape_span.begin(), shape_span.end()),
-                dst_shardings[i], py_array.py_client(), std::move(ifrt_array),
+                dst_shardings[i], py_client, std::move(ifrt_array),
                 py_array.committed(),
                 /*skip_checks=*/true, py_array.result_status());
   }
@@ -1343,7 +1375,7 @@ absl::StatusOr<PyArray> PyArray::BatchedDevicePut(
 
   GlobalPyRefManager()->CollectGarbage();
 
-  xla::ifrt::UserContextScope user_context_scope(PyUserContext::Create());
+  PyUserContextScope user_context_scope;
   auto n_devices = dst_devices.size();
 
   DevicePutOptions options;
@@ -1526,7 +1558,7 @@ absl::Status PyArray::BatchedBlockUntilReady(std::vector<nb::object> objs) {
   }
 
   GlobalPyRefManager()->CollectGarbage();
-  xla::ifrt::UserContextScope user_context_scope(jax::PyUserContext::Create());
+  PyUserContextScope user_context_scope;
   absl::Status status;
   {
     nb::gil_scoped_release gil_release;
@@ -1840,7 +1872,7 @@ absl::StatusOr<std::pair<nb::object, bool>> PyHostValue::AsNumPyArray(
     }
   }
 
-  xla::ifrt::UserContextScope user_context_scope(jax::PyUserContext::Create());
+  PyUserContextScope user_context_scope;
   TF_RETURN_IF_ERROR(CopyToHostAsync(dynamic_shape_holder, ifrt_array));
   absl::Status status;
   if (!ready_.IsReady()) {
@@ -1926,7 +1958,7 @@ absl::Status PyHostValue::CopyStringArrayToHostAsync(
   // of the `AsNumPyArray` call.
   string_array_contents_ =
       std::make_shared<std::vector<absl::Cord>>(shape.num_elements());
-  xla::ifrt::UserContextScope user_context_scope(PyUserContext::Create());
+  PyUserContextScope user_context_scope;
   ready_ = ifrt_array->CopyToHostBuffer(string_array_contents_->data(),
                                         /*byte_strides=*/std::nullopt,
                                         ifrt::ArrayCopySemantics::kAlwaysCopy);
@@ -1995,9 +2027,9 @@ absl::Status PyHostValue::CopyToHostAsync(
   // knows better about an efficient layout for the host buffer. It will be
   // useful to revisit the semantics of xla::PjRtBuffer::ToLiteral() to see if
   // it is desirable for the runtime to choose the layout.
-  xla::ifrt::UserContextScope user_context_scope(PyUserContext::Create());
+  PyUserContextScope user_context_scope;
   ready_ = ifrt_array->CopyToHostBuffer(value_.mutable_data(), strides,
-                                        ifrt::ArrayCopySemantics::kReuseInput);
+                                        ifrt::ArrayCopySemantics::kAlwaysCopy);
   // Make sure the destination of the copy remains alive until the copy is done.
   value_.inc_ref();
   ready_.OnReady([array{value_.ptr()}](absl::Status status) {
@@ -2014,30 +2046,26 @@ void PyHostValue::Clear() {
 }
 
 namespace {
-PyMemberDef PyBaseArray_members[] = {
-#if PY_VERSION_HEX < 0x030C0000
-    {"__weaklistoffset__", T_PYSSIZET,
-     static_cast<Py_ssize_t>(offsetof(PyBaseArrayObject, weakrefs)), READONLY,
-     nullptr},
-#endif  // PY_VERSION_HEX < 0x030C0000
-    {nullptr, 0, 0, 0, nullptr},
+
+PyType_Slot array_meta_slots[] = {
+    {Py_tp_base, &PyType_Type},
+    {0, nullptr},
 };
 
-PyType_Slot PyBaseArray_slots[] = {
+PyType_Slot array_slots[] = {
     {Py_tp_dealloc, reinterpret_cast<void*>(PyBaseArray_tp_dealloc)},
-    {Py_tp_members, reinterpret_cast<void*>(PyBaseArray_members)},
     {Py_tp_traverse, reinterpret_cast<void*>(PyBaseArray_tp_traverse)},
     {Py_tp_hash, reinterpret_cast<void*>(PyObject_HashNotImplemented)},
     {0, nullptr},
 };
 
-PyGetSetDef PyArray_tp_getset[] = {
+PyGetSetDef array_impl_tp_getset[] = {
     {"__dict__", PyObject_GenericGetDict, PyObject_GenericSetDict, nullptr,
      nullptr},
     {nullptr, nullptr, nullptr, nullptr, nullptr},
 };
 
-PyMemberDef PyArray_members[] = {
+PyMemberDef array_impl_members[] = {
 #if PY_VERSION_HEX < 0x030C0000
     {"__weaklistoffset__", T_PYSSIZET,
      static_cast<Py_ssize_t>(offsetof(PyArrayObject, weakrefs)), READONLY,
@@ -2048,46 +2076,152 @@ PyMemberDef PyArray_members[] = {
     {nullptr, 0, 0, 0, nullptr},
 };  // namespace jax
 
-PyType_Slot PyArray_slots[] = {
+PyType_Slot array_impl_slots[] = {
     {Py_tp_new, reinterpret_cast<void*>(PyArray_tp_new)},
     {Py_tp_dealloc, reinterpret_cast<void*>(PyArray_tp_dealloc)},
-    {Py_tp_members, reinterpret_cast<void*>(PyArray_members)},
+    {Py_tp_members, reinterpret_cast<void*>(array_impl_members)},
     {Py_tp_traverse, reinterpret_cast<void*>(PyArray_tp_traverse)},
     {Py_tp_clear, reinterpret_cast<void*>(PyArray_tp_clear)},
-    {Py_tp_getset, reinterpret_cast<void*>(PyArray_tp_getset)},
+    {Py_tp_getset, reinterpret_cast<void*>(array_impl_tp_getset)},
     {Py_bf_getbuffer, reinterpret_cast<void*>(PyArray_bf_getbuffer)},
     {Py_bf_releasebuffer, reinterpret_cast<void*>(PyArray_bf_releasebuffer)},
     {0, nullptr},
 };
 
+// TODO(phawkins): remove this code when we drop support for Python < 3.12
+PyObject* MakeArrayTypeFromMetaclass(PyTypeObject* meta, PyObject* module,
+                                     PyType_Spec* spec) {
+#if PY_VERSION_HEX >= 0x030C0000
+  return PyType_FromMetaclass(meta, module, spec, nullptr);
+#else
+  nb::str name = nb::steal<nb::str>(PyUnicode_InternFromString(spec->name));
+  const char* name_cstr = PyUnicode_AsUTF8AndSize(name.ptr(), nullptr);
+  if (!name_cstr) {
+    return nullptr;
+  }
+
+  PyHeapTypeObject* ht =
+      reinterpret_cast<PyHeapTypeObject*>(PyType_GenericAlloc(meta, 0));
+  if (!ht) {
+    return nullptr;
+  }
+  ht->ht_name = name.inc_ref().ptr();
+  ht->ht_qualname = name.inc_ref().ptr();
+  Py_INCREF(module);
+  ht->ht_module = module;
+
+  PyTypeObject* tp = &ht->ht_type;
+  tp->tp_name = name_cstr;
+  tp->tp_basicsize = spec->basicsize;
+  tp->tp_itemsize = spec->itemsize;
+  tp->tp_flags = spec->flags | Py_TPFLAGS_HEAPTYPE;
+  tp->tp_as_async = &ht->as_async;
+  tp->tp_as_number = &ht->as_number;
+  tp->tp_as_sequence = &ht->as_sequence;
+  tp->tp_as_mapping = &ht->as_mapping;
+  tp->tp_as_buffer = &ht->as_buffer;
+
+  for (PyType_Slot* slot = spec->slots; slot->slot; slot++) {
+    switch (slot->slot) {
+      case Py_tp_dealloc:
+        tp->tp_dealloc = reinterpret_cast<destructor>(slot->pfunc);
+        break;
+      case Py_tp_traverse:
+        tp->tp_traverse = reinterpret_cast<traverseproc>(slot->pfunc);
+        break;
+      case Py_tp_hash:
+        tp->tp_hash = reinterpret_cast<hashfunc>(slot->pfunc);
+        break;
+      default:
+        // TODO(phawkins): support other slots as needed.
+        LOG(FATAL) << "Unsupported slot: " << slot->slot;
+    }
+  }
+
+  if (PyType_Ready(tp) != 0) {
+    Py_DECREF(tp);
+    return nullptr;
+  }
+
+  return reinterpret_cast<PyObject*>(tp);
+#endif
+}
+
 }  // namespace
 
-absl::Status PyArray::RegisterTypes(nb::module_& m) {
+absl::Status PyArray::Register(nb::module_& m) {
+  std::string metaclass_name =
+      absl::StrCat(nb::cast<std::string>(m.attr("__name__")), ".ArrayMeta");
+  PyType_Spec array_meta_spec = {
+      /*.name=*/metaclass_name.c_str(),
+      /*.basicsize=*/0,
+      /*.itemsize=*/0,
+      /*.flags=*/Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE,
+      /*.slots=*/array_meta_slots};
+  nb::object array_meta_type =
+      nb::steal<nb::object>(PyType_FromSpec(&array_meta_spec));
+  if (!array_meta_type) {
+    throw nb::python_error();
+  }
+  m.attr("ArrayMeta") = array_meta_type;
+
   // We are not using nanobind to avoid having a non-standard metaclass, which
   // would make Array incompatible with abc.ABCMeta.
   std::string base_name =
       absl::StrCat(nb::cast<std::string>(m.attr("__name__")), ".Array");
-  PyType_Spec PyBaseArray_spec = {
+  PyType_Spec array_spec = {
       /*.name=*/base_name.c_str(),
       /*.basicsize=*/static_cast<int>(sizeof(PyBaseArrayObject)),
       /*.itemsize=*/0,
-#if PY_VERSION_HEX < 0x030C0000
       /*.flags=*/Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HAVE_GC,
-#else   // PY_VERSION_HEX >= 0x030C0000
-      /*.flags=*/Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HAVE_GC |
-          Py_TPFLAGS_MANAGED_WEAKREF,
-#endif  // PY_VERSION_HEX >= 0x030C0000
-      /*.slots=*/PyBaseArray_slots};
-  auto* base_type = PyType_FromSpec(&PyBaseArray_spec);
+      /*.slots=*/array_slots};
+  nb::object base_type = nb::steal<nb::object>(MakeArrayTypeFromMetaclass(
+      reinterpret_cast<PyTypeObject*>(array_meta_type.ptr()), m.ptr(),
+      &array_spec));
   if (!base_type) {
     throw nb::python_error();
   }
-  m.attr("Array") = nb::borrow<nb::object>(base_type);
+  m.attr("Array") = base_type;
+
+  m.def("set_tracer_class", [](nb::object f) { tracer_class = f; });
+
+  nb::object type_instancecheck =
+      nb::borrow<nb::object>(reinterpret_cast<PyObject*>(&PyType_Type))
+          .attr("__instancecheck__");
+  array_meta_type.attr("__instancecheck__") = nb::cpp_function(
+      [base_type, type_instancecheck](nb::object self, nb::object x) {
+        // We are calling type's instancecheck method rather than
+        // PyObject_TypeCheck to avoid breaking users who use wrapt.ObjectProxy,
+        // such as TFP's NumpyVariable.
+        if (nb::cast<bool>(type_instancecheck(self, x))) {
+          return true;
+        }
+        // Instances of Tracer that have array avals are considered instances of
+        // Array.
+        if (tracer_class.ptr() && self.ptr() == base_type.ptr() &&
+            PyObject_TypeCheck(x.ptr(), reinterpret_cast<PyTypeObject*>(
+                                            tracer_class.ptr())) != 0) {
+          // TODO(phawkins): we would like to change this to use the logic below
+          // but it is a somewhat breaking change. Let us defer it to a future
+          // PR.
+          return true;
+          // auto is_traced_array_fn =
+          //     nb::getattr(x, "_is_traced_array", nb::none());
+          // if (!is_traced_array_fn.is_none()) {
+          //   try {
+          //     return nb::cast<bool>(is_traced_array_fn());
+          //   } catch (...) {
+          //   }
+          // }
+        }
+        return false;
+      },
+      nb::is_method(), nb::arg("x").none());
 
   std::string name =
       absl::StrCat(nb::cast<std::string>(m.attr("__name__")), ".ArrayImpl");
 
-  PyType_Spec PyArray_spec = {
+  PyType_Spec array_impl_spec = {
       /*.name=*/name.c_str(),
       /*.basicsize=*/static_cast<int>(sizeof(PyArrayObject)),
       /*.itemsize=*/0,
@@ -2097,10 +2231,10 @@ absl::Status PyArray::RegisterTypes(nb::module_& m) {
       /*.flags=*/Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC |
           Py_TPFLAGS_MANAGED_DICT | Py_TPFLAGS_MANAGED_WEAKREF,
 #endif  // PY_VERSION_HEX >= 0x030C0000
-      /*.slots=*/PyArray_slots,
+      /*.slots=*/array_impl_slots,
   };
 
-  type_ = PyType_FromSpecWithBases(&PyArray_spec, base_type);
+  type_ = PyType_FromSpecWithBases(&array_impl_spec, base_type.ptr());
   if (!type_) {
     throw nb::python_error();
   }
@@ -2172,11 +2306,14 @@ absl::Status PyArray::RegisterTypes(nb::module_& m) {
       nb::is_method());
   type.attr("platform") = nb::cpp_function(
       [](PyArray self) {
-        if (self.ifrt_array()->client()->platform_name() == "cuda" ||
-            self.ifrt_array()->client()->platform_name() == "rocm") {
+        const xla::ifrt::DeviceListRef& devices =
+            self.ifrt_array()->sharding().devices();
+        absl::string_view platform_name =
+            devices->devices().front()->PlatformName();
+        if (platform_name == "cuda" || platform_name == "rocm") {
           return std::string_view("gpu");
         } else {
-          return self.ifrt_array()->client()->platform_name();
+          return platform_name;
         }
       },
       nb::is_method());
@@ -2240,7 +2377,23 @@ absl::Status PyArray::RegisterTypes(nb::module_& m) {
                     .c_str());
           },
           nb::sig(
-              "def __call__(self, arg: Array | Sequence[Array], /) -> Array"));
+              "def __call__(self, arg: Array | Sequence[Array], /) -> Array"))
+      .def("wrap",
+           [](const PyArrayResultHandler& self, nb::callable wrapper) {
+             auto wrappers = self.wrappers();
+             wrappers.push_back(std::move(wrapper));
+             return make_nb_class<PyArrayResultHandler>(
+                 self.aval(), self.sharding(), self.committed(),
+                 self.skip_checks(), std::move(wrappers));
+           })
+      .def("pre_wrap",
+           [](const PyArrayResultHandler& self, nb::callable wrapper) {
+             auto wrappers = self.wrappers();
+             wrappers.insert(wrappers.begin(), std::move(wrapper));
+             return make_nb_class<PyArrayResultHandler>(
+                 self.aval(), self.sharding(), self.committed(),
+                 self.skip_checks(), std::move(wrappers));
+           });
 
   return absl::OkStatus();
 }

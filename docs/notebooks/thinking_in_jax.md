@@ -43,7 +43,7 @@ pip install jax
 or, for NVIDIA GPU:
 
 ```
-pip install -U "jax[cuda12]"
+pip install -U "jax[cuda13]"
 ```
 For more detailed platform-specific installation information, check out [Installation](https://docs.jax.dev/en/latest/installation.html).
 
@@ -473,6 +473,49 @@ Note that this code is thread safe, since the local random state eliminates poss
 For more on pseudo random numbers in JAX, see the [Pseudorandom numbers tutorial](https://docs.jax.dev/en/latest/random-numbers.html).
 
 +++
+
+## Debugging
+
+Debugging JAX code can be challenging due to its functional programming model and the fact that JAX code is often transformed via JIT compilation or vectorization. However, JAX provides several tools to help with debugging.
+
+### `jax.debug.print`
+
+For simple inspection, use [`jax.debug.print`](https://docs.jax.dev/en/latest/_autosummary/jax.debug.print.html).
+
+Python's built-in `print` executes at trace-time, before the runtime values exist. Because of this, `print` will only show tracer values within `jax.jit`-decorated code.
+
+```{code-cell} ipython3
+import jax
+import jax.numpy as jnp
+
+@jax.jit
+def f(x):
+  print("print(x) ->", x)
+  y = jnp.sin(x)
+  print("print(y) ->", y)
+  return y
+
+result = f(2.)
+```
+
+If you want to print the actual runtime values, you can use `jax.debug.print`:
+
+```{code-cell} ipython3
+@jax.jit
+def f(x):
+  jax.debug.print("jax.debug.print(x) -> {x}", x=x)
+  y = jnp.sin(x)
+  jax.debug.print("jax.debug.print(y) -> {y}", y=y)
+  return y
+
+result = f(2.)
+```
+
+### Debugging flags
+
+JAX offers flags and context managers that enable catching errors more easily. For example, you can enable the `jax.debug_nans` flag to automatically detect when NaNs are produced in `jax.jit`-compiled code. You can also enable the `jax_disable_jit` flag to disable JIT-compilation, enabling use of traditional Python debugging tools like `print` and `pdb`.
+
+For more details, see [Introduction to debugging](https://docs.jax.dev/en/latest/debugging.html).
 
 ---
 

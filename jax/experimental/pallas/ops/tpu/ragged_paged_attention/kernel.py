@@ -676,7 +676,7 @@ def ragged_paged_attention_kernel(
 
 
 def get_dtype_packing(dtype):
-  bits = dtypes.bit_width(dtype)
+  bits = dtypes.itemsize_bits(dtype)
   return 32 // bits
 
 
@@ -831,7 +831,7 @@ def ragged_paged_attention(
   )
   in_specs = [
       q_block_spec,
-      pl.BlockSpec(memory_space=pltpu.ANY),
+      pl.BlockSpec(memory_space=pl.ANY),
   ]
   out_specs = q_block_spec
   lm_scratch = pltpu.VMEM(

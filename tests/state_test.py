@@ -136,6 +136,30 @@ class StatePrimitivesTest(jtu.JaxTestCase):
       self.assertEqual(out_aval.shape, out_shape)
       self.assertEqual(out_aval.dtype, out_dtype)
 
+  @parameterized.parameters(
+      ((4, 5), 0, (0,)),
+      ((4, 5), 1, (0,)),
+      ((9, 10, 11, 12), 0, (slice(None), 0, 1)),  # Contiguous int indexing
+      ((9, 10, 11, 12), 0, (0, slice(None), 1)),  # Non-contiguous int indexing
+      ((9, 10, 11, 12), 1, (slice(None), 0, 1)),  # Contiguous after batch
+      ((9, 10, 11, 12), 2, (slice(None), 0, 1)),  # Non-contiguous after batch
+      ((9, 10, 11, 12), 3, (slice(None), slice(None), 0)),
+      # Shaped int indexer, contiguous after batch
+      ((9, 10, 11, 12), 3,
+       (slice(None), slice(None), np.array([[0,1]]))),
+      # Shaped int indexer, non-contiguous after batch
+      ((9, 10, 11, 12), 2,
+       (np.array([[0, 1]]), slice(None), np.array([[0, 1]]))),
+  )
+  def test_vmap_of_get_regression(self, shape, in_axes, indexer):
+    # Regression test for https://github.com/jax-ml/jax/issues/33309
+    def f(x):
+      return x[indexer]
+    x = jnp.ones(shape)
+    result = jax.vmap(f, in_axes=in_axes)(jax.new_ref(x))
+    expected = jax.vmap(f, in_axes=in_axes)(x)
+    self.assertArraysEqual(result, expected)
+
   def test_swap_abstract_eval_must_take_in_refs(self):
     ref_aval = core.ShapedArray((), jnp.float32)
     val_aval = core.ShapedArray((), jnp.float32)
@@ -956,12 +980,14 @@ def _pack_idx(non_slice_idx: Sequence[int | np.ndarray],
   assert next(idx_, None) is None
   return idx
 
-@jtu.thread_unsafe_test_class()  # hypothesis isn't thread-safe
+@jtu.thread_unsafe_test_class(condition=not jtu.hypothesis_is_thread_safe())
 class StateHypothesisTest(jtu.JaxTestCase):
 
   @hp.given(get_vmap_params())
-  @hp.settings(deadline=None, print_blob=True,
-                max_examples=jtu.NUM_GENERATED_CASES.value)
+  @hp.settings(deadline=None,
+               print_blob=True,
+               max_examples=jtu.NUM_GENERATED_CASES.value,
+               suppress_health_check=[hp.HealthCheck.too_slow])
   def test_get_vmap(self, get_vmap_param: GetVmapParams):
 
     indexed_dims = get_vmap_param.vmap_index_param.index_param.indexed_dims
@@ -1001,7 +1027,8 @@ class StateHypothesisTest(jtu.JaxTestCase):
 
   @hp.given(set_vmap_params())
   @hp.settings(deadline=None, print_blob=True,
-                max_examples=jtu.NUM_GENERATED_CASES.value)
+               max_examples=jtu.NUM_GENERATED_CASES.value,
+               suppress_health_check=[hp.HealthCheck.too_slow])
   def test_set_vmap(self, set_vmap_param: SetVmapParams):
     if jtu.test_device_matches(["gpu"]):
       self.skipTest("Scatter is nondeterministic on GPU")
@@ -1047,7 +1074,8 @@ class StateHypothesisTest(jtu.JaxTestCase):
 
   @hp.given(set_vmap_params())
   @hp.settings(deadline=None, print_blob=True,
-                max_examples=jtu.NUM_GENERATED_CASES.value)
+               max_examples=jtu.NUM_GENERATED_CASES.value,
+               suppress_health_check=[hp.HealthCheck.too_slow])
   def test_addupdate_vmap(self, set_vmap_param: SetVmapParams):
 
     indexed_dims = set_vmap_param.vmap_index_param.index_param.indexed_dims
@@ -1361,6 +1389,25 @@ class StateControlFlowTest(jtu.JaxTestCase):
     self.assertEqual(a.shape, ())
     self.assertEqual(b.shape, (3,))
 
+  @parameterized.named_parameters(
+      ("call_primitive", core.call_p),
+      ("closed_call_primitive", core.closed_call_p),
+  )
+  def test_call_primitive_discharges(self, prim):
+
+    def g(y_ref, x):
+      x_ref = jax.new_ref(x)
+      y_ref[...] = jnp.exp(x_ref[...])
+      return [jax.freeze(y_ref)]
+
+    def f(x):
+      y_ref = jax.new_ref(jnp.zeros_like(x))
+      g_ = partial(g, y_ref)
+      return prim.bind(
+          lu.wrap_init(g_, debug_info=api_util.debug_info("f", g, (x,), {})), x
+      )[0]
+    out = f(4.)
+    np.testing.assert_array_equal(out, jnp.exp(4.))
 
 class GeneralRefTest(jtu.JaxTestCase):
 
@@ -1373,6 +1420,15 @@ class GeneralRefTest(jtu.JaxTestCase):
     jaxpr, _, _ = pe.trace_to_jaxpr_dynamic(
         wrap_init(f, 1), [AbstractRef(core.AbstractToken())])
     self.assertIs(type(jaxpr.outvars[0].aval), core.AbstractToken)
+
+  def test_reshape(self):
+    def f(x_ref):
+      x_ref = x_ref.reshape(4, -1)
+      x_ref.reshape(-1)[...] = jnp.arange(36)
+      return [x_ref[...]]
+    jaxpr, _, _ = pe.trace_to_jaxpr_dynamic(
+        wrap_init(f, 1), [AbstractRef(core.ShapedArray((12, 3), jnp.int32))])
+    self.assertEqual(jaxpr.outvars[0].aval.shape, (4, 9))
 
   # NOTE(mattjj): disabled because it's extremely illegal
   # def test_ref_of_ref(self):
@@ -1619,7 +1675,7 @@ def add_spec(draw, depth):
                   min_dim=max(f1.min_dim, f2.min_dim),
                   max_dim=min(f1.max_dim, f2.max_dim))
 
-@jtu.thread_unsafe_test_class()  # because of hypothesis
+@jtu.thread_unsafe_test_class(condition=not jtu.hypothesis_is_thread_safe())
 class RunStateHypothesisTest(jtu.JaxTestCase):
 
   @jax.legacy_prng_key('allow')
@@ -1659,7 +1715,7 @@ class PinnedBuffersTest(jtu.JaxTestCase):
     txt = f.lower(x).as_text('hlo')
     self.assertIn("Pin", txt)
 
-    if jtu.test_device_matches(['gpu']):
+    if jtu.test_device_matches(['gpu', 'tpu']):
       y = f(x)
       self.assertAllClose(y, x)
 

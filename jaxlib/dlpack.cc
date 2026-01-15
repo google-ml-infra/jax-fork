@@ -35,7 +35,6 @@ limitations under the License.
 #include "llvm/Support/Casting.h"
 #include "nanobind/nanobind.h"
 #include "nanobind/ndarray.h"
-#include "jaxlib/dlpack_support.h"
 #include "jaxlib/nb_class_ptr.h"
 #include "jaxlib/py_array.h"
 #include "jaxlib/py_client.h"
@@ -47,13 +46,14 @@ limitations under the License.
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/pjrt/pjrt_common.h"
 #include "xla/pjrt/pjrt_compiler.h"
+#include "xla/python/dlpack_types.h"
 #include "xla/python/ifrt/array.h"
 #include "xla/python/ifrt/device.h"
-#include "xla/python/ifrt/user_context.h"
 #include "xla/python/pjrt_ifrt/pjrt_array.h"
 #include "xla/python/pjrt_ifrt/pjrt_client.h"
 #include "xla/python/pjrt_ifrt/pjrt_device.h"
 #include "xla/python/types.h"
+#include "xla/python/version.h"
 #include "xla/shape_util.h"
 #include "xla/tsl/platform/errors.h"
 #include "xla/tsl/platform/logging.h"
@@ -178,43 +178,56 @@ absl::StatusOr<std::vector<int64_t>> GetByteStrides(const DLTensor& dl_tensor) {
   return strides;
 }
 
-absl::StatusOr<std::unique_ptr<xla::PjRtBuffer>> MakePjrtBuffer(
-    xla::PjRtDevice& device, ::DLManagedTensor* dlmt, const xla::Shape& shape,
-    xla::PrimitiveType element_type, absl::Span<int64_t const> dimensions,
-    std::optional<std::intptr_t> stream = std::nullopt) {
+// Makes a PjRtBuffer from a DLPack tensor. Returns a pair where the second
+// element is true if a copy actually happened.
+absl::StatusOr<std::pair<std::unique_ptr<xla::PjRtBuffer>, bool>>
+MakePjrtBuffer(xla::PjRtDevice& device, ::DLManagedTensor* dlmt,
+               const xla::Shape& shape, xla::PrimitiveType element_type,
+               absl::Span<int64_t const> dimensions,
+               std::optional<bool> copy = std::nullopt,
+               std::optional<std::intptr_t> stream = std::nullopt) {
   std::function<void()> on_delete_callback;
   if (dlmt->deleter) {
     on_delete_callback = [dlmt]() { dlmt->deleter(dlmt); };
   }
 
-  // First try to create a view.
   void* data =
       static_cast<char*>(dlmt->dl_tensor.data) + dlmt->dl_tensor.byte_offset;
-  auto result = device.client()->CreateViewOfDeviceBuffer(
-      data, shape, *device.default_memory_space(), on_delete_callback, stream);
 
-  // If that fails with invalid argument, it's possibly because of the incorrect
-  // alignment. If we're on CPU, we can create a copy of buffer.
-  if (result.status().code() == absl::StatusCode::kInvalidArgument &&
-      dlmt->dl_tensor.device.device_type == kDLCPU) {
-    LOG(WARNING) << "DLPack buffer is not aligned (data at: " << data
-                 << "). Creating a copy.";
+  // On CPU, creating a view may fail because of unaligned data buffer
+  // in which case we'll fallback to copy. On non-CPU, array-api copy
+  // semantics is handled in dlpack._place_array function.
+  bool fallback_to_copy =
+      !copy.has_value() && dlmt->dl_tensor.device.device_type == kDLCPU;
 
-    // Convert tensor strides (expressed in number of elements) to byte strides.
-    std::optional<std::vector<int64_t>> byte_strides;
-    if (dlmt->dl_tensor.strides) {
-      TF_ASSIGN_OR_RETURN(byte_strides, GetByteStrides(dlmt->dl_tensor));
+  // Create a view.
+  if (!copy.value_or(false)) {
+    auto result = device.client()->CreateViewOfDeviceBuffer(
+        data, shape, *device.default_memory_space(), on_delete_callback,
+        stream);
+    if (!(result.status().code() == absl::StatusCode::kInvalidArgument &&
+          fallback_to_copy)) {
+      TF_RETURN_IF_ERROR(result.status());
+      return std::make_pair(*std::move(result), false);
     }
-
-    TF_ASSIGN_OR_RETURN(auto* memory_space, device.default_memory_space());
-
-    // Create a copy.
-    result = device.client()->BufferFromHostBuffer(
-        data, element_type, dimensions, byte_strides,
-        xla::PjRtClient::HostBufferSemantics::kMutableZeroCopy,
-        on_delete_callback, memory_space, /*device_layout=*/nullptr);
   }
-  return result;
+
+  // Convert tensor strides (expressed in number of elements) to byte strides.
+  std::optional<std::vector<int64_t>> byte_strides;
+  if (dlmt->dl_tensor.strides) {
+    TF_ASSIGN_OR_RETURN(byte_strides, GetByteStrides(dlmt->dl_tensor));
+  }
+
+  TF_ASSIGN_OR_RETURN(auto* memory_space, device.default_memory_space());
+
+  // Create a copy.
+  TF_ASSIGN_OR_RETURN(
+      auto buffer,
+      device.client()->BufferFromHostBuffer(
+          data, element_type, dimensions, byte_strides,
+          xla::PjRtClient::HostBufferSemantics::kMutableZeroCopy,
+          on_delete_callback, memory_space, /*device_layout=*/nullptr));
+  return std::make_pair(std::move(buffer), true);
 }
 
 }  // namespace
@@ -314,7 +327,8 @@ absl::StatusOr<nb::capsule> BufferToDLPackManagedTensor(
 
 absl::StatusOr<nb::object> DLPackManagedTensorToBuffer(
     const nb::capsule& tensor, ifrt::Device* ifrt_device,
-    nb_class_ptr<PyClient> client, std::optional<std::intptr_t> stream) {
+    nb_class_ptr<PyClient> client, std::optional<std::intptr_t> stream,
+    std::optional<bool> copy) {
   ifrt::PjRtDevice* device =
       llvm::dyn_cast_or_null<ifrt::PjRtDevice>(ifrt_device);
   if (device == nullptr) {
@@ -343,6 +357,7 @@ absl::StatusOr<nb::object> DLPackManagedTensorToBuffer(
   TF_ASSIGN_OR_RETURN(xla::PrimitiveType element_type,
                       xla::DLDataTypeToPrimitiveType(dlmt->dl_tensor.dtype));
 
+  bool has_custom_layout = dlmt->dl_tensor.strides != nullptr;
   std::vector<int64_t> minor_to_major;
   if (dlmt->dl_tensor.strides &&
       absl::c_find(dimensions, 0) == dimensions.end()) {
@@ -357,9 +372,13 @@ absl::StatusOr<nb::object> DLPackManagedTensorToBuffer(
   xla::Shape shape = xla::ShapeUtil::MakeShapeWithDenseLayout(
       element_type, dimensions, minor_to_major);
 
-  TF_ASSIGN_OR_RETURN(auto pjrt_buffer,
+  TF_ASSIGN_OR_RETURN(auto pjrt_buffer_and_copied,
                       MakePjrtBuffer(*device->pjrt_device(), dlmt, shape,
-                                     element_type, dimensions, stream));
+                                     element_type, dimensions, copy, stream));
+  if (pjrt_buffer_and_copied.second) {
+    // A PjRtBuffer uses a default layout if it has been created using copy.
+    has_custom_layout = false;
+  }
 
   // We have taken ownership of the array inside the capsule; make sure the
   // capsule it cannot be used again.
@@ -372,9 +391,11 @@ absl::StatusOr<nb::object> DLPackManagedTensorToBuffer(
     throw xla::XlaRuntimeError(
         "This operation is implemented for a PjRt-compatible backend only.");
   }
-  xla::ifrt::UserContextScope user_context_scope(PyUserContext::Create());
-  TF_ASSIGN_OR_RETURN(auto ifrt_array,
-                      ifrt_client->CreatePjRtArray(std::move(pjrt_buffer)));
+  PyUserContextScope user_context_scope;
+  TF_ASSIGN_OR_RETURN(
+      auto ifrt_array,
+      ifrt_client->CreatePjRtArray(std::move(pjrt_buffer_and_copied.first),
+                                   has_custom_layout));
   return PyArray::MakeFromSingleDeviceArray(std::move(client),
                                             std::move(ifrt_array), false, true);
 }

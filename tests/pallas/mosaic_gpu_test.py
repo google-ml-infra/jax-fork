@@ -31,7 +31,6 @@ from absl.testing import parameterized
 import jax
 from jax import export
 from jax import lax
-from jax._src import checkify
 from jax._src import core as jax_core
 from jax._src import dtypes
 from jax._src import test_util as jtu
@@ -108,6 +107,22 @@ def _get_linearized_cuda_grid_index():
   return fn()
 
 
+def _array_splat(value, shape: tuple[int, ...]):
+  """Same as `jnp.full(shape, value, jnp.float32)` but implemented using `inline_mgpu`.
+
+  This is useful to prevent the result from being optimized away.
+  """
+  @plgpu.inline_mgpu(
+      return_type=plgpu.ShapeDtypeStruct(
+          shape, jnp.float32, layout=plgpu.Layout.WG_SPLAT(shape)
+      ),
+  )
+  def fn(_):
+    ir_value = mgpu.c(value, ir.F32Type.get())
+    return mgpu.FragmentedArray.splat(ir_value, shape)
+  return fn()
+
+
 class PallasTestMetaclass(parameterized.TestGeneratorMetaclass):
 
   def __new__(mcs, *args, lowering_semantics=plgpu.LoweringSemantics.Lane):
@@ -160,7 +175,7 @@ class PallasTest(jtu.JaxTestCase, metaclass=PallasTestMetaclass):
   ) -> Sequence[plgpu.MemoryRefTransform]:
     if self.LOWERING_SEMANTICS == plgpu.LoweringSemantics.Warpgroup:
       return ()
-    swizzle_elems = 8 * swizzle // dtypes.bit_width(dtype)
+    swizzle_elems = 8 * swizzle // dtypes.itemsize_bits(dtype)
     return (
         plgpu.TilingTransform((8, swizzle_elems)),
         plgpu.SwizzleTransform(swizzle),
@@ -217,6 +232,9 @@ class PallasCallTest(PallasTest):
           lax.tanh,
           lax.log,
           jax.nn.gelu,
+          lax.abs,
+          lax.round,
+          lambda x: lax.round(x, lax.RoundingMethod.TO_NEAREST_EVEN),
       ],
       approx_math=[True, False],
   )
@@ -235,6 +253,19 @@ class PallasCallTest(PallasTest):
     np.testing.assert_allclose(
         kernel(x), op(x), rtol=1e-5 if approx_math else 3e-7
     )
+
+  @parameterized.parameters(jnp.float32, jnp.int32, jnp.uint32)
+  def test_sign(self, dtype):
+    @functools.partial(
+        self.pallas_call,
+        out_shape=jax.ShapeDtypeStruct([256], dtype),
+    )
+    def kernel(src_ref, dst_ref):
+      dst_ref[...] = lax.sign(src_ref[...])
+
+    # Use values that include negative, zero, and positive.
+    src = np.arange(256, dtype=dtype) - 128
+    np.testing.assert_array_equal(kernel(src), lax.sign(src))
 
   @parameterized.product(
       op=[
@@ -296,21 +327,22 @@ class PallasCallTest(PallasTest):
     y = jnp.flip(x).reshape(1, 256)
     np.testing.assert_array_equal(kernel(x, y), x + y[0])
 
-  @parameterized.product(shape=[(128,), (128, 128)])
-  @jtu.skip_if_mosaic_gpu_exceeds_shared_memory(device_patterns="RTX PRO 6000 Blackwell")
-  def test_reduce_sum(self, shape):
-    @functools.partial(
-        self.pallas_call, out_shape=jax.ShapeDtypeStruct(shape, jnp.float32)
-    )
+  @parameterized.product(
+      op=(jnp.sum, jnp.max, jnp.min),
+      shape=((128,), (128, 64)),
+      dtype=(jnp.float32, jnp.int32, jnp.uint32),
+  )
+  def test_scalar_reduce(self, op, shape, dtype):
+    @functools.partial(self.kernel, out_shape=jax.ShapeDtypeStruct((), dtype))
     def kernel(x_ref, o_ref):
-      o_ref[...] = jnp.broadcast_to(_sum_same_dtype(x_ref[...]), o_ref.shape)
+      o_ref[...] = op(x_ref[...])
 
-    x = jnp.arange(math.prod(shape)).reshape(shape).astype(jnp.float32)
-    np.testing.assert_array_equal(kernel(x), jnp.sum(x))
+    x = jnp.arange(math.prod(shape)).reshape(shape).astype(dtype)
+    if dtype != jnp.uint32:
+      x = x - x.size // 2  # include negative values.
+    np.testing.assert_array_equal(kernel(x), op(x))
 
   def test_reshape(self):
-    self.skip_if_wg_semantics()  # Can't infer transforms for `memref.expand_shape`.
-
     shape1, shape2 = (128,), (2, 16, 4)
 
     @functools.partial(
@@ -324,6 +356,60 @@ class PallasCallTest(PallasTest):
 
     x = jnp.arange(math.prod(shape1)).astype(jnp.float32)
     np.testing.assert_array_equal(kernel(x), x.reshape(shape2))
+
+  def test_reshape_tiled(self):
+    shape1, shape2 = (6 * 64, 8), (2, 3, 64, 8)
+
+    @functools.partial(
+        self.kernel,
+        out_shape=jax.ShapeDtypeStruct(shape2, jnp.float32),
+    )
+    def kernel(x_ref, out_ref):
+      x = plgpu.load(x_ref, (), layout=plgpu.Layout.WGMMA, optimized=False)
+      out_ref[...] = x.reshape(shape2)
+
+    x = jnp.arange(math.prod(shape1)).reshape(shape1).astype(jnp.float32)
+    np.testing.assert_array_equal(kernel(x), x.reshape(shape2))
+
+  def test_reshape_splat(self):
+    shape = (1, 1, 1)
+
+    @functools.partial(
+        self.kernel,
+        out_shape=jax.ShapeDtypeStruct(shape, jnp.float32),
+    )
+    def kernel(out_ref):
+      x = jnp.array(42, dtype=jnp.float32)
+      out_ref[...] = x.reshape(shape)
+
+    np.testing.assert_array_equal(
+        kernel(), jnp.array(42, dtype=jnp.float32).reshape(shape)
+    )
+
+  def test_slice_untiled_dim(self):
+    shape = (2, 3, 64, 8)
+
+    @functools.partial(
+        self.kernel,
+        out_shape=jax.ShapeDtypeStruct(shape[2:], jnp.float32),
+    )
+    def kernel(x_ref, out_ref):
+      x = plgpu.load(x_ref, (), layout=plgpu.Layout.WGMMA, optimized=False)
+      out_ref[...] = x[1, 1]
+
+    x = jnp.arange(math.prod(shape)).reshape(shape).astype(jnp.float32)
+    np.testing.assert_array_equal(kernel(x), x[1, 1])
+
+  def test_squeeze_to_scalar(self):
+    @functools.partial(
+        self.kernel,
+        out_shape=jax.ShapeDtypeStruct((), jnp.float32),
+    )
+    def kernel(out_ref):
+      x  = _array_splat(42, (1, 1, 1))
+      out_ref[...] = lax.squeeze(x, dimensions=(0, 1, 2))
+
+    np.testing.assert_array_equal(kernel(), jnp.array(42, dtype=jnp.float32))
 
   def test_add_xy_indexed(self):
     @functools.partial(
@@ -455,8 +541,6 @@ class PallasCallTest(PallasTest):
 
   @parameterized.parameters(jnp.float32, jnp.int32, jnp.uint32)
   def test_iota(self, dtype):
-    self.skip_if_wg_semantics()  # No WG lowering for iota.
-
     dimension = 1
 
     @functools.partial(
@@ -474,12 +558,7 @@ class PallasCallTest(PallasTest):
   @parameterized.parameters(jnp.bfloat16, jnp.int16, jnp.uint16)
   def test_inline_mgpu(self, jnp_type):
     dtype = jnp.dtype(jnp_type)
-    if jnp.issubdtype(dtype, jnp.signedinteger):
-      is_signed = True
-    elif jnp.issubdtype(dtype, jnp.unsignedinteger):
-      is_signed = False
-    else:
-      is_signed = None
+    is_signed = mgpu.utils.is_signed(dtype)
     shape = (128, 128)
     tile = (64, 128 // dtype.itemsize)
     tiled_shape = list(mgpu.tile_shape(shape, tile))
@@ -555,10 +634,61 @@ class PallasCallTest(PallasTest):
         )
         ctx.await_async_copy(0)
 
+        # A dummy if statement to make sure we inline nested blocks correctly.
+        is_leader_thread = mgpu.utils.single_thread_predicate()
+        with mgpu.utils.when(is_leader_thread):
+          pass
+
       # This time we slice inside the inline_mgpu body.
       store(arr, smem_ref, o_ref)
 
     np.testing.assert_array_equal(kernel(x), x[0] + x[0] + 1)
+
+  @parameterized.parameters(
+      plgpu.Layout.WGMMA,
+      plgpu.Layout.WGMMA_UPCAST_2X,
+      plgpu.Layout.WGMMA_UPCAST_4X,
+      plgpu.Layout.TCGEN05,
+  )
+  def test_inline_mgpu_layout_args(self, layout: gpu_core.SomeLayout):
+    quant_dtype = jnp.int8
+    dtype = jnp.bfloat16
+    mgpu_layout = layout.to_mgpu()
+    shape = (128, 128)
+
+    rngs = list(jax.random.split(jax.random.key(0)))
+    x = jax.random.randint(rngs.pop(), shape, minval=-10, maxval=10).astype(
+        quant_dtype
+    )
+    x_s = jax.random.uniform(
+        rngs.pop(), shape[0], minval=-100, maxval=100
+    ).astype(dtype)
+
+    @functools.partial(
+        self.pallas_call,
+        out_shape=jax.ShapeDtypeStruct(shape, dtype),
+        in_specs=(pl.BlockSpec(memory_space=plgpu.GMEM),
+                  pl.BlockSpec(memory_space=plgpu.GMEM)),
+        out_specs=pl.BlockSpec(memory_space=plgpu.GMEM),
+    )
+    def kernel(x_ref, x_scale_ref, o_ref):
+      x = plgpu.load(x_ref, (), layout=layout, optimized=False).astype(x_scale_ref.dtype)
+      x_s = plgpu.load(x_scale_ref, (), layout=layout.reduce(1), optimized=False)
+
+      @plgpu.inline_mgpu(
+          arg_types=(layout, layout.reduce(1)),
+          return_type=plgpu.ShapeDtypeStruct(shape, dtype, layout=layout),
+      )
+      def custom_broadcast(ctx, x_fa, xs_fa):
+        del ctx
+        return xs_fa.broadcast_in_dim(shape, [0], layout=mgpu_layout) * x_fa
+
+      o_ref[...] = custom_broadcast(x, x_s)
+
+    np.testing.assert_array_equal(
+        kernel(x, x_s),
+        x.astype(dtype) * jnp.broadcast_to(x_s[:, None], x.shape),
+    )
 
   def test_sync_copy(self):
     shape = (128, 128)
@@ -599,7 +729,10 @@ class PallasCallTest(PallasTest):
 
   @parameterized.parameters(jnp.bfloat16, jnp.float16, jnp.float32)
   def test_copy_smem_to_gmem_reduction(self, dtype):
-    self.skip_if_wg_semantics()  # Reduction not implemented.
+    # TODO(b/415721295):Remove after the minimal jaxlib version is 0.8.2.
+    if not hasattr(mgpu.dialect, "TMAReduction"):
+      self.skip_if_wg_semantics()
+
     @functools.partial(
         self.pallas_call,
         grid=(200,),
@@ -676,6 +809,31 @@ class PallasCallTest(PallasTest):
     x = jnp.arange(256).astype(jnp.float32)
     np.testing.assert_array_equal(kernel(x)[indexer], x[indexer] + 1.0)
 
+  def test_collective_copy_gmem_to_smem(self):
+    @functools.partial(
+        self.kernel,
+        out_shape=jax.ShapeDtypeStruct((2, 128), jnp.float32),
+        scratch_shapes=dict(
+            smem_ref=plgpu.SMEM((128,), jnp.float32),
+            barrier_ref=plgpu.Barrier(),
+        ),
+        cluster=(2,),
+        cluster_names=("cluster",),
+    )
+    def kernel(x_ref, y_ref, smem_ref, barrier_ref):
+      # Specifying collective_axes will enable TMA multicast automatically.
+      plgpu.copy_gmem_to_smem(
+          x_ref, smem_ref, barrier_ref, collective_axes="cluster"
+      )
+      plgpu.barrier_wait(barrier_ref)
+      plgpu.copy_smem_to_gmem(smem_ref, y_ref.at[jax.lax.axis_index("cluster")])
+      plgpu.wait_smem_to_gmem(0)
+
+    x = jnp.arange(128, dtype=jnp.float32)
+    y = kernel(x)
+    # Each block gets the same data and writes it out.
+    np.testing.assert_array_equal(y, jnp.stack([x, x], axis=0))
+
   @parameterized.product(indexer=[..., slice(128), slice(None, 128)])
   def test_async_prefetch(self, indexer):
 
@@ -698,6 +856,20 @@ class PallasCallTest(PallasTest):
 
     x = jnp.arange(256).astype(jnp.float32)
     np.testing.assert_array_equal(kernel(x)[indexer], x[indexer] + 1.0)
+
+  def test_barrier_repeated_indexing(self):
+    @functools.partial(
+        self.pallas_call,
+        out_shape=jax.ShapeDtypeStruct((128,), jnp.float32),
+        scratch_shapes=[plgpu.Barrier(num_barriers=4)],
+    )
+    def kernel(o_ref, barrier_ref):
+      b = barrier_ref.at[2:4].at[1:2]
+      plgpu.barrier_arrive(b)
+      plgpu.barrier_wait(barrier_ref.at[3])
+      o_ref[...] = jnp.ones_like(o_ref)
+
+    np.testing.assert_array_equal(kernel(), np.ones((128,), dtype=jnp.float32))
 
   @parameterized.named_parameters(
       {
@@ -857,7 +1029,6 @@ class PallasCallTest(PallasTest):
     x = jnp.arange(128 * 128, dtype=jnp.float32).reshape(128, 128)
     np.testing.assert_array_equal(f(x), x)
 
-  @jtu.skip_if_mosaic_gpu_exceeds_shared_memory(device_patterns="RTX PRO 6000 Blackwell")
   def test_scoped_copy_with_transforms(self):
     ts = self.default_transforms(dtype=jnp.float32)
     def kernel(x_ref, o_ref, barrier_ref):
@@ -865,18 +1036,18 @@ class PallasCallTest(PallasTest):
         plgpu.copy_gmem_to_smem(x_ref, tmp_ref, barrier_ref)
         plgpu.barrier_wait(barrier_ref)
         o_ref[...] = tmp_ref[...] * 2
-      pl.run_scoped(body, plgpu.SMEM((128, 128), jnp.float32, transforms=ts))
+      pl.run_scoped(body, plgpu.SMEM((128, 64), jnp.float32, transforms=ts))
 
     in_spec = pl.BlockSpec(memory_space=plgpu.GMEM)
     out_spec = plgpu.BlockSpec(transforms=ts, memory_space=plgpu.SMEM)
     f = self.pallas_call(
         kernel,
-        out_shape=jax.ShapeDtypeStruct([128, 128], jnp.float32),
+        out_shape=jax.ShapeDtypeStruct([128, 64], jnp.float32),
         in_specs=(in_spec,),
         out_specs=out_spec,
         scratch_shapes=[plgpu.Barrier()],
     )
-    x = jnp.arange(128 * 128, dtype=jnp.float32).reshape(128, 128)
+    x = jnp.arange(128 * 64, dtype=jnp.float32).reshape(128, 64)
     np.testing.assert_array_equal(f(x), x * 2)
 
   @jtu.skip_if_mosaic_gpu_exceeds_shared_memory(device_patterns="RTX PRO 6000 Blackwell")
@@ -890,19 +1061,18 @@ class PallasCallTest(PallasTest):
         plgpu.copy_gmem_to_smem(x_ref, tmp_ref, barrier_ref)
         plgpu.barrier_wait(barrier_ref)
         o_ref[...] = tmp_ref[...] * 2
-      pl.run_scoped(body, plgpu.SMEM((16, 4, 8, 32), jnp.float32))
+      pl.run_scoped(body, plgpu.SMEM((8, 4, 8, 32), jnp.float32))
 
     in_spec = pl.BlockSpec(memory_space=plgpu.GMEM)
     f = self.pallas_call(
         kernel,
-        out_shape=jax.ShapeDtypeStruct([128, 128], jnp.float32),
+        out_shape=jax.ShapeDtypeStruct([64, 128], jnp.float32),
         in_specs=(in_spec,),
         scratch_shapes=[plgpu.Barrier()],
     )
-    x = jnp.arange(128 * 128, dtype=jnp.float32).reshape(128, 128)
+    x = jnp.arange(64 * 128, dtype=jnp.float32).reshape(64, 128)
     np.testing.assert_array_equal(f(x), x * 2)
 
-  @jtu.skip_if_mosaic_gpu_exceeds_shared_memory(device_patterns="RTX PRO 6000 Blackwell")
   def test_copy_with_transforms_and_indexing(self):
     self.skip_if_wg_semantics()
 
@@ -922,12 +1092,12 @@ class PallasCallTest(PallasTest):
     )
     f = self.pallas_call(
         kernel,
-        out_shape=jax.ShapeDtypeStruct([2, 128, 128], jnp.float32),
+        out_shape=jax.ShapeDtypeStruct([2, 64, 128], jnp.float32),
         in_specs=(in_spec,),
         out_specs=out_spec,
         scratch_shapes=[plgpu.Barrier()],
     )
-    x = jnp.arange(128 * 128, dtype=jnp.float32).reshape(128, 128)
+    x = jnp.arange(64 * 128, dtype=jnp.float32).reshape(64, 128)
     np.testing.assert_array_equal(f(x), np.stack([x, x], axis=0))
 
   @parameterized.parameters(
@@ -944,7 +1114,14 @@ class PallasCallTest(PallasTest):
   def test_copy_gmem_to_smem_gather(self, transforms):
     if not jtu.is_cuda_compute_capability_at_least("10.0"):
       self.skipTest("Only works on a GPU with capability >= sm100")
-    self.skip_if_wg_semantics()
+    if transforms:
+      # We cannot yet specify transforms on block specs for WG semantics.
+      self.skip_if_wg_semantics()
+
+    # TODO(b/415721295): Remove when the minimum jaxlib version is 0.8.3.
+    if not hasattr(mgpu.dialect, "tma_gather_supported"):
+      self.skip_if_wg_semantics()
+
     dtype = jnp.int32
     out_shape = (64, 128)
     shape = (128, 64 + out_shape[-1])
@@ -968,6 +1145,32 @@ class PallasCallTest(PallasTest):
     np.testing.assert_array_equal(kernel(x, idx), x[idx, 64:])
 
   @parameterized.product(
+      src_transposed=(False, True), shape=((128, 128), (1, 128, 128))
+  )
+  def test_transposed_load_store(self, src_transposed, shape):
+    dtype = jnp.float32
+    permutation = (0, 2, 1) if len(shape) == 3 else (1, 0)
+    @functools.partial(
+        self.kernel,
+        out_shape=jax.ShapeDtypeStruct(shape, dtype),
+    )
+    def kernel(src_ref, dst_ref):
+      if src_transposed:
+        src_ref = plgpu.transpose_ref(src_ref, permutation)
+        src_layout = plgpu.Layout.WGMMA_TRANSPOSED
+        dst_layout = plgpu.Layout.WGMMA
+      else:
+        dst_ref = plgpu.transpose_ref(dst_ref, permutation)
+        src_layout = plgpu.Layout.WGMMA
+        dst_layout = plgpu.Layout.WGMMA_TRANSPOSED
+      src = plgpu.load(src_ref, (), layout=src_layout, optimized=False)
+      dst = plgpu.layout_cast(src, dst_layout)
+      dst_ref[...] = dst
+
+    x = jnp.arange(math.prod(shape), dtype=dtype).reshape(shape)
+    np.testing.assert_array_equal(kernel(x), jnp.transpose(x, permutation))
+
+  @parameterized.product(
       src_memory_space=[plgpu.SMEM, plgpu.GMEM],
       layout=[plgpu.Layout.WG_STRIDED((128,), vec_size=1), None,
       ]
@@ -987,10 +1190,31 @@ class PallasCallTest(PallasTest):
     x = jnp.arange(2 * 128, dtype=jnp.float32).reshape(2, 128)
     np.testing.assert_array_equal(kernel(x), x)
 
-  @jtu.skip_if_mosaic_gpu_exceeds_shared_memory(device_patterns="RTX PRO 6000 Blackwell")
-  def test_indexing_before_transpose(self):
-    self.skip_if_wg_semantics()
+  @parameterized.parameters(None, plgpu.TilingTransform((32,)))
+  def test_smem_gmem_transposed_copies(self, tiling):
+    shape = (2, 2, 64)
+    transforms = (tiling,) if tiling is not None else ()
+    if transforms:
+      self.skip_if_wg_semantics()  # Can't specify user transforms under WG semantics.
 
+    @functools.partial(
+        self.kernel,
+        out_shape=jax.ShapeDtypeStruct(shape, jnp.float32),
+        scratch_shapes=[
+            plgpu.SMEM(shape, jnp.float32, transforms=transforms),
+            plgpu.Barrier()
+        ],
+    )
+    def kernel(src_ref, dst_ref, smem_ref, barrier_ref):
+      smem_ref = plgpu.transpose_ref(smem_ref, (1, 0, 2))
+      plgpu.copy_gmem_to_smem(src_ref, smem_ref, barrier_ref)
+      plgpu.barrier_wait(barrier_ref)
+      plgpu.copy_smem_to_gmem(smem_ref, dst_ref)
+
+    x = jnp.arange(math.prod(shape), dtype=jnp.float32).reshape(shape)
+    np.testing.assert_array_equal(kernel(x), x)
+
+  def test_indexing_before_transpose(self):
     def kernel(x_ref, o_ref, barrier_ref):
       for i in range(2):
         plgpu.copy_gmem_to_smem(
@@ -1002,12 +1226,12 @@ class PallasCallTest(PallasTest):
     out_spec = plgpu.BlockSpec(memory_space=plgpu.SMEM)
     f = self.pallas_call(
         kernel,
-        out_shape=jax.ShapeDtypeStruct([2, 64, 2, 128], jnp.float32),
+        out_shape=jax.ShapeDtypeStruct([2, 32, 2, 128], jnp.float32),
         in_specs=(in_spec,),
         out_specs=out_spec,
         scratch_shapes=[plgpu.Barrier()],
     )
-    x = jnp.arange(2 * 64 * 128, dtype=jnp.float32).reshape(2, 64, 128)
+    x = jnp.arange(2 * 32 * 128, dtype=jnp.float32).reshape(2, 32, 128)
     xt = x.transpose((1, 0, 2))
     np.testing.assert_array_equal(f(x), np.stack([xt, xt], axis=0))
 
@@ -1092,9 +1316,9 @@ class PallasCallTest(PallasTest):
     self.assertEqual(output(), "It works!\n")
 
   def test_print_wgmma_tiled_layout(self):
-    self.skip_if_wg_semantics()
-
-    shape = (128, 64)
+    # The default printf buffer on some smaller GPUs (e.g. Thor) only has space for
+    # 4096 threads to printf (short) messages. Keep this shape below that.
+    shape = (128, 32)
     size = math.prod(shape)
 
     @functools.partial(
@@ -1122,8 +1346,6 @@ class PallasCallTest(PallasTest):
       self.assertEqual(v, i * shape[1] + j)
 
   def test_print_scalar(self):
-    self.skip_if_wg_semantics()
-
     @functools.partial(
         self.pallas_call,
         out_shape=jax.ShapeDtypeStruct([256], jnp.int32),
@@ -1139,8 +1361,6 @@ class PallasCallTest(PallasTest):
     self.assertIn(f"x.sum() = {x.sum()}", output())
 
   def test_print_scalar_array(self):
-    self.skip_if_wg_semantics()
-
     @functools.partial(
         self.pallas_call,
         out_shape=jax.ShapeDtypeStruct([256], jnp.int32),
@@ -1156,8 +1376,6 @@ class PallasCallTest(PallasTest):
     self.assertIn(f"x.sum() = {x.sum() + 1}", output())
 
   def test_print_array(self):
-    self.skip_if_wg_semantics()
-
     in_shape = [2, 1, 64, 64]
 
     @functools.partial(
@@ -1175,8 +1393,7 @@ class PallasCallTest(PallasTest):
     self.assertIn("x: [1, 0, 43, 23]: 6871\n", output())
 
   def test_print_layout(self):
-    self.skip_if_wg_semantics()
-    shape = [128]
+    shape = (128,)
 
     @functools.partial(
         self.pallas_call,
@@ -1223,9 +1440,18 @@ class PallasCallTest(PallasTest):
     x = jnp.arange(math.prod(shape), dtype=jnp.int32).reshape(shape)
     np.testing.assert_array_equal(kernel(x), x * 2)
 
-  def test_check(self):
-    self.skip_if_wg_semantics()
+  def test_swap_scalar_constant(self):
+    @functools.partial(
+        self.pallas_call,
+        out_shape=jax.ShapeDtypeStruct((), jnp.int32),
+        out_specs=pl.BlockSpec(memory_space=plgpu.GMEM),
+    )
+    def kernel(o_ref):
+      o_ref[...] = jnp.array(42)
 
+    np.testing.assert_array_equal(kernel(), jnp.array(42, jnp.int32))
+
+  def test_check(self):
     self.enter_context(pl.enable_debug_checks(True))
 
     @functools.partial(
@@ -1340,9 +1566,6 @@ class PallasCallTest(PallasTest):
       ((2, 3, 4, 5), ("a", "b", "c", "d"), (2,), ("x",)),
   )
   def test_axis_indices_in_grid(self, grid, grid_names, cluster, cluster_names):
-    # Skipping because `inline_mpgpu` isn't supported in WG semantics.
-    self.skip_if_wg_semantics()
-
     @functools.partial(
         self.kernel,
         out_shape=[
@@ -1698,7 +1921,6 @@ class PallasCallTest(PallasTest):
       ],
   )
   def test_transposed_layout(self, layouts):
-    self.skip_if_wg_semantics()
     layout, transposed_layout = layouts
     dtype = jnp.dtype(jnp.float16)
     shape = (256, 192)
@@ -1719,8 +1941,6 @@ class PallasCallTest(PallasTest):
     np.testing.assert_array_equal(kernel(), x)
 
   def test_profiler(self):
-    self.skip_if_wg_semantics()  # Transform inference not implemented.
-
     def kernel(x_ref, o_ref):
       with jax.named_scope("add"):
         with jax.named_scope("load"):
@@ -1797,7 +2017,7 @@ class PallasCallTest(PallasTest):
     y = jax.lax.iota(jnp.float32, 128) * 3
     np.testing.assert_array_equal(kernel(x, y), x + y)
 
-  def test_smem_aliasing_works(self):
+  def test_smem_aliasing_works_basic(self):
     self.skip_if_wg_semantics()
 
     in_shape = (2, 256)
@@ -1828,17 +2048,16 @@ class PallasCallTest(PallasTest):
                         plgpu.SMEM(
                             (128,),
                             jnp.float32,
-                            transforms=(plgpu.TilingTransform((64,)),),
-                    ),
+                            transforms=(plgpu.TilingTransform((64,)),)),
                     ]
                 ],
             )
         ],
     )
     def kernel(x_ref, o_ref128, aliased_ref):
-      smem_ref256, _, smem_ref128 = aliased_ref
+      smem_ref256, [_, [smem_ref128]] = aliased_ref
       # Ensure that extraction via index works the same as unfolding.
-      smem_ref128_2 = aliased_ref[2]
+      smem_ref128_2 = aliased_ref[1][1][0]
       self.assertIsInstance(smem_ref128, state_types.TransformedRef)
       self.assertIsInstance(smem_ref128_2, state_types.TransformedRef)
       self.assertIs(smem_ref128.ref, smem_ref128_2.ref)
@@ -1895,7 +2114,7 @@ class PallasCallTest(PallasTest):
         ],
     )
     def kernel(x_ref, o_refi4, aliased_ref):
-      _, smem_refi8, _, smem_refi4 = aliased_ref
+      [_, smem_refi8], [_, smem_refi4] = aliased_ref
       smem_refi8[...] = x_ref[...]
       plgpu.commit_smem()
       plgpu.copy_smem_to_gmem(smem_refi4, o_refi4)
@@ -2095,6 +2314,25 @@ class PallasCallTest(PallasTest):
     else:
       self.fail("Should have raised an exception")
 
+  def test_lower_with_abstract_mesh(self):
+    def kernel(y_ref, sem):
+      plgpu.semaphore_signal_multicast(sem, collective_axes='x')
+      # Wait for the multicast signal (each device gets signaled by all devices)
+      pl.semaphore_wait(sem, 2)  # Wait for signals from both devices
+      y_ref[...] = jnp.ones_like(y_ref)
+
+    kernel_jax = pl.pallas_call(
+        kernel,
+        out_specs=pl.BlockSpec(memory_space=plgpu.GMEM),
+        out_shape=jax.ShapeDtypeStruct((8, 128), jnp.float32),
+        scratch_shapes=[plgpu.SemaphoreType.REGULAR],
+    )
+    abstract_mesh = jax.sharding.AbstractMesh((2,), ('x',))
+    jax.jit(jax.shard_map(
+        kernel_jax, mesh=abstract_mesh, in_specs=(),
+        out_specs=jax.P(), check_vma=False)).trace().lower(
+            lowering_platforms=('gpu',))  # doesn't crash
+
   @parameterized.named_parameters(
     (
         f"_{''.join(map(str, collective_dims))}={collective_size}{'_' + ''.join(map(str, noncollective_dims)) if noncollective_dims else ''}",
@@ -2127,7 +2365,7 @@ class PallasCallTest(PallasTest):
       cluster["xyz".index(d)] = collective_dim_size
     for d in noncollective_dims:
       cluster["xyz".index(d)] = 2
-    if math.prod(cluster) > 16:
+    if math.prod(cluster) > jtu.get_cuda_nonportable_max_cluster_size():
       self.skipTest("Cluster is too big.")
 
     collective_size = math.prod(cluster["xyz".index(d)] for d in collective_dims)
@@ -2195,66 +2433,66 @@ class PallasCallTest(PallasTest):
               lane_dims=(-3, -2),
               vector_dim=-1,
           ),
+          # To have some layout with vector length of 1
+          plgpu.Layout.TCGEN05_TMEM_NATIVE(1),
+          # To have some layout with vector length > 2
+          plgpu.Layout.TCGEN05_TMEM_NATIVE(4),
       ),
-      op=(jnp.sum, jnp.max),
+      op=(jnp.sum, jnp.max, jnp.min),
+      # TODO(apaszke): Add support for f8 (MLIR/LLVM barfs at the moment).
+      dtype=(jnp.float32, jnp.float16, jnp.bfloat16, jnp.int32, jnp.uint32),
   )
-  def test_reduce_with_layout(self, layout, op):
-    self.skip_if_wg_semantics()
+  def test_reduce_with_layout(self, layout, op, dtype):
+    if layout == plgpu.Layout.TCGEN05_M64_COLLECTIVE(128):
+      self.skip_if_wg_semantics()  # cross-warp reductions are not supported.
     axis = -1
-    transforms = self.default_transforms(dtype=jnp.float32)
+    @functools.partial(
+        self.kernel,
+        out_shape=jnp.zeros((128,), dtype),
+    )
+    def kernel(x_ref, y_ref):
+      x_val = plgpu.load(x_ref, (), layout=layout, optimized=False)
+      y_ref[...] = op(x_val, axis=axis)
+
+    if jnp.issubdtype(dtype, jnp.integer):
+      x = jnp.arange(128 * 128).reshape((128, 128)).astype(dtype)
+      if dtype == jnp.int32:
+        x = x - x.size // 2  # include negative values.
+    else:
+      x = jax.random.uniform(jax.random.key(0), shape=(128, 128), dtype=dtype)
+    x_result = jax.block_until_ready(kernel(x))
+    np.testing.assert_allclose(x_result, op(x, axis=axis), atol=5e-5)
+
+  def test_cross_warp_reduction(self):
+    self.skip_if_wg_semantics()  # cross-warp reductions are not supported.
     @functools.partial(
         self.kernel,
         out_shape=jnp.zeros((128,), jnp.float32),
-        scratch_shapes=[
-            plgpu.SMEM((128, 128), jnp.float32, transforms=transforms),
-            plgpu.SMEM((128,), jnp.float32),
-            plgpu.Barrier(),
-        ],
     )
-    def kernel(x_ref, y_ref, smem_ref, smem_reduced_ref, barrier_ref):
-      plgpu.copy_gmem_to_smem(x_ref, smem_ref, barrier_ref)
-      plgpu.barrier_wait(barrier_ref)
-      x_val = plgpu.load(smem_ref, (), layout=layout)
-      smem_reduced_ref[...] = op(x_val, axis=axis)
-      plgpu.commit_smem()
-      plgpu.copy_smem_to_gmem(smem_reduced_ref, y_ref)
-      plgpu.wait_smem_to_gmem(0)
+    def kernel(x_ref, y_ref):
+      layout = plgpu.Layout.TCGEN05_TMEM_NATIVE(4)
+      x_val = plgpu.load(x_ref, (), layout=layout, optimized=False)
+      y_ref[...] = jnp.sum(x_val, axis=0)
 
-    x = jax.random.uniform(
-        jax.random.key(0), shape=(128, 128), dtype=jnp.float32)
-    x_result = jax.block_until_ready(kernel(x))
-    np.testing.assert_allclose(x_result, op(x, axis=axis), atol=1e-5)
+    x = jax.random.uniform(jax.random.key(0), shape=(128, 128), dtype=jnp.float32)
+    np.testing.assert_allclose(kernel(x), jnp.sum(x, axis=0), atol=5e-5)
 
   def _test_broadcast_in_dim_base(self, shape, layout, *, axis, hint):
-    if not hint:
-      # When the hint is not set, inference may choose incompatible layouts.
-      # TODO(bchetioui): investigate and fix.
-      self.skip_if_wg_semantics()
     assert len(shape) == 2
 
     @functools.partial(
         self.kernel,
         out_shape=jnp.zeros(shape, jnp.float32),
-        scratch_shapes=[
-            plgpu.SMEM((shape[1 - axis],), jnp.float32),
-            plgpu.SMEM(shape, jnp.float32),
-            plgpu.Barrier(),
-        ],
     )
-    def kernel(x_ref, y_ref, smem_ref, smem_out_ref, barrier_ref):
-      plgpu.copy_gmem_to_smem(x_ref, smem_ref, barrier_ref)
-      plgpu.barrier_wait(barrier_ref)
+    def kernel(x_ref, y_ref):
       reduced_layout = layout.reduce(axis)
-      reduced = plgpu.load(smem_ref, (), layout=reduced_layout)
+      reduced = plgpu.load(x_ref, (), layout=reduced_layout, optimized=False)
       broadcasted = lax.broadcast_in_dim(reduced, shape, [1 - axis])
       if hint:
         broadcasted = plgpu.layout_cast(broadcasted, layout)
       # Note that without the hint, the layout of broadcasted is not guaranteed
       # to be the same as the layout argument!
-      smem_out_ref[...] = broadcasted
-      plgpu.commit_smem()
-      plgpu.copy_smem_to_gmem(smem_out_ref, y_ref)
-      plgpu.wait_smem_to_gmem(0)
+      y_ref[...] = broadcasted
 
     x = jax.random.uniform(jax.random.key(0), shape=(128,), dtype=jnp.float32)
     x_result = jax.block_until_ready(kernel(x))
@@ -2282,34 +2520,67 @@ class PallasCallTest(PallasTest):
         shape, plgpu.Layout.TCGEN05_TMEM_NATIVE, axis=1, hint=False
     )
 
+  def test_broadcast_in_dim_wg_strided_majormost_dim(self):
+    self.skip_if_wg_semantics()
+    @functools.partial(
+        self.pallas_call,
+        out_shape=jax.ShapeDtypeStruct((256, 128), jnp.float32),
+    )
+    def kernel(x_ref, y_ref):
+      to_be_broadcasted = plgpu.load(
+          x_ref, (), layout=plgpu.Layout.WG_STRIDED((128,), 1)
+      )
+      broadcasted = lax.broadcast_in_dim(to_be_broadcasted, (256, 128), (1,))
+      y_ref[...] = broadcasted
+
+    result = jax.random.uniform(jax.random.key(0), shape=(128,), dtype=jnp.float32)
+    np.testing.assert_array_equal(kernel(result), jnp.broadcast_to(result[None,:], (256, 128)))
+
+  @parameterized.parameters(
+      ((4, 128),),
+      ((2, 4, 128),),
+  )
+  def test_broadcast_wg_strided_majormost_dim(self, out_shape):
+    self.skip_if_wg_semantics()  # Lowering not implemented.
+    dtype = jnp.float32
+    @functools.partial(
+        self.pallas_call, out_shape=jax.ShapeDtypeStruct(out_shape, dtype)
+    )
+    def kernel(x_ref, side_load_ref, y_ref):
+      x_strided = plgpu.load(
+          x_ref, (), layout=plgpu.Layout.WG_STRIDED((128,), vec_size=1)
+      )
+      side_load_strided = plgpu.load(
+          side_load_ref, (), layout=plgpu.Layout.WG_STRIDED(out_shape, vec_size=1)
+      )
+      for _ in range(len(out_shape) - 1):
+        x_strided = x_strided[None, ...]
+      y_ref[...] = x_strided + side_load_strided[...]
+
+    inp = jax.random.uniform(jax.random.key(0), (128,), dtype)
+    side_load = jax.random.uniform(jax.random.key(1), out_shape, dtype)
+    np.testing.assert_array_equal(kernel(inp, side_load),
+                                  jnp.broadcast_to(inp, out_shape) + side_load)
+
   def test_broadcast_in_dim_tcgen05_native_layout(self):
     @functools.partial(
         self.kernel,
         out_shape=jnp.zeros((128, 128), jnp.float32),
-        scratch_shapes=[
-            plgpu.SMEM((128,), jnp.float32),
-            plgpu.SMEM((128, 128), jnp.float32),
-            plgpu.Barrier(),
-        ],
         num_threads=1,
         thread_name="x",
     )
-    def kernel(x_ref, y_ref, smem_ref, smem_out_ref, barrier_ref):
-      plgpu.copy_gmem_to_smem(x_ref, smem_ref, barrier_ref)
-      plgpu.barrier_wait(barrier_ref)
-      reduced = plgpu.load(smem_ref, (), layout=plgpu.Layout.TCGEN05_TMEM_NATIVE.reduce(1))
+    def kernel(x_ref, y_ref):
+      reduced = plgpu.load(x_ref, (), layout=plgpu.Layout.TCGEN05_TMEM_NATIVE.reduce(1), optimized=False)
       broadcasted = lax.broadcast_in_dim(reduced, (128, 128), [0])
       broadcasted = plgpu.layout_cast(broadcasted, plgpu.Layout.TCGEN05_TMEM_NATIVE)
-      smem_out_ref[...] = broadcasted
-      plgpu.commit_smem()
-      plgpu.copy_smem_to_gmem(smem_out_ref, y_ref)
-      plgpu.wait_smem_to_gmem(0)
+      y_ref[...] = broadcasted
 
     x = jax.random.uniform(jax.random.key(0), shape=(128,), dtype=jnp.float32)
     np.testing.assert_array_equal(kernel(x), jnp.broadcast_to(x[:, None], (128, 128)))
 
   @parameterized.named_parameters((l.name.lower(), l) for l in plgpu.Layout)
-  @jtu.skip_if_mosaic_gpu_exceeds_shared_memory(device_patterns="RTX PRO 6000 Blackwell")
+  @jtu.skip_if_mosaic_gpu_exceeds_shared_memory(
+      device_patterns=("RTX PRO 6000 Blackwell", "GB10$"))
   def test_copy_layout(self, layout):
     if layout in {
         plgpu.Layout.WG_SPLAT,
@@ -2326,28 +2597,38 @@ class PallasCallTest(PallasTest):
     optimized = (
         self.LOWERING_SEMANTICS == plgpu.LoweringSemantics.Lane
         or layout != plgpu.Layout.TCGEN05_TMEM_NATIVE
-    )
+    ) and layout != plgpu.Layout.TCGEN05_M64_COLLECTIVE_NATIVE
 
-    shape = (128, 128)
-    transforms = self.default_transforms(dtype=jnp.float32)
+    shape = (128, 128) if "tcgen05" in layout.name.lower() else (64, 128)
+    dtype = jnp.float32
+    swizzle = 128
+    if layout in (plgpu.Layout.WGMMA_UPCAST_4X, plgpu.Layout.WGMMA_UPCAST_2X):
+      dtype = jnp.float8_e5m2
+      swizzle = 64
+    transforms = self.default_transforms(dtype=dtype, swizzle=swizzle)
+
     if layout == plgpu.Layout.TCGEN05_M64_COLLECTIVE:
       layout = plgpu.Layout.TCGEN05_M64_COLLECTIVE(128)
-    if layout == plgpu.Layout.WG_STRIDED:
+    elif layout == plgpu.Layout.TCGEN05_M64_COLLECTIVE_NATIVE:
+      layout = plgpu.Layout.TCGEN05_M64_COLLECTIVE_NATIVE(128)
+      if self.LOWERING_SEMANTICS == plgpu.LoweringSemantics.Lane:
+        self.skipTest("Need to add support for optimized= for stores")
+    elif layout == plgpu.Layout.WG_STRIDED:
       layout = plgpu.Layout.WG_STRIDED(shape, 2)
       transforms = ()
-    if layout == plgpu.Layout.SMEM_GMEM_COPY:
+    elif layout == plgpu.Layout.SMEM_GMEM_COPY:
       layout = plgpu.Layout.SMEM_GMEM_COPY(shape, jnp.float32, swizzle=128)
 
     @functools.partial(
         self.pallas_call,
-        out_shape=jax.ShapeDtypeStruct(shape, jnp.float32),
+        out_shape=jax.ShapeDtypeStruct(shape, dtype),
         in_specs=[plgpu.BlockSpec(transforms=transforms)],
         out_specs=plgpu.BlockSpec(transforms=transforms),
     )
     def kernel(x_ref, o_ref):
       o_ref[...] = plgpu.load(x_ref, (), layout=layout, optimized=optimized)
 
-    x = jnp.arange(math.prod(shape), dtype=jnp.float32).reshape(shape)
+    x = jnp.arange(math.prod(shape), dtype=dtype).reshape(shape)
     np.testing.assert_array_equal(kernel(x), x)
 
   @parameterized.parameters(
@@ -2427,6 +2708,23 @@ class PallasCallTest(PallasTest):
     )()
     np.testing.assert_array_equal(y, np.ones((), dtype=np.int32))
 
+  def test_replicated_layout(self):
+    shape = (32,)
+    @functools.partial(
+        self.pallas_call,
+        out_shape=jax.ShapeDtypeStruct(shape, jnp.float32),
+    )
+    def kernel(src_ref, dst_ref):
+      layout = plgpu.Layout.TILED(
+        plgpu.Tiling(((32,), (1,))),
+        warp_dims=(plgpu.Replicated(4),),
+        lane_dims=(-2,),
+        vector_dim=-1,
+      )
+      dst_ref[...] = plgpu.load(src_ref, (), layout=layout)
+    src = jnp.arange(shape[0], dtype=jnp.float32)
+    np.testing.assert_array_equal(kernel(src), src)
+
 
 class PallasCallWarpPrimitiveSemanticsTest(PallasTest):
   def setUp(self):
@@ -2465,6 +2763,33 @@ class PallasCallWarpPrimitiveSemanticsTest(PallasTest):
     expected = jnp.stack((jnp.ones((128,), jnp.int32),
                           jnp.ones((128,), jnp.int32) * 3), axis=0)
     np.testing.assert_array_equal(result, expected)
+
+  def test_scalar_load(self):
+    warp_mesh = plgpu.WarpMesh(axis_name="warp")
+    @functools.partial(self.kernel,
+                       out_shape=jax.ShapeDtypeStruct((), jnp.int32))
+    def kernel(x_ref, y_ref):
+      @pl.core_map(warp_mesh)
+      def _():
+        warp_id = lax.axis_index("warp")
+        @pl.when(warp_id == 1)
+        def _():
+          y_ref[...] = x_ref[...]
+    np.testing.assert_array_equal(kernel(4), 4)
+
+  def test_non_scalar_load_raises(self):
+    warp_mesh = plgpu.WarpMesh(axis_name="warp")
+    @functools.partial(self.kernel,
+                       out_shape=jax.ShapeDtypeStruct((2,), jnp.int32))
+    def kernel(x_ref, y_ref):
+      @pl.core_map(warp_mesh)
+      def _():
+        warp_id = lax.axis_index("warp")
+        @pl.when(warp_id == 1)
+        def _():
+          y_ref[...] = x_ref[...]
+    with self.assertRaisesRegex(ValueError, "Can only load scalars",):
+      kernel(jnp.ones((2,), jnp.int32))
 
   @parameterized.parameters(
     lax.add, lax.sub, lax.mul, lax.div, lax.rem, lax.bitwise_and,
@@ -2615,27 +2940,20 @@ class PallasCallWGTest(
     actual_missing_primitives = (lane_wg_lowered_primitives -
                                  wg_wg_lowered_primitives)
     expected_missing_primitives = {
-        mgpu_primitives.tcgen05_mma_p,
-        mgpu_primitives.print_layout_p,
-        mgpu_primitives.tcgen05_commit_arrive_p,
         mgpu_primitives.async_copy_scales_to_tmem_p,
         mgpu_primitives.async_copy_sparse_metadata_to_tmem_p,
-        mgpu_primitives.async_load_tmem_p,
-        mgpu_primitives.async_store_tmem_p,
         mgpu_primitives.wait_load_tmem_p,
-        mgpu_primitives.commit_tmem_p,
         mgpu_primitives.semaphore_signal_parallel_p,
+        mgpu_primitives.semaphore_signal_multicast_p,
         mgpu_primitives.try_cluster_cancel_p,
         mgpu_primitives.query_cluster_cancel_p,
         mgpu_primitives.multimem_store_p,
         mgpu_primitives.multimem_load_reduce_p,
-        lax.slice_p,
-        lax.iota_p,
         pallas_core.core_map_p,
         pallas_primitives.semaphore_signal_p,
         pallas_primitives.semaphore_wait_p,
         pallas_primitives.semaphore_read_p,
-        checkify.check_p,
+        pallas_primitives.delay_p,
     }
 
     self.assertSetEqual(actual_missing_primitives, expected_missing_primitives)
@@ -2792,7 +3110,6 @@ class PallasCallSm90ATest(PallasSm90ATest):
 
   @parameterized.parameters(jnp.int8, jnp.uint8)
   def test_wgmma_integer(self, dtype):
-    self.skip_if_wg_semantics()
     m, k, n = 64, 128, 64
 
     is_signed = jnp.issubdtype(dtype, jnp.signedinteger)
@@ -2889,6 +3206,46 @@ class PallasCallSm90ATest(PallasSm90ATest):
     )(a, b)
     np.testing.assert_allclose(res, a @ b, rtol=1e-3)
 
+  @parameterized.parameters(jnp.int8, jnp.float8_e4m3fn, jnp.float8_e5m2)
+  def test_wgmma_registers_8bit(self, input_dtype):
+    if jnp.issubdtype(input_dtype, jnp.integer):
+      out_dtype = jnp.int32
+    else:
+      out_dtype = jnp.float32
+    def kernel(a_ref, b_ref, o_ref):
+      def scope(acc_ref):
+        a_regs = plgpu.load(a_ref, (), layout=plgpu.Layout.WGMMA_8BIT)
+        plgpu.wgmma(acc_ref, a_regs, plgpu.transpose_ref(b_ref, (1, 0)))
+        return acc_ref[...]
+      o_ref[...] = pl.run_scoped(scope, plgpu.ACC((64, 192), out_dtype))
+
+    key1, key2 = jax.random.split(jax.random.key(42), 2)
+    m = 64
+    k = 128
+    n = 192
+    if input_dtype == jnp.int8:
+      a = jax.random.randint(key1, shape=(m, k), minval=-128, maxval=127, dtype=jnp.int8)
+      b = jax.random.randint(key2, shape=(n, k), minval=-128, maxval=127, dtype=jnp.int8)
+    else:
+      assert jnp.issubdtype(input_dtype, jnp.floating)
+      a = jax.random.uniform(key1, shape=(m, k), dtype=input_dtype)
+      b = jax.random.uniform(key2, shape=(n, k), dtype=input_dtype)
+
+    transforms = self.default_transforms(swizzle=64, dtype=input_dtype)
+    res = self.pallas_call(
+        kernel,
+        in_specs=[
+            plgpu.BlockSpec(transforms=transforms),
+            plgpu.BlockSpec(transforms=transforms),
+        ],
+        out_shape=jax.ShapeDtypeStruct((64, 192), out_dtype),
+    )(a, b)
+    ref = a.astype(out_dtype) @ b.T.astype(out_dtype)
+    if input_dtype == jnp.int8:
+      np.testing.assert_array_equal(res, ref)
+    else:
+      np.testing.assert_allclose(res, ref)
+
   def test_wgmma_registers_init(self):
     def kernel(a_ref, b_ref, i_ref, o_ref):
       def scope(acc_ref):
@@ -2913,8 +3270,6 @@ class PallasCallSm90ATest(PallasSm90ATest):
     np.testing.assert_allclose(res, i + a @ b, rtol=2e-3)
 
   def test_wgmma_sliced_ref(self):
-    self.skip_if_wg_semantics()  # Needs WGMMA to support slices.
-
     def kernel(a_ref, b_ref, o_ref):
       def scope(acc_ref):
         plgpu.wgmma(acc_ref, a_ref.at[0], b_ref.at[0])
@@ -2938,7 +3293,7 @@ class PallasCallSm90ATest(PallasSm90ATest):
     np.testing.assert_allclose(res, a[0] @ b[0], rtol=1e-3)
 
   def test_wgmma_sliced_acc_read(self):
-    self.skip_if_wg_semantics()  # Needs WGMMA to support slices.
+    self.skip_if_wg_semantics()  # MLIR verifier error for `memref.subview`.
 
     def kernel(a_ref, b_ref, o_ref):
       def scope(acc_ref):
@@ -3029,6 +3384,33 @@ class PallasCallSm90ATest(PallasSm90ATest):
     )
     np.testing.assert_allclose(f(a, b), out_ref, rtol=1e-3)
 
+  def test_load_store_wgmma_transposed(self):
+    transforms = self.default_transforms(swizzle=64, dtype=jnp.float32)
+    @functools.partial(
+        self.pallas_call,
+        out_shape=jax.ShapeDtypeStruct([8, 64], jnp.float32),
+        in_specs=[
+            pl.BlockSpec(memory_space=plgpu.GMEM),
+        ],
+        out_specs=pl.BlockSpec(memory_space=plgpu.GMEM),
+        scratch_shapes=[
+            plgpu.SMEM((8, 64), jnp.float32, transforms=transforms),
+            plgpu.Barrier(),
+        ],
+    )
+    def kernel(x_gmem, o_ref, x_smem, barrier):
+      plgpu.copy_gmem_to_smem(x_gmem, x_smem, barrier)
+      plgpu.barrier_wait(barrier)
+      x = plgpu.load(x_smem.T, (), layout=plgpu.Layout.WGMMA_TRANSPOSED)
+      x_smem.T[...] = x + 1
+      plgpu.commit_smem()
+      plgpu.copy_smem_to_gmem(x_smem, o_ref)
+      plgpu.wait_smem_to_gmem(0)
+
+    x = jax.random.uniform(jax.random.key(42), shape=(8, 64), dtype=jnp.float32)
+    result = kernel(x)
+    np.testing.assert_array_equal(result, x + 1)
+
 
 class PallasCallSm90AWGTest(
     PallasCallSm90ATest, lowering_semantics=plgpu.LoweringSemantics.Warpgroup
@@ -3038,28 +3420,58 @@ class PallasCallSm90AWGTest(
 
 class PallasCallSm100ATest(PallasSm100ATest):
 
-  def test_mixed_tmem_allocations_raise(self):
-    def kernel(out_ref, tmem_ref0, tmem_ref1):
-      del out_ref, tmem_ref0, tmem_ref1
+  def test_print_layout_tmem(self):
+    shape = (128, 256)
 
-    f = self.pallas_call(
-        kernel,
+    @functools.partial(
+        self.pallas_call,
+        out_shape=jax.ShapeDtypeStruct(shape, jnp.bfloat16),
+        scratch_shapes=[plgpu.TMEM(shape, jnp.bfloat16, packed=True)],
+    )
+    def kernel(o_ref, tmem_ref):
+      del o_ref
+      # Slicing TMEM to make sure we handle transforms correctly.
+      plgpu.print_layout("tmem: {}", tmem_ref.at[:, :128])
+
+    with self.capture_stdout() as output:
+      jax.block_until_ready(kernel())
+
+    self.assertIn("tmem: TMEM_DEFAULT(packing=2)\n", output())
+
+  def test_mixed_tmem_allocations_raise(self):
+    @functools.partial(
+        self.pallas_call,
         out_shape=jax.ShapeDtypeStruct((), jnp.float32),
         scratch_shapes=[
             plgpu.TMEM((128, 128), jnp.float32, collective=True),
             plgpu.TMEM((128, 128), jnp.float32, collective=False),
         ],
     )
+    def kernel(out_ref, tmem_ref0, tmem_ref1):
+      del out_ref, tmem_ref0, tmem_ref1
+
     with self.assertRaisesRegex(
         ValueError,
         "Can't mix collective and non-collective TMEM allocations within the"
         " same kernel.",
     ):
-      f()
+      kernel()
+
+  def test_transposed_tmem_ref_raises(self):
+    @functools.partial(
+        self.pallas_call,
+        out_shape=jax.ShapeDtypeStruct([], jnp.float32),
+        scratch_shapes=[plgpu.TMEM((128, 128), jnp.float32)],
+    )
+    def kernel(out, tmem_ref):
+      del out
+      plgpu.transpose_ref(tmem_ref, (1, 0))
+
+    with self.assertRaisesRegex(ValueError, "Can't transpose a TMEM reference"):
+      kernel()
 
   @parameterized.parameters((False,), (True,))
   def test_tmem(self, collective):
-    self.skip_if_wg_semantics()  # TMEM read not wired up in the WG get rule.
     transforms = self.default_transforms(dtype=jnp.float32)
     @functools.partial(
         self.kernel,
@@ -3102,7 +3514,6 @@ class PallasCallSm100ATest(PallasSm100ATest):
 
     All of the refs below are packed and should fit into TMEM at once.
     """
-    self.skip_if_wg_semantics()  # TMEM read not wired up in the WG get rule.
     transforms = self.default_transforms(dtype=jnp.bfloat16)
     @functools.partial(
         self.kernel,
@@ -3157,7 +3568,7 @@ class PallasCallSm100ATest(PallasSm100ATest):
         thread_name="x",
     )
     def kernel(x_ref, y_ref, aliased_ref, smem_ref, barrier_ref):
-      tmem_128x32a, tmem_128x32b, tmem_128x64 = aliased_ref
+      [tmem_128x32a, tmem_128x32b], tmem_128x64 = aliased_ref
       plgpu.copy_gmem_to_smem(x_ref, smem_ref, barrier_ref)
       plgpu.barrier_wait(barrier_ref)
       # Test tmem_128x32 a and b
@@ -3191,11 +3602,10 @@ class PallasCallSm100ATest(PallasSm100ATest):
       plgpu.Layout.TCGEN05, plgpu.Layout.TCGEN05_TMEM_NATIVE
   )
   def test_tmem_load_layout(self, layout):
-    self.skip_if_wg_semantics()  # TMEM read not wired up in the WG get rule.
     transforms = self.default_transforms(dtype=jnp.float32)
     @functools.partial(
         self.kernel,
-        out_shape=jnp.zeros((128, 128), jnp.float32),
+        out_shape=jax.ShapeDtypeStruct((128, 128), jnp.float32),
         scratch_shapes=[
             plgpu.TMEM((128, 128), jnp.float32),
             plgpu.SMEM((128, 128), jnp.float32, transforms=transforms),
@@ -3221,70 +3631,103 @@ class PallasCallSm100ATest(PallasSm100ATest):
     x_result = jax.block_until_ready(kernel(x))
     np.testing.assert_array_equal(x_result, x + 1)
 
-  def test_tmem_column_slicing(self):
-    self.skip_if_wg_semantics()
-    transforms = self.default_transforms(dtype=jnp.float32)
+  @parameterized.parameters(
+      plgpu.Layout.TCGEN05_M64_COLLECTIVE(160),
+      plgpu.Layout.TCGEN05_M64_COLLECTIVE_NATIVE(160)
+  )
+  def test_tmem_store_load_collective(self, layout):
+    self.skip_if_wg_semantics()  # Failed to infer a possible set of layouts.
     @functools.partial(
         self.kernel,
-        out_shape=jnp.zeros((128, 128), jnp.float32),
+        out_shape=jax.ShapeDtypeStruct((64, 160), jnp.float32),
+        cluster=(2,),
+        cluster_names=("cluster",),
+        scratch_shapes=[
+            plgpu.TMEM(
+                (64, 160), jnp.float32, collective=True,
+                layout=plgpu.TMEMLayout.M64_COLLECTIVE_LAYOUT(160),
+            ),
+        ],
+    )
+    def kernel(x_ref, y_ref, tmem_ref):
+      x_val = plgpu.load(x_ref, (), layout=layout, optimized=False)
+      plgpu.async_store_tmem(tmem_ref, x_val + 1)
+      plgpu.commit_tmem()
+      # We don't wait for the load to complete, because we never overwrite
+      # tmem_ref.
+      y_ref[...] = plgpu.async_load_tmem(tmem_ref, layout=layout)
+
+    x = jax.random.uniform(
+        jax.random.key(0), shape=(64, 160), dtype=jnp.float32)
+    x_result = jax.block_until_ready(kernel(x))
+    np.testing.assert_array_equal(x_result, x + 1)
+
+  def test_tmem_column_slicing(self):
+    @functools.partial(
+        self.kernel,
+        out_shape=jax.ShapeDtypeStruct((128, 128), jnp.float32),
         scratch_shapes=[
             plgpu.TMEM((128, 256), jnp.float32),
-            plgpu.SMEM((128, 128), jnp.float32, transforms=transforms),
-            plgpu.Barrier(),
         ],
         num_threads=1,
         thread_name="x",
     )
-    def kernel(x_ref, y_ref, tmem_ref, smem_ref, barrier_ref):
-      plgpu.copy_gmem_to_smem(x_ref, smem_ref, barrier_ref)
-      plgpu.barrier_wait(barrier_ref)
-      x_val = plgpu.load(smem_ref, (), layout=plgpu.Layout.TCGEN05)
+    def kernel(x_ref, y_ref, tmem_ref):
+      x_val = plgpu.load(x_ref, (), layout=plgpu.Layout.TCGEN05, optimized=False)
       tmem_slice = tmem_ref.at[:, 8:208].at[:, 0:128]
       plgpu.async_store_tmem(tmem_slice, x_val + 1)
       plgpu.commit_tmem()
-      smem_ref[...] = plgpu.async_load_tmem(tmem_ref.at[:, 8:136])
-      plgpu.commit_smem()
-      plgpu.copy_smem_to_gmem(smem_ref, y_ref)
-      plgpu.wait_smem_to_gmem(0)
+      y_ref[...] = plgpu.async_load_tmem(tmem_ref.at[:, 8:136])
 
     x = jax.random.uniform(
         jax.random.key(0), shape=(128, 128), dtype=jnp.float32)
-    x_result = jax.block_until_ready(kernel(x))
-    np.testing.assert_array_equal(x_result, (x + 1)[:, 0:128])
+    np.testing.assert_array_equal(kernel(x), (x + 1)[:, 0:128])
 
   @parameterized.product(
       m=[64, 128],
       n=[64, 128, 256],
       swizzle=[64, 32],
-      dtype=[jnp.int8, jnp.uint8]
+      dtype=[jnp.int8, jnp.uint8],
+      lhs_tmem=[False, True],
   )
-  def test_integer_matmul(self, m, n, swizzle, dtype):
-    self.skip_if_wg_semantics()
+  def test_integer_matmul(self, m, n, swizzle, dtype, lhs_tmem):
     if n * jnp.dtype(dtype).itemsize <= swizzle:
       self.skipTest("swizzle too big")
+    if lhs_tmem and m == 64:
+      self.skipTest("m=64 not supported for LHS in TMEM")
+    if lhs_tmem:
+      self.skip_if_wg_semantics()  # Layout inference fails to find a solution.
     k = 128
     is_signed = jnp.issubdtype(dtype, jnp.signedinteger)
     o_dtype = jnp.int32
 
     in_transforms = self.default_transforms(dtype=dtype, swizzle=swizzle)
-    out_transforms = self.default_transforms(dtype=o_dtype)
 
-    def kernel(a_smem, b_smem, out_ref, acc_tmem, scratch_smem, barrier_ref):
+    def kernel(
+        a_smem, b_smem, out_ref, acc_tmem, barrier_ref, a_tmem_ref
+    ):
+      if lhs_tmem:
+        lhs_ref = a_tmem_ref
+        layout = plgpu.Layout.TCGEN05_TMEM_NATIVE(4)
+        plgpu.async_store_tmem(lhs_ref, plgpu.load(a_smem, (), layout=layout, optimized=False))
+        plgpu.commit_tmem()
+      else:
+        lhs_ref = a_smem
+
       plgpu.tcgen05_mma(
-          acc_tmem, a_smem, b_smem, barrier_ref, accumulate=False
+          acc_tmem, lhs_ref, b_smem, barrier_ref, accumulate=False
       )
       plgpu.barrier_wait(barrier_ref)
-      scratch_smem[...] = plgpu.async_load_tmem(acc_tmem)
-      plgpu.commit_smem()
-
-      plgpu.copy_smem_to_gmem(scratch_smem, out_ref)
-      plgpu.wait_smem_to_gmem(0)
+      out_ref[...] = plgpu.async_load_tmem(acc_tmem)
 
     scratch_shapes = [
         plgpu.TMEM((m, n), o_dtype, packed=False),
-        plgpu.SMEM((m, n), o_dtype, transforms=out_transforms),
         plgpu.Barrier(orders_tensor_core=True),
     ]
+    if lhs_tmem:
+      scratch_shapes.append(plgpu.TMEM((m, k), dtype, packed=True))
+    else:
+      scratch_shapes.append(None)
 
     f = self.pallas_call(
         kernel,
@@ -3318,7 +3761,6 @@ class PallasCallSm100ATest(PallasSm100ATest):
   def test_simple_matmul(
       self, m, n, swizzle, dtype, lhs_tmem, transpose_lhs, transpose_rhs
   ):
-    self.skip_if_wg_semantics()
     if transpose_lhs and lhs_tmem:
       self.skipTest("TMEM transpose not supported")
     if n * jnp.dtype(dtype).itemsize <= swizzle:
@@ -3329,7 +3771,7 @@ class PallasCallSm100ATest(PallasSm100ATest):
     # Test a matmul with a single block.
     transforms = self.default_transforms(dtype=dtype, swizzle=swizzle)
 
-    def kernel(a_smem, b_smem, out_ref, acc_tmem, scratch_smem, barrier_ref,
+    def kernel(a_smem, b_smem, out_ref, acc_tmem, barrier_ref,
                a_tmem_ref):
       if transpose_lhs:
         a_smem = plgpu.transpose_ref(a_smem, (1, 0))
@@ -3349,14 +3791,10 @@ class PallasCallSm100ATest(PallasSm100ATest):
                         accumulate=False)
       plgpu.barrier_wait(barrier_ref)
       # We don't await the load because acc_tmem is never modified again.
-      scratch_smem[...] = plgpu.async_load_tmem(acc_tmem).astype(dtype)
-      plgpu.commit_smem()
-      plgpu.copy_smem_to_gmem(scratch_smem, out_ref)
-      plgpu.wait_smem_to_gmem(0)
+      out_ref[...] = plgpu.async_load_tmem(acc_tmem).astype(dtype)
 
     scratch_shapes = [
         plgpu.TMEM((m, n), jnp.float32, packed=False),
-        plgpu.SMEM((m, n), dtype, transforms=transforms),
         plgpu.Barrier(orders_tensor_core=True),
     ]
     if lhs_tmem:
@@ -3387,7 +3825,6 @@ class PallasCallSm100ATest(PallasSm100ATest):
     np.testing.assert_allclose(result, expected, rtol=1e-3)
 
   def test_matmul_alignment(self):
-    self.skip_if_wg_semantics()
     m = k = n = 128
     dtype = jnp.float16
     transforms = self.default_transforms(dtype=dtype)
@@ -3426,8 +3863,10 @@ class PallasCallSm100ATest(PallasSm100ATest):
   )
   def test_simple_scaled_matmul(self, m, n, dtype):
     self.skip_if_wg_semantics()
-    k = 128
-    swizzle = 128 // (8 // jnp.finfo(dtype).bits)
+    # TODO(apaszke): Add support for single-buffering in pallas_call.
+    causes_oom = jnp.finfo(dtype).bits == 8 and n == 256
+    k = 128 if causes_oom else 256
+    swizzle = 128
     transforms = self.default_transforms(swizzle=swizzle, dtype=dtype)
     out_transforms = self.default_transforms(dtype=jnp.float32)
 
@@ -3450,8 +3889,8 @@ class PallasCallSm100ATest(PallasSm100ATest):
     scratch_shapes = [
         plgpu.Barrier(orders_tensor_core=True),
         plgpu.TMEM((m, n), jnp.float32),
-        plgpu.TMEM((m, 4), jnp.float8_e8m0fnu, layout=plgpu.TMEMLayout.SCALES_LAYOUT),
-        plgpu.TMEM((n, 4), jnp.float8_e8m0fnu, layout=plgpu.TMEMLayout.SCALES_LAYOUT),
+        plgpu.TMEM((m, k // 32), jnp.float8_e8m0fnu, layout=plgpu.TMEMLayout.SCALES_LAYOUT),
+        plgpu.TMEM((n, k // 32), jnp.float8_e8m0fnu, layout=plgpu.TMEMLayout.SCALES_LAYOUT),
     ]
 
     f = self.pallas_call(
@@ -3470,19 +3909,146 @@ class PallasCallSm100ATest(PallasSm100ATest):
     y = jax.random.uniform(jax.random.key(2), shape=(n, k), dtype=jnp.float32).astype(dtype)
     ksx, ksy = jax.random.split(jax.random.key(1234), 2)
     x_scale = jax.lax.bitcast_convert_type(
-        jax.random.randint(ksx, (m, 4), 122, 132, dtype=jnp.uint8),
+        jax.random.randint(ksx, (m, k // 32), 122, 132, dtype=jnp.uint8),
         jnp.float8_e8m0fnu
     )
     y_scale = jax.lax.bitcast_convert_type(
-        jax.random.randint(ksy, (n, 4), 122, 132, dtype=jnp.uint8),
+        jax.random.randint(ksy, (n, k // 32), 122, 132, dtype=jnp.uint8),
         jnp.float8_e8m0fnu
     )
     def format_scales(scales):
-      assert scales.shape[0] % 128 == 0 and scales.shape[1] == 4
-      return scales.reshape(-1, 4, 32, 4).swapaxes(1, 2).reshape(-1, 32, 16)
+      mn, k = scales.shape
+      assert mn % 128 == 0 and k % 4 == 0
+      return (
+          scales.reshape(mn // 128, 4, 32, k // 4, 4)
+          .transpose(0, 3, 2, 1, 4)
+          .reshape(mn // 128, k // 4, 32, 16)
+      )
     result = f(x, y, format_scales(x_scale), format_scales(y_scale))
     x_logical_scale = jnp.repeat(x_scale, 32, axis=1).astype(jnp.float32)
     y_logical_scale = jnp.repeat(y_scale, 32, axis=1).astype(jnp.float32)
+    expected = jnp.dot(
+        x.astype(jnp.float32) * x_logical_scale,
+        (y.astype(jnp.float32) * y_logical_scale).T,
+    )
+    np.testing.assert_allclose(result, expected, rtol=1e-3)
+
+  @parameterized.product(
+      m=[256],
+      n=[128, 256],
+      scale_jax_dtype=[jnp.float8_e8m0fnu, jnp.float8_e4m3fn],
+  )
+  def test_collective_scaled_matmul(self, m, n, scale_jax_dtype):
+    self.skip_if_wg_semantics()
+
+    in_jax_dtype = jnp.float4_e2m1fn
+    out_jax_dtype = jnp.float32
+    scale_block = 32 if scale_jax_dtype == jnp.float8_e8m0fnu else 16
+    swizzle = 128
+    k_steps = 2
+    swizzle_elems = 8 * swizzle // dtypes.itemsize_bits(in_jax_dtype)
+    k = swizzle_elems * k_steps
+    tiling = (8, swizzle_elems)
+    transforms = (
+        plgpu.TilingTransform(tiling), plgpu.SwizzleTransform(swizzle)
+    )
+
+    m_block = m // 2
+    n_block = n // 2
+
+    def kernel(lhs_gmem, rhs_gmem, lhs_scales_gmem, rhs_scales_gmem, out_gmem,
+               lhs_smem, rhs_smem, lhs_scales_smem, rhs_scales_smem,
+               tma_barrier, mma_barrier,
+               acc_tmem, lhs_scales_tmem, rhs_scales_tmem):
+      plgpu.copy_gmem_to_smem(lhs_gmem, lhs_smem, tma_barrier,
+                              collective_axes="x", partitioned_axis=0)
+      plgpu.copy_gmem_to_smem(rhs_gmem, rhs_smem, tma_barrier,
+                              collective_axes="x", partitioned_axis=0)
+      plgpu.copy_gmem_to_smem(lhs_scales_gmem, lhs_scales_smem, tma_barrier,
+                              collective_axes="x", partitioned_axis=0)
+      # RHS scales are replicated (multicast)
+      plgpu.copy_gmem_to_smem(rhs_scales_gmem, rhs_scales_smem, tma_barrier,
+                              collective_axes="x", partitioned_axis=None)
+      cluster_idx = lax.axis_index("x")
+
+      @pl.when(cluster_idx == 0)
+      def _leader_block():
+        plgpu.barrier_wait(tma_barrier)
+        plgpu.async_copy_scales_to_tmem(lhs_scales_smem, lhs_scales_tmem, collective_axis="x")
+        plgpu.async_copy_scales_to_tmem(rhs_scales_smem, rhs_scales_tmem, collective_axis="x")
+        plgpu.tcgen05_mma(
+            acc_tmem,
+            lhs_smem,
+            plgpu.transpose_ref(rhs_smem, (1, 0)),
+            mma_barrier,
+            a_scale=lhs_scales_tmem,
+            b_scale=rhs_scales_tmem,
+            accumulate=False,
+            collective_axis="x"
+        )
+      plgpu.barrier_wait(mma_barrier)
+
+      slice_out = pl.ds(cluster_idx * m_block, m_block)
+      out_gmem[slice_out, :] = plgpu.async_load_tmem(acc_tmem)
+
+    scratch_shapes = [
+        plgpu.SMEM((m_block, k), in_jax_dtype, transforms=transforms),
+        plgpu.SMEM((n_block, k), in_jax_dtype, transforms=transforms),
+        plgpu.SMEM((m_block // 128, k // (scale_block * 4), 32, 16), scale_jax_dtype),
+        plgpu.SMEM((n // 128, k // (scale_block * 4), 32, 16), scale_jax_dtype),
+        plgpu.Barrier(num_arrivals=4),
+        plgpu.Barrier(orders_tensor_core=True),
+        plgpu.TMEM((m_block, n), out_jax_dtype, collective=True),
+        plgpu.TMEM((m_block, k // scale_block), scale_jax_dtype,
+                   layout=plgpu.TMEMLayout.SCALES_LAYOUT, collective=True),
+        plgpu.TMEM((n, k // scale_block), scale_jax_dtype,
+                   layout=plgpu.TMEMLayout.SCALES_LAYOUT, collective=True),
+    ]
+
+    f = self.kernel(
+        kernel,
+        out_shape=jax.ShapeDtypeStruct((m, n), out_jax_dtype),
+        grid=(1,),
+        grid_names=("_",),
+        cluster=(2,),
+        cluster_names=("x",),
+        scratch_shapes=scratch_shapes,
+    )
+
+    x = jax.random.uniform(jax.random.key(1), shape=(m, k), dtype=jnp.float32).astype(in_jax_dtype)
+    y = jax.random.uniform(jax.random.key(2), shape=(n, k), dtype=jnp.float32).astype(in_jax_dtype)
+
+    ka, kb = jax.random.split(jax.random.key(1234), 2)
+    if scale_jax_dtype == jnp.float8_e8m0fnu:
+      x_scale = jax.lax.bitcast_convert_type(
+          jax.random.randint(ka, (m, k // scale_block), 122, 132, dtype=jnp.uint8),
+          scale_jax_dtype
+      )
+      y_scale = jax.lax.bitcast_convert_type(
+          jax.random.randint(kb, (n, k // scale_block), 122, 132, dtype=jnp.uint8),
+          scale_jax_dtype
+      )
+    else:
+      x_scale = jnp.abs(
+          jax.random.normal(ka, (m, k // scale_block), dtype=jnp.float32).astype(scale_jax_dtype)
+      )
+      y_scale = jnp.abs(
+          jax.random.normal(kb, (n, k // scale_block), dtype=jnp.float32).astype(scale_jax_dtype)
+      )
+
+    def format_scales(scales):
+      mn, k = scales.shape
+      assert mn % 128 == 0 and k % 4 == 0
+      return (
+          scales.reshape(mn // 128, 4, 32, k // 4, 4)
+          .transpose(0, 3, 2, 1, 4)
+          .reshape(mn // 128, k // 4, 32, 16)
+      )
+
+    result = f(x, y, format_scales(x_scale), format_scales(y_scale))
+
+    x_logical_scale = jnp.repeat(x_scale, scale_block, axis=1).astype(jnp.float32)
+    y_logical_scale = jnp.repeat(y_scale, scale_block, axis=1).astype(jnp.float32)
     expected = jnp.dot(
         x.astype(jnp.float32) * x_logical_scale,
         (y.astype(jnp.float32) * y_logical_scale).T,
@@ -3551,12 +4117,11 @@ class PallasCallSm100ATest(PallasSm100ATest):
       (128, jnp.float16)
   )
   def test_manual_tcgen05_commit_arrive(self, swizzle, dtype):
-    self.skip_if_wg_semantics()
     shape = (128, 128)
     transforms = self.default_transforms(swizzle=swizzle, dtype=dtype)
 
     def kernel(a_gmem, b_gmem, out_gmem,
-        a_smem, b_smem, out_smem, tma_barrier, mma_barrier, acc_tmem):
+        a_smem, b_smem, tma_barrier, mma_barrier, acc_tmem):
       plgpu.copy_gmem_to_smem(a_gmem, a_smem, tma_barrier)
       plgpu.barrier_wait(tma_barrier)
       plgpu.copy_gmem_to_smem(b_gmem, b_smem, tma_barrier)
@@ -3571,10 +4136,7 @@ class PallasCallSm100ATest(PallasSm100ATest):
       plgpu.tcgen05_commit_arrive(mma_barrier)
       plgpu.barrier_wait(mma_barrier)
       # We don't await the load because acc_tmem is never modified again.
-      out_smem[...] = plgpu.async_load_tmem(acc_tmem).astype(dtype)
-      plgpu.commit_smem()
-      plgpu.copy_smem_to_gmem(out_smem, out_gmem)
-      plgpu.wait_smem_to_gmem(0)
+      out_gmem[...] = plgpu.async_load_tmem(acc_tmem).astype(dtype)
 
     f = self.kernel(
         kernel,
@@ -3582,7 +4144,6 @@ class PallasCallSm100ATest(PallasSm100ATest):
         scratch_shapes=[
           plgpu.SMEM(shape, dtype, transforms=transforms),  # a_smem
           plgpu.SMEM(shape, dtype, transforms=transforms),  # b_smem
-          plgpu.SMEM(shape, dtype, transforms=transforms),  # out_smem
           plgpu.Barrier(),  # tma_barrier
           plgpu.Barrier(orders_tensor_core=True),  # mma_barrier
           plgpu.TMEM((128, 128), jnp.float32),  # acc
@@ -3594,7 +4155,6 @@ class PallasCallSm100ATest(PallasSm100ATest):
     np.testing.assert_allclose(result, x @ y, rtol=1e-3)
 
   def test_matmul_with_sliced_accumulator(self):
-    self.skip_if_wg_semantics()
     dtype = jnp.bfloat16
     shape = (128, 128)
     tmem_shape = (128, 2 * 128)
@@ -3603,7 +4163,7 @@ class PallasCallSm100ATest(PallasSm100ATest):
     # Test a matmul with a single block.
     transforms = self.default_transforms(swizzle=swizzle, dtype=dtype)
 
-    def kernel(a_smem, b_smem, out_ref, acc_tmem, scratch_smem, barrier_ref):
+    def kernel(a_smem, b_smem, out_ref, acc_tmem, barrier_ref):
       acc_tmem_slice = acc_tmem.at[slice(None), pl.dslice(0, 128)]
       plgpu.tcgen05_mma(acc_tmem_slice,
                         a_smem,
@@ -3612,14 +4172,10 @@ class PallasCallSm100ATest(PallasSm100ATest):
                         accumulate=False)
       plgpu.barrier_wait(barrier_ref)
       # We don't await the load because acc_tmem is never modified again.
-      scratch_smem[...] = plgpu.async_load_tmem(acc_tmem_slice).astype(dtype)
-      plgpu.commit_smem()
-      plgpu.copy_smem_to_gmem(scratch_smem, out_ref)
-      plgpu.wait_smem_to_gmem(0)
+      out_ref[...] = plgpu.async_load_tmem(acc_tmem_slice).astype(dtype)
 
     scratch_shapes = [
         plgpu.TMEM(tmem_shape, jnp.float32, packed=False),
-        plgpu.SMEM(shape, dtype, transforms=transforms),
         plgpu.Barrier(orders_tensor_core=True),
     ]
 
@@ -3652,7 +4208,6 @@ class PallasCallSm100ATest(PallasSm100ATest):
       lhs_tmem=[False, True],
   )
   def test_simple_collective_matmul(self, m_n_k, swizzle, dtype, lhs_tmem):
-    self.skip_if_wg_semantics()
     m, n, k = m_n_k
     if (n // 2) * jnp.dtype(dtype).itemsize < swizzle:
       self.skipTest("swizzle too big")
@@ -3668,7 +4223,7 @@ class PallasCallSm100ATest(PallasSm100ATest):
       self.skipTest("m=128 not supported for LHS in TMEM")
 
     def kernel(a_gmem, b_gmem, out_gmem, a_smem, b_smem,
-               scratch_smem, acc_tmem, tma_barrier, mma_barrier,
+               acc_tmem, tma_barrier, mma_barrier,
                cluster_barrier, lhs_tmem_ref):
       cluster_idx = lax.axis_index("x")
       slice_lhs = pl.ds(cluster_idx * block_lhs_shape[0], block_lhs_shape[0])
@@ -3703,15 +4258,11 @@ class PallasCallSm100ATest(PallasSm100ATest):
       else:
         layout = plgpu.Layout.TCGEN05
       # We don't await the load because acc_tmem is never modified again.
-      scratch_smem[...] = plgpu.async_load_tmem(acc_tmem, layout=layout).astype(dtype)
-      plgpu.commit_smem()
-      plgpu.copy_smem_to_gmem(scratch_smem, out_gmem.at[slice_lhs, :])
-      plgpu.wait_smem_to_gmem(0)
+      out_gmem[slice_lhs, :] = plgpu.async_load_tmem(acc_tmem, layout=layout).astype(dtype)
 
     scratch_shapes = [
         plgpu.SMEM(block_lhs_shape, dtype, transforms=transforms),
         plgpu.SMEM(block_rhs_shape, dtype, transforms=transforms),
-        plgpu.SMEM(block_acc_shape, dtype, transforms=transforms),
         plgpu.TMEM(block_acc_shape, jnp.float32, collective=True),
         plgpu.Barrier(),
         plgpu.Barrier(orders_tensor_core=True),
@@ -3750,7 +4301,7 @@ class PallasCallSm100ATest(PallasSm100ATest):
     transforms = self.default_transforms(swizzle=swizzle, dtype=dtype)
 
     def kernel(a_gmem, b_gmem, out_gmem128, out_gmem64,
-        a_aliased, b_aliased, out_smem, tma_barrier, mma_barrier, acc_tmem):
+        a_aliased, b_aliased, tma_barrier, mma_barrier, acc_tmem):
       # Note: We directly copy into 128-sized refs assuming that both aliased
       # refs point to the same address, so we can skip the copy for
       # the 64-sized ref. We transpose the LHS Ref so that the 64-sized Ref
@@ -3771,10 +4322,7 @@ class PallasCallSm100ATest(PallasSm100ATest):
                         mma_barrier,
                         accumulate=False)
       plgpu.barrier_wait(mma_barrier)
-      out_smem[...] = plgpu.async_load_tmem(acc_tmem).astype(dtype)
-      plgpu.commit_smem()
-      plgpu.copy_smem_to_gmem(out_smem, out_gmem128)
-      plgpu.wait_smem_to_gmem(0)
+      out_gmem128[...] = plgpu.async_load_tmem(acc_tmem).astype(dtype)
 
       # Do 128x64 @ 64x128 matmul
       plgpu.wait_load_tmem()  # Make sure the loads are complete
@@ -3784,10 +4332,7 @@ class PallasCallSm100ATest(PallasSm100ATest):
                         mma_barrier,
                         accumulate=False)
       plgpu.barrier_wait(mma_barrier)
-      out_smem[...] = plgpu.async_load_tmem(acc_tmem).astype(dtype)
-      plgpu.commit_smem()
-      plgpu.copy_smem_to_gmem(out_smem, out_gmem64)
-      plgpu.wait_smem_to_gmem(0)
+      out_gmem64[...] = plgpu.async_load_tmem(acc_tmem).astype(dtype)
 
     f = self.kernel(
         kernel,
@@ -3802,7 +4347,6 @@ class PallasCallSm100ATest(PallasSm100ATest):
             plgpu.SMEM(shape, dtype, transforms=transforms),
             plgpu.SMEM((64, 128), dtype, transforms=transforms),
           ),
-          plgpu.SMEM(shape, dtype, transforms=transforms),  # out_smem
           plgpu.Barrier(),  # tma_barrier
           plgpu.Barrier(orders_tensor_core=True),  # mma_barrier
           plgpu.TMEM(shape, jnp.float32),  # acc
@@ -3829,12 +4373,12 @@ class PallasCallSm100ATest(PallasSm100ATest):
     )
 
     def kernel(a_gmem, b_gmem, out_gmem128, out_gmem64,
-        a_smem, b_smem, out_smem, tma_barrier, mma_barrier, aliased_refs):
+        a_smem, b_smem, tma_barrier, mma_barrier, aliased_refs):
       plgpu.copy_gmem_to_smem(a_gmem, a_smem, tma_barrier)
       plgpu.barrier_wait(tma_barrier)
       plgpu.copy_gmem_to_smem(b_gmem, b_smem, tma_barrier)
       plgpu.barrier_wait(tma_barrier)
-      acc_128, lhs_128, lhs_64, acc_64, _ = aliased_refs
+      [acc_128, lhs_128], [lhs_64, acc_64], _ = aliased_refs
 
       # Do 128x128 @ 128x128 matmul
       plgpu.async_store_tmem(lhs_128, plgpu.load(a_smem, (), layout=plgpu.Layout.TCGEN05))
@@ -3845,10 +4389,7 @@ class PallasCallSm100ATest(PallasSm100ATest):
                         mma_barrier,
                         accumulate=False)
       plgpu.barrier_wait(mma_barrier)
-      out_smem[...] = plgpu.async_load_tmem(acc_128).astype(dtype)
-      plgpu.commit_smem()
-      plgpu.copy_smem_to_gmem(out_smem, out_gmem128)
-      plgpu.wait_smem_to_gmem(0)
+      out_gmem128[...] = plgpu.async_load_tmem(acc_128).astype(dtype)
 
       # Do 128x64 @ 64x128 matmul
       plgpu.wait_load_tmem()  # Make sure the loads have completed
@@ -3864,28 +4405,30 @@ class PallasCallSm100ATest(PallasSm100ATest):
                         accumulate=False)
       plgpu.barrier_wait(mma_barrier)
       # We don't await the load because TMEM is never modified again.
-      out_smem[...] = plgpu.async_load_tmem(acc_64).astype(dtype)
-      plgpu.commit_smem()
-      plgpu.copy_smem_to_gmem(out_smem, out_gmem64)
-      plgpu.wait_smem_to_gmem(0)
+      out_gmem64[...] = plgpu.async_load_tmem(acc_64).astype(dtype)
 
     f = self.kernel(
         kernel,
-        out_shape=[jax.ShapeDtypeStruct(shape, dtype),
-                   jax.ShapeDtypeStruct(shape, dtype)],
+        out_shape=[
+            jax.ShapeDtypeStruct(shape, dtype),
+            jax.ShapeDtypeStruct(shape, dtype),
+        ],
         scratch_shapes=[
-          plgpu.SMEM(shape, dtype, transforms=transforms),  # a_smem
-          plgpu.SMEM(shape, dtype, transforms=transforms),  # b_smem
-          plgpu.SMEM(shape, dtype, transforms=transforms),  # out_smem
-          plgpu.Barrier(),  # tma_barrier
-          plgpu.Barrier(orders_tensor_core=True),  # mma_barrier
-          plgpu.RefUnion(   # aliased_refs
-            [plgpu.TMEM((128, 128), jnp.float32), # acc
-              plgpu.TMEM((128, 128), dtype, packed=True)],  # lhs
-            [plgpu.TMEM((128, 64), dtype, packed=True),  # lhs
-             plgpu.TMEM((128, 128), jnp.float32)],  # acc
-             plgpu.TMEM((128, 128), jnp.float32)  # unused
-          ),
+            plgpu.SMEM(shape, dtype, transforms=transforms),  # a_smem
+            plgpu.SMEM(shape, dtype, transforms=transforms),  # b_smem
+            plgpu.Barrier(),  # tma_barrier
+            plgpu.Barrier(orders_tensor_core=True),  # mma_barrier
+            plgpu.RefUnion(  # aliased_refs
+                [
+                    plgpu.TMEM((128, 128), jnp.float32),  # acc
+                    plgpu.TMEM((128, 128), dtype, packed=True),  # lhs
+                ],
+                [
+                    plgpu.TMEM((128, 64), dtype, packed=True),  # lhs
+                    plgpu.TMEM((128, 128), jnp.float32),  # acc
+                ],
+                plgpu.TMEM((128, 128), jnp.float32),  # unused
+            ),
         ],
     )
     x = jax.random.uniform(jax.random.key(0), shape=shape, dtype=dtype)
@@ -3898,10 +4441,9 @@ class PallasCallSm100ATest(PallasSm100ATest):
   def test_mma_barrier_indexing(
       self, barrier_index, shape=(128, 128), swizzle=128, dtype=jnp.float16
   ):
-    self.skip_if_wg_semantics()
     transforms = self.default_transforms(swizzle=swizzle, dtype=dtype)
 
-    def kernel(a_smem, b_smem, out_ref, acc_tmem, scratch_smem, barrier_ref):
+    def kernel(a_smem, b_smem, out_ref, acc_tmem, barrier_ref):
       plgpu.tcgen05_mma(
           acc_tmem,
           a_smem,
@@ -3910,14 +4452,10 @@ class PallasCallSm100ATest(PallasSm100ATest):
           accumulate=False,
       )
       plgpu.barrier_wait(barrier_ref.at[barrier_index])
-      scratch_smem[...] = plgpu.async_load_tmem(acc_tmem).astype(dtype)
-      plgpu.commit_smem()
-      plgpu.copy_smem_to_gmem(scratch_smem, out_ref)
-      plgpu.wait_smem_to_gmem(0)
+      out_ref[...] = plgpu.async_load_tmem(acc_tmem).astype(dtype)
 
     scratch_shapes = [
         plgpu.TMEM(shape, jnp.float32, packed=False),
-        plgpu.SMEM(shape, dtype, transforms=transforms),
         plgpu.Barrier(num_barriers=2, orders_tensor_core=True),
     ]
     f = self.pallas_call(
@@ -3951,7 +4489,7 @@ class PallasCallSm100ATest(PallasSm100ATest):
     b = jax.random.uniform(
         jax.random.key(1), shape=block_size, dtype=jnp.float32)
     def kernel(a_gmem, b_gmem, out_gmem,
-              a_smem, b_smem, out_smem,
+              a_smem, b_smem,
               a_tma_barrier, b_tma_barrier, cluster_barrier):
       if squeezed_index:
         a_gmem = a_gmem.at[0]
@@ -4000,9 +4538,7 @@ class PallasCallSm100ATest(PallasSm100ATest):
         plgpu.barrier_wait(b_tma_barrier)
       plgpu.barrier_arrive(cluster_barrier)
       plgpu.barrier_wait(cluster_barrier)
-      out_smem[...] = a_smem[...] + b_smem[...]
-      plgpu.copy_smem_to_gmem(out_smem, out_gmem.at[out_slice])
-      plgpu.wait_smem_to_gmem(0)
+      out_gmem[out_slice] = a_smem[...] + b_smem[...]
     f = self.kernel(
         kernel,
         out_shape=jax.ShapeDtypeStruct(block_size, jnp.float32),
@@ -4011,7 +4547,6 @@ class PallasCallSm100ATest(PallasSm100ATest):
         cluster_names=("x",),
         cluster=(2,),
         scratch_shapes=(  # type: ignore
-            plgpu.SMEM(partitioned_block_size, jnp.float32),
             plgpu.SMEM(partitioned_block_size, jnp.float32),
             plgpu.SMEM(partitioned_block_size, jnp.float32),
             plgpu.Barrier(num_arrivals=1),
@@ -4025,7 +4560,6 @@ class PallasCallSm100ATest(PallasSm100ATest):
     np.testing.assert_array_equal(result, a + b)
 
   def test_arrive_wait_on_tc_barrier(self):
-    self.skip_if_wg_semantics()
     def kernel(out_ref, barrier):
       plgpu.barrier_arrive(barrier)
       plgpu.barrier_wait(barrier)
@@ -4322,7 +4856,7 @@ class PipelineTest(PallasTest):
   def test_emit_with_no_output(self):
     m, n = 16, 128
 
-    def kernel(x_gmem, o_gmem, o_smem):
+    def kernel(x_gmem, o_gmem):
       def acc_scope(acc_ref):
         acc_ref[...] = jnp.zeros_like(acc_ref)
         def body(_, x_smem):
@@ -4338,9 +4872,7 @@ class PipelineTest(PallasTest):
 
       acc = pl.run_scoped(acc_scope, plgpu.SMEM((1, n), dtype=jnp.float32))
 
-      o_smem[...] = acc[...]
-      plgpu.commit_smem()
-      plgpu.copy_smem_to_gmem(o_smem, o_gmem)
+      o_gmem[...] = acc[...]
 
     dtype = jnp.float32
     x = jax.random.uniform(jax.random.key(0), (m, n)).astype(dtype)
@@ -4348,7 +4880,6 @@ class PipelineTest(PallasTest):
     kernel_fn = self.kernel(
         kernel,
         out_shape=jax.ShapeDtypeStruct((1, n), dtype),
-        scratch_shapes=[plgpu.SMEM((1, n), dtype)],
     )
 
     np.testing.assert_allclose(kernel_fn(x), x.sum(0, keepdims=True), rtol=1e-6)
@@ -4381,6 +4912,32 @@ class PipelineTest(PallasTest):
     )
     y = x + 1.0
     np.testing.assert_array_equal(kernel_fn(x), y)
+
+  def test_emit_with_dynamic_grid_smaller_than_concurrent_steps(self):
+    block_x = 128
+    x = jax.random.randint(jax.random.key(1234), (block_x,),
+                           minval=-128, maxval=128, dtype=jnp.int32)
+
+    def body(num_blocks_gmem, x_gmem, o_gmem):
+      num_blocks = num_blocks_gmem[...]
+      def pipeline_body(_, x_smem, o_smem):
+        o_smem[...] = x_smem[...]
+      for _ in range(2):
+        plgpu.emit_pipeline(
+            pipeline_body,
+            grid=(num_blocks,),
+            in_specs=[plgpu.BlockSpec((block_x,), lambda i: (i,))],
+            out_specs=[plgpu.BlockSpec((block_x,), lambda i: (i,))],
+            max_concurrent_steps=2,
+        )(x_gmem, o_gmem)
+
+    # The test only intends to check that this does not crash/hang.
+    plgpu.kernel(
+        body,
+        out_shape=jax.ShapeDtypeStruct((block_x,), jnp.int32),
+        grid=(1,),
+        grid_names=("blocks",)
+    )(0, x).block_until_ready()
 
   @parameterized.product(static=[False, True], short=[False, True])
   def test_emit_with_2d_grid(self, static, short):
@@ -4440,6 +4997,35 @@ class PipelineTest(PallasTest):
         kernel_fn(), jnp.tile(jnp.repeat(jnp.arange(num_steps), 64), (64, 1))
     )
 
+  @parameterized.parameters((pl.Squeezed(),), (None,))
+  def test_emit_with_squeezed_dim(self, squeezed_dim):
+
+    shape = (16, 256)
+    num_steps = shape[0]
+
+    def kernel(x_gmem, o_gmem):
+      plgpu.emit_pipeline(
+          kernel_body,
+          in_specs=[pl.BlockSpec((squeezed_dim, shape[1]), lambda i: (i, 0))],
+          out_specs=[pl.BlockSpec((squeezed_dim, shape[1]), lambda i: (i, 0))],
+          grid=(num_steps,),
+          max_concurrent_steps=2,
+      )(x_gmem, o_gmem)
+
+    def kernel_body(_, in_smem, o_smem):
+      assert in_smem.shape == (shape[1],)
+      assert o_smem.shape == (shape[1],)
+      o_smem[...] = in_smem[...] + 1
+
+    kernel_fn = self.pallas_call(
+        kernel,
+        in_specs=[pl.BlockSpec(memory_space=plgpu.GMEM)],
+        out_specs=pl.BlockSpec(memory_space=plgpu.GMEM),
+        out_shape=jax.ShapeDtypeStruct((16, 256), jnp.int32),
+    )
+    x = jnp.arange(16 * 256, dtype=jnp.int32).reshape(16, 256)
+    np.testing.assert_array_equal(kernel_fn(x), x + 1)
+
 
 class PipelineWGTest(
     PipelineTest, lowering_semantics=plgpu.LoweringSemantics.Warpgroup
@@ -4450,8 +5036,6 @@ class PipelineWGTest(
 class PipelineSm90ATest(PallasSm90ATest):
 
   def test_realistic_matmul(self):
-    self.skip_if_wg_semantics()  # Needs WGMMA to support slices.
-
     dtype = jnp.float16
     swizzle = 128
     elems_128b = swizzle // jnp.dtype(dtype).itemsize
@@ -4586,8 +5170,6 @@ class WarpSpecializedPipelineTest(PallasTest):
   @jtu.skip_if_mosaic_gpu_exceeds_shared_memory(device_patterns="RTX PRO 6000 Blackwell")
   def test_elementwise_add(self, m, n, num_compute_wgs, static,
                            manual_consumed_barriers, in_tree_template):
-    self.skip_if_wg_semantics()  # Crashes!
-
     blk_m = blk_n = 64
     if m % (num_compute_wgs * blk_m):
       self.skipTest(f"{m=} must be divisible by {num_compute_wgs=} * {blk_m=}")
@@ -4764,7 +5346,6 @@ class WarpSpecializedPipelineTest(PallasTest):
     np.testing.assert_allclose(kernel(x, y), x + y, atol=1e-4)
 
   def test_different_delay_release(self):
-    self.skip_if_wg_semantics()  # Crashes!
     m, n = 128, 64
     blk_m, blk_n = 32, 32
     in_specs = [
@@ -4844,8 +5425,6 @@ class WarpSpecializedPipelineTest(PallasTest):
 
   @parameterized.parameters((False,), (True,))
   def test_stationary_input(self, flip):
-    self.skip_if_wg_semantics()
-
     m = n = 256
     blk_m = blk_n = 64
 
@@ -4956,7 +5535,6 @@ class WarpSpecializedPipelineTest(PallasTest):
 
   @parameterized.product(manual_consumed_barriers=[False, True])
   def test_pipelined_pipeline(self, manual_consumed_barriers):
-    self.skip_if_wg_semantics()  # Times out!
     m = n = 512
 
     x = jax.random.randint(jax.random.key(0), (m, n), -10, 15, dtype=jnp.int32)
@@ -5089,7 +5667,6 @@ class WarpSpecializedPipelineTest(PallasTest):
 
   @jtu.thread_unsafe_test()  # Modifies ``os.environ``.
   def test_collective(self):
-    self.skip_if_wg_semantics()  # Doesn't lower to collective copies.
     num_steps = 4
 
     def kernel(x_gmem, o_gmem):
@@ -5132,6 +5709,35 @@ class WarpSpecializedPipelineTest(PallasTest):
         ptx(),
     )
     np.testing.assert_array_equal(y, np.stack([x + 1.0, x + 1.0]))
+
+  @parameterized.parameters((pl.Squeezed(),), (None,))
+  def test_emit_with_squeezed_dim(self, squeezed_dim):
+    shape = (16, 256)
+    num_steps = shape[0]
+
+    def kernel(x_gmem, o_gmem):
+      plgpu.emit_pipeline_warp_specialized(
+          kernel_body,
+          in_specs=[pl.BlockSpec((squeezed_dim, shape[1]), lambda i: (i, 0))],
+          out_specs=[pl.BlockSpec((squeezed_dim, shape[1]), lambda i: (i, 0))],
+          grid=(num_steps,),
+          max_concurrent_steps=2,
+          num_compute_wgs=1,
+          memory_registers=40,
+          wg_axis="wg",
+      )(x_gmem, o_gmem)
+
+    def kernel_body(_, in_smem, o_smem):
+      o_smem[...] = in_smem[...] + 1
+
+    kernel_fn = self.kernel(
+        kernel,
+        out_shape=jax.ShapeDtypeStruct((16, 256), jnp.int32),
+        num_threads=2,
+        thread_name="wg",
+    )
+    x = jnp.arange(16 * 256, dtype=jnp.int32).reshape(16, 256)
+    np.testing.assert_array_equal(kernel_fn(x), x + 1)
 
 
 class WarpSpecializedPipelineWGTest(
@@ -5219,8 +5825,6 @@ class CoreMapTest(PallasTest, jtu.CudaArchSpecificTest):
     np.testing.assert_array_equal(result, ref)
 
   def test_cross_wg_barrier(self):
-    self.skip_if_wg_semantics()  # Times out!
-
     @functools.partial(
         self.kernel,
         out_shape=jnp.zeros((2, 128), np.int32),
@@ -5240,8 +5844,6 @@ class CoreMapTest(PallasTest, jtu.CudaArchSpecificTest):
     )
 
   def test_cluster(self):
-    self.skip_if_wg_semantics()  # Needs debug_print in the MGPU dialect.
-
     @functools.partial(
         self.kernel,
         out_shape=jnp.zeros(128, np.int32),
@@ -5270,7 +5872,6 @@ class CoreMapTest(PallasTest, jtu.CudaArchSpecificTest):
     )
 
   def test_realistic_matmul_with_cluster(self):
-    self.skip_if_wg_semantics()  # Needs WGMMA to support slices.
     self.skip_unless_sm90a()  # Requires WGMMA.
 
     dtype = jnp.float16
@@ -5661,18 +6262,16 @@ class SemaphoreTest(PallasTest):
     # We signal from block 0 and wait on block 1 to test whether the semaphore
     # is globally shared.
     def body(out_ref):
-      @functools.partial(pl.run_scoped,
-                         sem_ref=plgpu.SemaphoreType.REGULAR,
-                         collective_axes="x")
-      def _scoped(sem_ref):
-        block_id = lax.axis_index("x")
-        @pl.when(block_id == 0)
-        def _():
-          pl.semaphore_signal(sem_ref)
-        @pl.when(block_id == 1)
-        def _():
-          pl.semaphore_wait(sem_ref)
-          out_ref[...] = jnp.ones_like(out_ref)
+      sem_ref = pl.get_global(plgpu.SemaphoreType.REGULAR)
+      block_id = lax.axis_index("x")
+      @pl.when(block_id == 0)
+      def _():
+        pl.semaphore_signal(sem_ref)
+      @pl.when(block_id == 1)
+      def _():
+        pl.semaphore_wait(sem_ref)
+        out_ref[...] = jnp.ones_like(out_ref)
+
     kernel = self.kernel(
         body,
         out_shape=jax.ShapeDtypeStruct((128,), jnp.float32),
@@ -5684,18 +6283,16 @@ class SemaphoreTest(PallasTest):
 
   def test_global_semaphore_with_multiple_threads(self):
     def body(out_ref):
-      @functools.partial(pl.run_scoped,
-                         sem_ref=plgpu.SemaphoreType.REGULAR,
-                         collective_axes=("x", "wg"))
-      def _scoped(sem_ref):
-        block_id = lax.axis_index("x")
-        @pl.when(block_id == 0)
-        def _():
-          pl.semaphore_signal(sem_ref)
-        @pl.when(block_id == 1)
-        def _():
-          pl.semaphore_wait(sem_ref)
-          out_ref[...] = jnp.ones_like(out_ref)
+      sem_ref = pl.get_global(plgpu.SemaphoreType.REGULAR)
+      block_id = lax.axis_index("x")
+      @pl.when(block_id == 0)
+      def _():
+        pl.semaphore_signal(sem_ref)
+      @pl.when(block_id == 1)
+      def _():
+        pl.semaphore_wait(sem_ref)
+        out_ref[...] = jnp.ones_like(out_ref)
+
     kernel = self.kernel(
         body,
         out_shape=jax.ShapeDtypeStruct((128,), jnp.float32),
@@ -5707,27 +6304,82 @@ class SemaphoreTest(PallasTest):
     result = kernel()
     np.testing.assert_array_equal(result, jnp.ones((128,), jnp.float32))
 
+  def test_multiple_get_global_semaphores(self):
+    def body(out_ref):
+      sem1 = pl.get_global(plgpu.SemaphoreType.REGULAR)
+      sem2 = pl.get_global(plgpu.SemaphoreType.REGULAR)
+      block_id = lax.axis_index("x")
+      @pl.when(block_id == 0)
+      def _():
+        pl.semaphore_signal(sem1, inc=5)
+        pl.semaphore_signal(sem2, inc=10)
+      @pl.when(block_id == 1)
+      def _():
+        pl.semaphore_wait(sem1, value=5, decrement=False)
+        pl.semaphore_wait(sem2, value=10, decrement=False)
+        val1 = pl.semaphore_read(sem1)
+        val2 = pl.semaphore_read(sem2)
+        out_ref[0] = val1
+        out_ref[1] = val2
+
+    kernel = self.kernel(
+        body,
+        out_shape=jax.ShapeDtypeStruct((2,), jnp.int32),
+        grid=(10,),
+        grid_names=("x",),
+    )
+    result = kernel()
+    np.testing.assert_array_equal(result, jnp.array([5, 10], jnp.int32))
+
+  def test_get_global_in_and_outside_control_flow(self):
+    def body(out_ref):
+      sem_before = pl.get_global(plgpu.SemaphoreType.REGULAR)
+      block_id = lax.axis_index("x")
+
+      @pl.when(block_id == 0)
+      def _():
+        sem_inside = pl.get_global(plgpu.SemaphoreType.REGULAR)
+        pl.semaphore_signal(sem_inside, 7)
+        pl.semaphore_signal(sem_before, 3)
+        val_inside = pl.semaphore_read(sem_inside)
+        out_ref[1] = val_inside
+
+      sem_after = pl.get_global(plgpu.SemaphoreType.REGULAR)
+      pl.semaphore_signal(sem_after, 11)
+      val_before = pl.semaphore_read(sem_before)
+      val_after = pl.semaphore_read(sem_after)
+      out_ref[0] = val_before
+      out_ref[2] = val_after
+
+    kernel = self.kernel(
+        body,
+        out_shape=jax.ShapeDtypeStruct((3,), jnp.int32),
+        grid=(1,),
+        grid_names=("x",),
+    )
+    result = kernel()
+    np.testing.assert_array_equal(result, jnp.array([3, 7, 11], jnp.int32))
+
   def test_multiple_semaphore_scopes(self):
     def body(out_ref):
-      # Allocate a global-scoped semaphore.
-      @functools.partial(pl.run_scoped,
-                         global_sem=plgpu.SemaphoreType.REGULAR,
-                         collective_axes="x")
-      def _scope1(global_sem):
-        # Allocate a block-scoped semaphore.
-        @functools.partial(pl.run_scoped,
-                          block_sem=plgpu.SemaphoreType.REGULAR)
-        def _scope2(block_sem):
-          block_id = lax.axis_index("x")
-          pl.semaphore_signal(block_sem)
-          @pl.when(block_id == 0)
-          def _():
-            pl.semaphore_signal(global_sem)
-          @pl.when(block_id == 1)
-          def _():
-            pl.semaphore_wait(global_sem)
-            out_ref[...] = jnp.ones_like(out_ref)
-          pl.semaphore_wait(block_sem)
+      global_sem = pl.get_global(plgpu.SemaphoreType.REGULAR)
+
+      @functools.partial(pl.run_scoped, block_sem=plgpu.SemaphoreType.REGULAR)
+      def _scope2(block_sem):
+        block_id = lax.axis_index("x")
+        pl.semaphore_signal(block_sem)
+
+        @pl.when(block_id == 0)
+        def _():
+          pl.semaphore_signal(global_sem)
+
+        @pl.when(block_id == 1)
+        def _():
+          pl.semaphore_wait(global_sem)
+          out_ref[...] = jnp.ones_like(out_ref)
+
+        pl.semaphore_wait(block_sem)
+
     kernel = self.kernel(
         body,
         out_shape=jax.ShapeDtypeStruct((128,), jnp.float32),
@@ -5913,6 +6565,10 @@ class HelpersTest(PallasTest):
       def loop_body(loop_info: plgpu.NDLoopInfo):
         out_gmem[*loop_info.index, *cluster_idx] = sm_idx
     out_shape = (*grid, *cluster)
+    max_shared_memory = jax.local_devices()[0].shared_memory_per_block_optin
+    # Mosaic GPU uses some shared memory implicitly, so we can't
+    # explicitly request the full amount.
+    large_amount_of_shared_memory = int(0.9 * max_shared_memory)
     result = self.kernel(body,
                  out_shape=jax.ShapeDtypeStruct(out_shape, jnp.int32),
                  grid=grid,
@@ -5921,7 +6577,8 @@ class HelpersTest(PallasTest):
                  cluster_names=cluster_names,
                  # Allocate a large amount of SMEM to prevent multiple blocks
                  # being scheduled on the same SM.
-                 scratch_shapes=[plgpu.SMEM((200_000,), jnp.int8)],
+                 scratch_shapes=[
+                   plgpu.SMEM((large_amount_of_shared_memory,), jnp.int8)],
                  )()
 
     # Result maps grid_idx -> SM that performed the work.
@@ -5944,53 +6601,37 @@ class HelpersTest(PallasTest):
     sm_count = jax.devices()[0].core_count
     def body(out_gmem, _):
       sm_idx = lax.axis_index("x")
+      global_semaphore = pl.get_global(plgpu.SemaphoreType.REGULAR)
 
-      @functools.partial(pl.run_scoped,
-                         global_semaphore=plgpu.SemaphoreType.REGULAR,
-                         collective_axes="x")
-      def _scoped(global_semaphore):
-        @pl.when(sm_idx == 0)
-        def _steal_loop():
-          def loop_body(loop_info: plgpu.NDLoopInfo, carry: jax.Array):
-            del loop_info
-            return carry + jnp.int32(1)
-          final_carry = plgpu.dynamic_scheduling_loop(
-              ("x",), init_carry=jnp.int32(0))(loop_body)
-          out_gmem[0] = final_carry
-          pl.semaphore_signal(global_semaphore, inc=sm_count)
-        # All SMs wait until SM 0 has finished all blocks.
-        pl.semaphore_wait(global_semaphore)
+      @pl.when(sm_idx == 0)
+      def _steal_loop():
+        def loop_body(loop_info: plgpu.NDLoopInfo, carry: jax.Array):
+          del loop_info
+          return carry + jnp.int32(1)
 
+        final_carry = plgpu.dynamic_scheduling_loop(
+            ("x",), init_carry=jnp.int32(0)
+        )(loop_body)
+        out_gmem[0] = final_carry
+        pl.semaphore_signal(global_semaphore, inc=sm_count)
+
+      # All SMs wait until SM 0 has finished all blocks.
+      pl.semaphore_wait(global_semaphore)
+
+    max_shared_memory = jax.local_devices()[0].shared_memory_per_block_optin
+    # Mosaic GPU uses some shared memory implicitly, so we can't
+    # explicitly request the full amount.
+    large_amount_of_shared_memory = int(0.9 * max_shared_memory)
     result = self.kernel(body,
                  out_shape=jax.ShapeDtypeStruct((1,), jnp.int32),
                  grid=(sm_count + blocks_to_steal,),
                  grid_names=("x",),
                  # Allocate a large amount of SMEM to prevent multiple blocks
                  # being scheduled on the same SM.
-                 scratch_shapes=[plgpu.SMEM((200_000,), jnp.int8)],
+                 scratch_shapes=[
+                   plgpu.SMEM((large_amount_of_shared_memory,), jnp.int8)],
                  )()
     self.assertEqual(result[0], blocks_to_steal + 1)
-
-
-# TODO(mattjj): enable when we update pallas_call to handle the new types
-# class PinnedBuffersTest(PallasTest):
-
-#   @config.refs_to_pins(True)
-#   def test_basic(self):
-#     @jax.jit
-#     def f(x):
-#       x_ref = jax.new_ref(x)  # lowers to pin
-#       mesh = plgpu.Mesh(grid=(1,), grid_names=('x',))
-
-#       @pl.core_map(mesh)
-#       def kernel_body():
-#         x_ref[...] += 1
-
-#       return jax.ref.freeze(x_ref)  # lowers to unpin
-
-#     x = jnp.arange(32, dtype='float32')
-#     y = f(x)
-#     self.assertAllClose(y, x + 1)
 
 
 if __name__ == "__main__":

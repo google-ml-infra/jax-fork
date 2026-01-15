@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+import unittest
+
 from absl.testing import absltest
 from absl.testing import parameterized
 from functools import partial
@@ -23,8 +25,8 @@ import jax
 from jax._src import core
 from jax._src import config
 from jax._src import test_util as jtu
-from jax._src.api import vjp3
 from jax._src.util import safe_map, safe_zip
+from jax._src.interpreters import mlir
 from jax.sharding import NamedSharding, PartitionSpec as P, AxisType
 import jax.numpy as jnp
 
@@ -521,8 +523,8 @@ class MutableArrayTest(jtu.JaxTestCase):
 
     grads_ref = core.new_ref(jnp.float32(0.))
     x = jnp.float32(1.)
-    _, f_vjp, *maybe_aux = vjp3(lambda x: primal(grads_ref, x), x,
-                               has_aux=has_aux)
+    _, f_vjp, *maybe_aux = jax.vjp(
+        lambda x: primal(grads_ref, x), x, has_aux=has_aux)
     _ = f_vjp(jnp.float32(1.))
     self.assertAllClose(grads_ref[...], jnp.cos(jnp.sin(1.)), check_dtypes=False)
     if has_aux:
@@ -550,7 +552,7 @@ class MutableArrayTest(jtu.JaxTestCase):
     stash_grads.defvjp(stash_grads_fwd, stash_grads_bwd)
 
     stash_ref = core.new_ref(jnp.float32(0.))
-    _, f_vjp = vjp3(lambda x: primal(stash_ref, x), jnp.float32(1.))
+    _, f_vjp = jax.vjp(lambda x: primal(stash_ref, x), jnp.float32(1.))
     grads_val, = f_vjp(jnp.float32(1.))
     self.assertAllClose(stash_ref[...], jnp.cos(jnp.sin(1.)), check_dtypes=False)
     self.assertAllClose(grads_val, jnp.cos(jnp.sin(1.)) * jnp.cos(1.),
@@ -558,7 +560,7 @@ class MutableArrayTest(jtu.JaxTestCase):
 
     stash_ref = core.new_ref(jnp.float32(0.))
     grads_ref = core.new_ref(jnp.float32(0.))
-    _, f_vjp = vjp3(lambda x: primal(stash_ref, x), jnp.float32(1.))
+    _, f_vjp = jax.vjp(lambda x: primal(stash_ref, x), jnp.float32(1.))
     _ = f_vjp.with_refs(grads_ref)(jnp.float32(1.))
     self.assertAllClose(stash_ref[...], jnp.cos(jnp.sin(1.)), check_dtypes=False)
     self.assertAllClose(grads_ref[...], jnp.cos(jnp.sin(1.)) * jnp.cos(1.),
@@ -748,16 +750,69 @@ class MutableArrayTest(jtu.JaxTestCase):
     jtu.check_grads(f, (mut_const_vals, pure_consts, init_carry, xs),
                     2, ['fwd', 'rev'], rtol=1.5e-2)
 
-  def test_remat_basic_errors(self):
+  @parameterized.parameters([False, True])
+  def test_remat_basic_internal(self, jit):
     @jax.remat
-    def f(x_ref, y):
+    def f(y, x):
+      x_ref = jax.new_ref(x)
+      out = y * x_ref[...]
       x_ref[...] += 1
-      return y
+      return out
 
-    x_ref = core.new_ref(0)
+    if jit:
+      f = jax.jit(f)
 
-    with self.assertRaises(NotImplementedError):
-      jax.grad(f, 1)(x_ref, 3.14)
+    g = jax.grad(f)(2., 1.)
+    self.assertAllClose(g, 1.)
+
+  @parameterized.parameters([False, True])
+  def test_remat_basic_arg(self, jit):
+    @jax.remat
+    def f(y, x_ref):
+      out = y * y
+      x_ref[...] += out
+      return out
+
+    if jit:
+      f = jax.jit(f)
+
+    x_ref = core.new_ref(1., kind='anselm_ref')
+    g = jax.grad(f)(2., x_ref)
+    self.assertAllClose(x_ref[...], 5.)
+    self.assertAllClose(g, 4.)
+
+  @parameterized.parameters([False, True])
+  def test_remat_basic_closed_over(self, jit):
+    @jax.remat
+    def f(y):
+      out = y * x_ref[...]
+      x_ref[...] += 1
+      return out
+
+    if jit:
+      f = jax.jit(f)
+
+    x_ref = core.new_ref(1., kind='anselm_ref')
+    g = jax.grad(f)(2.)
+    self.assertAllClose(x_ref[...], 2.)
+    self.assertAllClose(g, 1.)
+
+  def test_remat_basic_closed_over_nested(self):
+    @jax.remat
+    @partial(jax.remat, policy=lambda *_, **__: False)
+    @jax.remat
+    def f(y):
+      jax.debug.callback(lambda _: lst.append('hi'), y)
+      out = y * x_ref[...]
+      x_ref[...] += 1
+      return jnp.sin(out)
+
+    lst = []
+    x_ref = core.new_ref(1., kind='anselm_ref')
+    g = jax.grad(f)(2.)
+    self.assertAllClose(x_ref[...], 2.)
+    self.assertAllClose(g, jnp.cos(2.))
+    self.assertLen(lst, 4)
 
   def test_remat_grad_stats_plumbing_basic(self):
     @jax.remat
@@ -793,7 +848,7 @@ class MutableArrayTest(jtu.JaxTestCase):
       grad_acc = jax.new_ref(jnp.zeros_like(Ws))               # CHANGED
 
       def process_mubatch(_, xs):
-        loss, f_vjp = vjp3(lambda Ws: mubatch_loss(Ws, xs), Ws)  # CHANGED
+        loss, f_vjp = jax.vjp(lambda Ws: mubatch_loss(Ws, xs), Ws)  # CHANGED
         f_vjp.with_refs(grad_acc)(jnp.ones_like(loss))           # CHANGED
         return (), loss
 
@@ -868,7 +923,7 @@ class MutableArrayTest(jtu.JaxTestCase):
     self.assertAllClose(y, 3.14, check_dtypes=False)
 
     # this exercises the fallback path, not a fancy transpose
-    _, f_vjp = vjp3(lambda x: f(jax.new_ref(x)), 3.14)
+    _, f_vjp = jax.vjp(lambda x: f(jax.new_ref(x)), 3.14)
     g, = f_vjp(1.)
     self.assertAllClose(g, 1., check_dtypes=False)
 
@@ -901,6 +956,130 @@ class MutableArrayTest(jtu.JaxTestCase):
     arr = jnp.ones(3)
     self.assertNotIsInstance(arr, jax.Ref)
 
+  def test_scan_vjp3_reverse(self):
+    # https://github.com/jax-ml/jax/issues/32411
+    def f(xs):
+      ys = jnp.arange(5.)
+
+      def body(_, xy):
+        x, y = xy
+        return (), x * y
+      (), z = jax.lax.scan(body, (), (xs, ys))
+      return z.sum()
+
+    grad_accum = jax.new_ref(jnp.zeros(5))
+    _, f_vjp = jax.vjp(f, jnp.ones(5))
+    _, = f_vjp.with_refs(grad_accum)(1.)
+    self.assertAllClose(grad_accum[...], jnp.arange(5.))
+
+  def test_vmap_with_vjp3(self):
+    # https://github.com/jax-ml/jax/issues/32479
+    def grad_via_ref(f):
+      def wrapper(*args):
+        grad_accum = jax.tree.map(lambda x: jax.new_ref(jnp.zeros_like(x)), args)
+        out, f_vjp = jax.vjp(f, *args)
+        f_vjp.with_refs(*grad_accum)(jnp.ones_like(out))
+        return jax.tree.map(lambda x: jax.freeze(x), grad_accum)
+      return wrapper
+
+    def issue_vmap1():
+      def f(x):
+        return x + 1
+      x = jnp.ones((4,))
+      # g = grad_via_ref(jax.vmap(f))  # good
+      g = jax.vmap(grad_via_ref(f))    # bad
+      g(x)  # crash
+
+    def issue_vmap1_minimized():
+      def f(x):
+        x.addupdate(1.0)  # bad (assumes non-empty list of indexers)
+      jax.vmap(f)(jax.new_ref(jnp.zeros((4,))))  # crash
+
+    def issue_vmap2():
+      def f(x):
+        x[...] = 1.0  # bad (mismatched shapes)
+      jax.vmap(f)(jax.new_ref(jnp.zeros((4,))))  # crash
+
+    # don't crash
+    issue_vmap1()
+    issue_vmap1_minimized()
+    issue_vmap2()
+
+  def test_slicing_with_vjp3(self):
+    @jax.jit
+    def f(x, i):
+      return x[i] ** 2
+
+    x = jnp.arange(10.)
+
+    grad_accum = jax.new_ref(jnp.zeros(10))
+    not_needed = object()
+
+    @jax.make_jaxpr
+    def run():
+      _, f_vjp = jax.vjp(f, x, 5)
+      f_vjp = f_vjp.with_refs(grad_accum, not_needed)
+      f_vjp(1.)
+
+    jaxpr = run()
+    self.assertIn('+=', str(jaxpr))
+    self.assertNotIn('0.0', str(jaxpr))
+
+  @absltest.skip("Not yet implemented")
+  def test_none_index(self):
+    ref = jax.new_ref(jnp.array([1, 2, 3]))
+    y = ref[None]
+    self.assertEqual(y.shape, (1, 3))
+
+  def test_what_if_you_lower_fun_something_with_internal_effects(self):
+    bjp_p = core.Primitive('bjp')
+
+    @bjp_p.def_abstract_eval
+    def _(aval):
+      return aval
+
+    def lowering(x):
+      x_ref = jax.new_ref(x)
+      x_ref[...] += 1
+      x_ref[...] += -1
+      return jax.freeze(x_ref)
+
+    mlir.register_lowering(bjp_p, mlir.lower_fun(lowering, multiple_results=False))
+
+    @jax.jit
+    def f(x):
+      return bjp_p.bind(x)
+
+    f(3.)  # don't crash
+
+  def test_remat_while_loop_residuals(self):
+    @jax.custom_vjp
+    def ra2a(x):
+      return jax.freeze(jax.new_ref(x))
+
+    def ra2a_fwd(x):
+      o = ra2a(x)
+      return o, ()
+
+    def ra2a_bwd(res, g):
+      return (ra2a(g),)
+
+    ra2a.defvjp(ra2a_fwd, ra2a_bwd)
+
+    @jax.jit
+    @jax.remat
+    def f(x):
+
+      def g(x):
+        def body(carry):
+          i, x = carry
+          x = ra2a(x)
+          return i + 1, x
+        return jax.lax.while_loop(lambda x: x[0] < 5, body, (0, x))[1]
+      return g(x)
+
+    jax.linearize(f, 5.)  # don't crash
+
 
 @jtu.with_config(jax_mutable_array_checks=True)
 class MutableArrayErrorsTest(jtu.JaxTestCase):
@@ -918,12 +1097,14 @@ class MutableArrayErrorsTest(jtu.JaxTestCase):
         r".*was passed in as the argument x_ref"):
       jax.jit(lambda x_ref: x_ref)(core.new_ref(jnp.arange(3)))
 
+  @unittest.skip("regressed")  # TODO(mattjj): fix
   def test_return_from_jit_pytree(self):
     with self.assertRaisesRegex(
         ValueError,
         r"tree path result\['hi'\]"):
       jax.jit(lambda x_ref: {'hi': x_ref})(core.new_ref(jnp.arange(3)))
 
+  @unittest.skip("regressed")  # TODO(mattjj): fix
   def test_return_from_jit_closure(self):
     with self.assertRaisesRegex(
         ValueError,

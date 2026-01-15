@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from functools import partial
+import glob
 import logging
 import math
 import os
@@ -43,7 +43,6 @@ from jax._src import test_warning_util
 from jax._src import xla_bridge
 from jax._src.compilation_cache_interface import CacheInterface
 from jax._src.lib import xla_client as xc
-from jax.experimental.pjit import pjit
 from jax.sharding import PartitionSpec as P
 import numpy as np
 
@@ -227,6 +226,21 @@ class CompilationCacheTest(CompilationCacheTestCase):
     f(1.0)
     self.assertEqual(count_cache_items(), 2)
 
+  def test_jit_sharded(self):
+    mesh = jtu.create_mesh((2,), 'x')
+    with jax.set_mesh(mesh):
+      @jax.jit(in_shardings=(P("x"), P("x")), out_shardings=None)
+      def f(x, y):
+        return x + y
+
+      shape = (8, 8)
+      x = np.arange(math.prod(shape), dtype=np.int64).reshape(shape)
+      f(x, x + 1)
+      self.assertEqual(count_cache_items(), 1)
+      x = np.arange(math.prod(shape), dtype=np.float32).reshape(shape)
+      f(x, x + 1)
+      self.assertEqual(count_cache_items(), 2)
+
   def test_jit_with_constants(self):
     const = jnp.array([42, 43])  #  A distinctive shape
     clear_cache()
@@ -297,20 +311,6 @@ class CompilationCacheTest(CompilationCacheTestCase):
         f(1)
         self.assertEqual(count_cache_items(), 1)
 
-  @jtu.with_mesh([("x", 2)])
-  def test_pjit(self):
-    @partial(pjit, in_shardings=(P("x"), P("x")), out_shardings=None)
-    def f(x, y):
-      return x + y
-
-    shape = (8, 8)
-    x = np.arange(math.prod(shape), dtype=np.int64).reshape(shape)
-    f(x, x + 1)
-    self.assertEqual(count_cache_items(), 1)
-    x = np.arange(math.prod(shape), dtype=np.float32).reshape(shape)
-    f(x, x + 1)
-    self.assertEqual(count_cache_items(), 2)
-
   def test_cache_write_warning(self):
     f = jit(lambda x: x * x)
 
@@ -343,7 +343,7 @@ class CompilationCacheTest(CompilationCacheTestCase):
       test_warning_util.record_warnings() as w,
     ):
       mock_get.side_effect = RuntimeError("test error")
-      # Calling assertEqual with the jitted f will generate two PJIT
+      # Calling assertEqual with the jitted f will generate two JIT
       # executables: Equal and the lambda function itself.
       self.assertEqual(f(2).item(), 4)
     if len(w) != 1:
@@ -648,6 +648,35 @@ class CompilationCacheTest(CompilationCacheTestCase):
         self.assertEqual(compile_options.executable_build_options.debug_options.xla_gpu_enable_llvm_module_compilation_parallelism, False)
         self.assertEqual(compile_options.executable_build_options.debug_options.xla_gpu_per_fusion_autotune_cache_dir, f"jax-cache{s}xla_gpu_per_fusion_autotune_cache_dir")
         self.assertEqual(compile_options.executable_build_options.debug_options.xla_gpu_experimental_autotune_cache_mode, xc.AutotuneCacheMode.UPDATE)
+
+  @jtu.skip_on_devices("tpu") # TPU backend does not dump on deserialize
+  def test_dump_on_cache_hit(self):
+    previous_counts = Counter(_counts)
+    with (
+      config.persistent_cache_min_compile_time_secs(0),
+      config.persistent_cache_min_entry_size_bytes(0),
+      tempfile.TemporaryDirectory() as dump_dir1,
+      tempfile.TemporaryDirectory() as dump_dir2
+    ):
+      jit(lambda x: x + 1, compiler_options={"xla_dump_to": dump_dir1})(1)
+      self.assertEqual(
+        _counts["/jax/compilation_cache/cache_hits"],
+        previous_counts["/jax/compilation_cache/cache_hits"],
+      )
+      jit(lambda x: x + 1, compiler_options={"xla_dump_to": dump_dir2, "xla_dump_hlo_as_proto": True, "xla_dump_hlo_as_text": True})(1)
+      self.assertEqual(
+          _counts["/jax/compilation_cache/cache_hits"],
+          previous_counts["/jax/compilation_cache/cache_hits"] + 1,
+      1)
+      dump1_files = glob.glob(os.path.join(dump_dir1, "*after_optimizations.txt"))
+      dump2_files = glob.glob(os.path.join(dump_dir2, "*after_optimizations.txt"))
+      self.assertEqual(len(dump1_files), 1)
+      self.assertEqual(len(dump2_files), 1)
+      with (open(dump1_files[0]) as file1, open(dump2_files[0]) as file2):
+        self.assertEqual(file1.read(), file2.read())
+      dump2_pbs = glob.glob(os.path.join(dump_dir2, "*after_optimizations.hlo.pb"))
+      self.assertEqual(len(dump2_pbs), 1)
+
 
 @jtu.with_config(
     jax_enable_compilation_cache=False,

@@ -269,47 +269,58 @@ class DtypesTest(jtu.JaxTestCase):
 
   @jax.numpy_dtype_promotion('standard')
   def testPromoteDtypesStandard(self):
+    assertTypePromotionError = functools.partial(
+        self.assertRaisesRegex,
+        dtypes.TypePromotionError,
+        'Input dtypes .* have no available implicit dtype promotion path.',
+        dtypes.promote_types,
+    )
+
+    small_fp_dtypes = set(fp8_dtypes + fp4_dtypes)
+    implicit_int_dtypes = set(signed_dtypes + unsigned_dtypes) - set(intn_dtypes)
+
     for t1 in all_dtypes:
       self.assertEqual(t1, dtypes.promote_types(t1, t1))
-
       self.assertEqual(t1, dtypes.promote_types(t1, np.bool_))
       # TODO(zhangqiaorjc): Consider more dtype promotion rules for fp8.
-      if t1 in fp8_dtypes:
-        continue
-      if t1 in intn_dtypes:
-        continue
-      if t1 in fp4_dtypes:
-        continue
-      self.assertEqual(np.dtype(np.complex128),
-                       dtypes.promote_types(t1, np.complex128))
+      if t1 in small_fp_dtypes or t1 in intn_dtypes:
+        assertTypePromotionError(t1, np.complex128)
+      else:
+        self.assertEqual(
+            np.dtype(np.complex128), dtypes.promote_types(t1, np.complex128)
+        )
 
       for t2 in all_dtypes:
         # TODO(zhangqiaorjc): Consider more dtype promotion rules for fp8.
-        if t2 in fp8_dtypes:
-          continue
-        if t2 in intn_dtypes:
-          continue
-        if t2 in fp4_dtypes:
-          continue
-        # Symmetry
-        self.assertEqual(dtypes.promote_types(t1, t2),
-                         dtypes.promote_types(t2, t1))
+        if (
+            (t1 != t2)
+            and (t1 != np.bool_)
+            and (t2 != np.bool_)
+            and (
+                t1 in intn_dtypes or
+                t2 in intn_dtypes or
+                (t1 in small_fp_dtypes and t2 not in implicit_int_dtypes) or
+                (t2 in small_fp_dtypes and t1 not in implicit_int_dtypes)
+            )
+        ):
+          assertTypePromotionError(t1, t2)
+          assertTypePromotionError(t2, t1)
+        else:
+          self.assertEqual(
+              dtypes.promote_types(t1, t2), dtypes.promote_types(t2, t1)
+          )
 
     self.assertEqual(np.dtype(np.float32),
                      dtypes.promote_types(np.float16, dtypes.bfloat16))
 
-    # Promotions of non-inexact types against inexact types always prefer
-    # the inexact types.
+    # Promotions of exact types against inexact types always prefer the
+    # inexact types.
     for t in float_dtypes + complex_dtypes:
       for i in bool_dtypes + signed_dtypes + unsigned_dtypes:
-        # TODO(zhangqiaorjc): Consider more dtype promotion rules for fp8.
-        if t in fp8_dtypes:
-          continue
-        if t in fp4_dtypes:
-          continue
-        if t in intn_dtypes or i in intn_dtypes:
-          continue
-        self.assertEqual(t, dtypes.promote_types(t, i))
+        if i in intn_dtypes:
+          assertTypePromotionError(t, i)
+        else:
+          self.assertEqual(t, dtypes.promote_types(t, i))
 
     # Promotions between exact types, or between inexact types, match NumPy.
     for groups in [bool_dtypes + np_signed_dtypes + np_unsigned_dtypes,
@@ -492,13 +503,11 @@ class DtypesTest(jtu.JaxTestCase):
       dtypes.dtype(None)
 
   def testDefaultDtypes(self):
-    precision = config.default_dtype_bits.value
-    assert precision in ['32', '64']
     self.assertEqual(dtypes.bool_, np.bool_)
-    self.assertEqual(dtypes.int_, np.int32 if precision == '32' else np.int64)
-    self.assertEqual(dtypes.uint, np.uint32 if precision == '32' else np.uint64)
-    self.assertEqual(dtypes.float_, np.float32 if precision == '32' else np.float64)
-    self.assertEqual(dtypes.complex_, np.complex64 if precision == '32' else np.complex128)
+    self.assertEqual(dtypes.int_, np.int64)
+    self.assertEqual(dtypes.uint, np.uint64)
+    self.assertEqual(dtypes.float_, np.float64)
+    self.assertEqual(dtypes.complex_, np.complex128)
 
   def test_check_dtype_non_hashable(self):
     # regression test for issue with checking non-hashable custom dtype
@@ -516,6 +525,25 @@ class DtypesTest(jtu.JaxTestCase):
       def f(x):
         dtypes.check_and_canonicalize_user_dtype(x)
       jax.jit(f)(x)
+
+  @parameterized.parameters(
+      (jnp.int2, 2),
+      (jnp.int4, 4),
+      (jnp.int8, 8),
+      (jnp.int16, 16),
+      (jnp.int32, 32),
+      *[(fp4_dtype, 4) for fp4_dtype in fp4_dtypes],
+      *[(fp8_dtype, 8) for fp8_dtype in fp8_dtypes],
+      (jnp.float16, 16),
+      (jnp.float32, 32),
+      (jnp.float64, 64),
+  )
+  def test_itemsize_bits(self, dtype, expected_bitwidth):
+    self.assertEqual(dtypes.itemsize_bits(dtype), expected_bitwidth)
+
+  def test_itemsize_none_raises(self):
+    with self.assertRaisesRegex(ValueError, 'dtype cannot be None'):
+      dtypes.itemsize_bits(None)
 
 
 class ExtendedDTypeTest(jtu.JaxTestCase):
@@ -842,7 +870,7 @@ class EArrayTest(jtu.JaxTestCase):
         phys_aval = core.physical_aval(aval)
         phys_handler_maker = pxla.global_result_handlers[core.ShapedArray]
         phys_handler = phys_handler_maker(phys_aval, phys_sharding, committed)
-        return lambda bufs: earray.EArray(aval, phys_handler(bufs))
+        return phys_handler.wrap(lambda arr: earray.EArray(aval, arr))
 
     @dataclasses.dataclass(frozen=True)
     class FooTy(dtypes.ExtendedDType):

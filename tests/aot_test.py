@@ -14,15 +14,15 @@
 
 import contextlib
 import unittest
-from absl.testing import absltest, parameterized
+from absl.testing import absltest
 import jax
 from jax import lax
 from jax._src import config
 from jax._src import core
 from jax._src import test_util as jtu
+from jax._src.lib import jaxlib_extension_version
 from jax._src.lib import xla_client as xc
 from jax.experimental import topologies
-from jax.experimental.pjit import pjit
 from jax.experimental.serialize_executable import (
     deserialize_and_load,
     serialize,
@@ -43,12 +43,12 @@ with contextlib.suppress(ImportError):
 class JaxAotTest(jtu.JaxTestCase):
 
   @jtu.run_on_devices('tpu', 'gpu')
-  def test_pickle_pjit_lower(self):
+  def test_pickle_jit_lower(self):
     def fun(x):
       return x * x
 
-    with jax.sharding.Mesh(np.array(jax.devices()), ('data',)):
-      lowered = pjit(
+    with jax.set_mesh(jax.sharding.Mesh(np.array(jax.devices()), ('data',))):
+      lowered = jax.jit(
           fun, in_shardings=P('data'), out_shardings=P(None, 'data')
       ).lower(core.ShapedArray(shape=(8, 8), dtype=np.float32))
 
@@ -64,12 +64,14 @@ class JaxAotTest(jtu.JaxTestCase):
             np.zeros((len(jax.devices()), 4), dtype=np.float32)))
 
   @jtu.skip_on_devices("tpu")  # TODO(phawkins): This test is segfaulting on TPU
-  def test_topology_pjit_serialize(self):
+  def test_topology_jit_serialize(self):
     try:
       aot_topo = topologies.get_topology_desc(
           platform=jax.devices()[0].platform
       )
-    except NotImplementedError:
+    except (ValueError, NotImplementedError) as e:
+      assert ('topology_name is not specified' in str(e) or
+              'topology not implemented' in str(e))
       raise unittest.SkipTest('PJRT Topology not supported')
 
     if jtu.TEST_WITH_PERSISTENT_COMPILATION_CACHE.value:
@@ -107,7 +109,9 @@ class JaxAotTest(jtu.JaxTestCase):
       aot_topo = topologies.get_topology_desc(
           platform=jax.devices()[0].platform
       )
-    except NotImplementedError:
+    except (ValueError, NotImplementedError) as e:
+      assert ('topology_name is not specified' in str(e) or
+              'topology not implemented' in str(e))
       raise unittest.SkipTest('PJRT Topology not supported')
 
     topo = xc.get_topology_for_devices(aot_topo.devices)
@@ -126,9 +130,11 @@ class JaxAotTest(jtu.JaxTestCase):
     self.assertNotRegex(stablehlo, r"sine.* loc")
 
     hlo = lowered.as_text("hlo", debug_info=True)
-    self.assertRegex(hlo, r"sine.*metadata=.*source_file=.*")
+    self.assertRegex(hlo, r'sine.*metadata=.*[stack_frame_id|source_file]=.*')
     hlo = lowered.as_text("hlo")
-    self.assertNotRegex(hlo, r"sine.*metadata=.*source_file=.*")
+    self.assertNotRegex(
+        hlo, r'sine.*metadata=.*[stack_frame_id|source_file]=.*'
+    )
 
   def test_constants_in_lowering_in_aot(self):
     const_size = 100
@@ -151,7 +157,7 @@ class JaxAotTest(jtu.JaxTestCase):
   def test_with_constants(self):
     const = jnp.arange(16.) + 42.  # A distinctive shape and value
 
-    @pjit
+    @jax.jit
     def f(x):
       return const[0:8] + x
 
@@ -165,20 +171,16 @@ class JaxAotTest(jtu.JaxTestCase):
     else:
       self.assertLen(compiled._params.const_args, 0)
     self.assertArraysEqual(compiled(inp), const[0:8] + inp)
-    # Trigger cache hit
-    expected_aot_calls = 0
-    if config.use_simplified_jaxpr_constants.value:
-      expected_aot_calls = 1
-    self.assertCacheMisses(lambda: compiled(inp), cpp=0, aot_call=expected_aot_calls)
+    self.assertCacheMisses(lambda: compiled(inp), cpp=0, aot_call=0)
 
-  @parameterized.named_parameters(
-      dict(testcase_name=f"{use_np=}_{lower=}_{compile=}_{exec=}",
-           use_np=use_np,
-           lower=lower, compile=compile, exec=exec)
-      for use_np in (False, True)
-      for lower in (False, True)
-      for compile in (False, True)
-      for exec in (False, True))
+  @jtu.parameterized_filterable(
+      kwargs=[
+          dict(use_np=use_np, lower=lower, compile=compile, exec=exec)
+            for use_np in (False, True)
+            for lower in (False, True)
+            for compile in (False, True)
+            for exec in (False, True)
+  ])
   def test_with_constants_enable_x64(self, *, use_np, lower, compile, exec):
     # Closed-over constant is 64-bit. Each of lowering, compilation, and
     # execution can be run in 64-bit or 32-bit mode.
@@ -186,7 +188,7 @@ class JaxAotTest(jtu.JaxTestCase):
       arange = np.arange if use_np else jnp.arange
       const = arange(8, dtype=np.int64) + 42
 
-      @pjit
+      @jax.jit
       def f(x):
         return lax.convert_element_type(const, np.float32) + x
 
@@ -209,28 +211,31 @@ class JaxAotTest(jtu.JaxTestCase):
       if not config.enable_x64.value and use_np and not lower:
         expected_dtype = np.int32
       self.assertEqual(compiled._executable.in_avals[0].dtype, expected_dtype)
-      self.assertIs(compiled._params.const_args[0], const)
+
+      if expected_dtype is np.int64:  # Otherwise, we made a copy of the const
+        if use_np:
+          self.assertIs(np.asarray(compiled._params.const_args[0]), const)
+        else:
+          self.assertIs(compiled._params.const_args[0], const)
     else:
       self.assertLen(compiled._params.const_args, 0)
       self.assertLen(compiled._executable.in_avals, 1)
 
-    # In some cases we expect errors
+    # In some cases we expect errors: in 32-bit mode, lowered with 64-bit mode
+    # and execute in 32-bit mode.
     if (config.use_simplified_jaxpr_constants.value and
         not config.enable_x64.value and
-        use_np and lower != exec):
+        use_np and lower and not exec):
       with self.assertRaisesRegex(
-          TypeError,
-          "Perhaps you are calling the compiled executable with a different enable_x64"):
+          xc.XlaRuntimeError,
+          "got buffer with incompatible size"):
         run()
       return
 
     self.assertArraysEqual(run(),
                            lax.convert_element_type(const, inp.dtype) + inp)
     # Trigger cache hit
-    expected_aot_calls = 0
-    if config.use_simplified_jaxpr_constants.value:
-      expected_aot_calls = 1
-    self.assertCacheMisses(run, cpp=0, aot_call=expected_aot_calls)
+    self.assertCacheMisses(run, cpp=0, aot_call=0)
 
   def test_with_ref_constants(self):
     x_ref = core.new_ref(0)
@@ -257,6 +262,40 @@ class JaxAotTest(jtu.JaxTestCase):
         'Execution devices belong to a client other than `backend`'):
       deserialize_and_load(serialized, in_tree, out_tree, backend='cpu',
                            execution_devices=jax.devices()[:1])
+
+  @jtu.run_on_devices('gpu')
+  def test_deviceless_aot_compile(self):
+    if jaxlib_extension_version < 393:
+      raise unittest.SkipTest('Test requires jaxlib extension version 393 or higher')
+    target_config = xc.get_topology_for_devices(jax.devices()).target_config
+    with jtu.global_config_context(jax_platforms="cpu"):
+      topology = topologies.get_topology_desc(
+        platform="cuda",
+        target_config=target_config,
+        topology="1x1x1",
+      )
+      assert topology.devices[0].client.runtime_type == "compile_only_runtime"
+      mesh = topologies.make_mesh(topo=topology, mesh_shape=(1,), axis_names=("x",))
+      x = jax.ShapeDtypeStruct(
+        shape=(2, 2),
+        dtype=jnp.float32,
+        sharding=jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("x"))
+      )
+      compiled = jax.jit(lambda x: jnp.sum(x * x)).lower(x).compile()
+      serialized_executable, _, _ = serialize(compiled)
+
+    _, in_tree = jax.tree.flatten(((0,), {}))
+    _, out_tree = jax.tree.flatten(0)
+    compiled = deserialize_and_load(
+        serialized_executable,
+        in_tree,
+        out_tree,
+        backend="cuda",
+        execution_devices=jax.devices()[:1]
+    )
+    input = jnp.array([[0., 1.], [2., 3.]], dtype=jnp.float32, device=jax.devices()[0])
+    result = compiled(input)
+    self.assertEqual(result, 14.)
 
 if __name__ == '__main__':
   absltest.main(testLoader=jtu.JaxTestLoader())

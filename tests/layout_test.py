@@ -14,7 +14,9 @@
 
 import math
 from functools import partial
+
 from absl.testing import absltest
+from absl.testing import parameterized
 import numpy as np
 
 import jax
@@ -24,7 +26,6 @@ from jax._src import config
 from jax._src import test_util as jtu
 from jax._src.util import safe_zip
 from jax.experimental.layout import with_layout_constraint, Format, Layout
-from jax.experimental.compute_on import compute_on
 
 config.parse_flags_with_absl()
 jtu.request_cpu_devices(8)
@@ -375,7 +376,7 @@ class LayoutTest(jtu.JaxTestCase):
 
   def test_wsc_bfloat16_concrete_layout(self):
     mesh = jtu.create_mesh((2, 2), ('x', 'y'))
-    shape = (16, 128)
+    shape = (64, 128)
     s = NamedSharding(mesh, P('x'))
     inp = jnp.arange(math.prod(shape), dtype=jnp.bfloat16).reshape(shape)
     arr = jax.device_put(inp, s)
@@ -451,7 +452,7 @@ class LayoutTest(jtu.JaxTestCase):
     l = Format(custom_dll, SingleDeviceSharding(jax.devices()[0]))
     inp = np.arange(8)
 
-    @partial(jax.jit, in_shardings=l)
+    @jax.jit(in_shardings=l)
     def f(x):
       return x * 2
 
@@ -492,7 +493,7 @@ class LayoutTest(jtu.JaxTestCase):
 
     custom_dll2 = Layout(major_to_minor=(1, 0))
 
-    @partial(jax.jit, in_shardings=Format(custom_dll2, s))
+    @jax.jit(in_shardings=Format(custom_dll2, s))
     def g(x):
       return x.T
 
@@ -533,7 +534,7 @@ class LayoutTest(jtu.JaxTestCase):
     custom_dll = Layout(major_to_minor=(0, 1))
     arr = jax.device_put(np_inp, Format(custom_dll, s))
 
-    @partial(jax.jit, in_shardings=Format(custom_dll, s), donate_argnums=0)
+    @jax.jit(in_shardings=Format(custom_dll, s), donate_argnums=0)
     def f(x):
       return x
 
@@ -548,7 +549,7 @@ class LayoutTest(jtu.JaxTestCase):
 
     arr = jax.device_put(np_inp, s)
 
-    @partial(jax.jit, out_shardings=Format(Layout.AUTO), donate_argnums=0)
+    @jax.jit(out_shardings=Format(Layout.AUTO), donate_argnums=0)
     def f(x):
       return x * x
 
@@ -565,7 +566,7 @@ class LayoutTest(jtu.JaxTestCase):
     l = Format(custom_dll, s)
     arr = jax.device_put(np_inp, l)
 
-    @partial(jax.jit, in_shardings=l, out_shardings=l, donate_argnums=0)
+    @jax.jit(in_shardings=l, out_shardings=l, donate_argnums=0)
     def f(x):
       return x * x
 
@@ -579,11 +580,13 @@ class LayoutTest(jtu.JaxTestCase):
     shape = (16*2, 32016*2)
     np_inp = np.arange(math.prod(shape), dtype=jnp.bfloat16).reshape(shape)
 
-    custom_dll1 = Layout(major_to_minor=(1, 0), tiling=((8,128), (2,1)))
+    tiling = (((16, 128), (2, 1)) if jtu.get_tpu_version() == 7
+              else ((8, 128), (2, 1)))
+    custom_dll1 = Layout(major_to_minor=(1, 0), tiling=tiling)
     l1 = Format(custom_dll1, s)
     arr = jax.device_put(np_inp, s)
 
-    @partial(jax.jit, out_shardings=l1, donate_argnums=0)
+    @jax.jit(out_shardings=l1, donate_argnums=0)
     def f(x):
       return x * x
 
@@ -592,7 +595,7 @@ class LayoutTest(jtu.JaxTestCase):
     self.assertFalse(arr.is_deleted())
 
   def test_donation_error_on_auto(self):
-    @partial(jax.jit, donate_argnums=0, in_shardings=Format(Layout.AUTO))
+    @jax.jit(donate_argnums=0, in_shardings=Format(Layout.AUTO))
     def f(x):
       return x * 2
 
@@ -600,105 +603,13 @@ class LayoutTest(jtu.JaxTestCase):
         ValueError, ".*Did you mean to set the.*output layout.*AUTO.*"):
       f(jnp.arange(8))
 
-    @partial(jax.jit, donate_argnums=0, out_shardings=Format(Layout.AUTO))
+    @jax.jit(donate_argnums=0, out_shardings=Format(Layout.AUTO))
     def g(x):
       return x * 2
 
     with self.assertRaisesRegex(
         ValueError, ".*Did you mean to set the.*input layout.*AUTO.*"):
       g(jnp.arange(8))
-
-  def test_sparsecore_compute(self):
-    if not (jax.devices()[0].device_kind == 'TPU v5' or
-            jtu.is_device_tpu_at_least(6)):
-      self.skipTest('Does not have a sparsecore present')
-    shape = (128, 128)
-    inp = jnp.arange(math.prod(shape)).reshape(shape)
-
-    dll = Layout(major_to_minor=(0, 1), tiling=((8,),))
-    s = SingleDeviceSharding(jax.devices()[0])
-    sparse_format = Format(dll, s)
-    sparecore_arr = jax.device_put(inp, sparse_format)
-    dense_format = Format(Layout(major_to_minor=(0, 1)), s)
-
-    @compute_on('tpu_sparsecore')
-    @jax.jit
-    def sparsecore_compute(x):
-      return x * x
-
-    @partial(jax.jit, out_shardings=(dense_format, sparse_format))
-    def f(x, y):
-      return x * 2, sparsecore_compute(y)
-
-    f(inp, sparecore_arr)
-
-  def test_sparsecore_compute_twice(self):
-    if not (
-        jax.devices()[0].device_kind == 'TPU v5'
-        or jtu.is_device_tpu_at_least(6)
-    ):
-      self.skipTest('Does not have a sparsecore present')
-    shape = (4096, 8)
-    inp = jnp.arange(math.prod(shape)).reshape(shape)
-
-    dll = Layout(major_to_minor=(0, 1), tiling=((8,),))
-    s = SingleDeviceSharding(jax.devices()[0])
-    sparse_format = Format(dll, s)
-    sparecore_arr = jax.device_put(inp, sparse_format)
-
-    @compute_on('tpu_sparsecore')
-    @jax.jit
-    def sparsecore_multiply(x, y):
-      return x * y
-
-    @compute_on('tpu_sparsecore')
-    @jax.jit
-    def sparsecore_add(x, y):
-      return x + y
-
-    @partial(jax.jit, donate_argnums=0, out_shardings=sparse_format)
-    def f(x):
-      return sparsecore_multiply(sparsecore_add(x, x) + 1, x)
-
-    f(sparecore_arr)
-
-  def test_sparsecore_and_host_compute(self):
-    if not (
-        jax.devices()[0].device_kind == 'TPU v5'
-        or jtu.is_device_tpu_at_least(6)
-    ):
-      self.skipTest('Does not have a sparsecore present')
-    shape = (128, 128)
-    inp = jnp.arange(math.prod(shape)).reshape(shape)
-    s = SingleDeviceSharding(jax.devices()[0])
-
-    sparse_dll = Layout(major_to_minor=(0, 1), tiling=((8,),))
-    sparse_format = Format(sparse_dll, s)
-    sparecore_arr = jax.device_put(inp, sparse_format)
-
-    host_dll = Layout(major_to_minor=(0, 1), tiling=((1,),))
-    host_format = Format(host_dll, s)
-    host_arr = jax.device_put(inp, host_format)
-
-    @compute_on('tpu_sparsecore')
-    @jax.jit
-    def sparsecore_compute(x):
-      return x * x
-
-    @compute_on('device_host')
-    @jax.jit
-    def host_compute(x):
-      return x + x
-
-    @partial(
-        jax.jit,
-        in_shardings=(sparse_format, host_format),
-        out_shardings=(sparse_format, host_format),
-    )
-    def f(x, y):
-      return sparsecore_compute(x), host_compute(y)
-
-    f(sparecore_arr, host_arr)
 
   def test_cpp_layout_cache_miss(self):
     mesh = jtu.create_mesh((2, 2), ('x', 'y'))
@@ -731,7 +642,7 @@ class LayoutTest(jtu.JaxTestCase):
     arr = jax.device_put(np_inp, s)
     out_format = Format(arr.format.layout, s)
 
-    @partial(jax.jit, out_shardings=out_format, donate_argnums=0)
+    @jax.jit(out_shardings=out_format, donate_argnums=0)
     def f(x):
       return x * 2
 
@@ -802,13 +713,72 @@ class LayoutTest(jtu.JaxTestCase):
     l = Format(custom_dll, s)
     arr = jax.device_put(np_inp, l)
 
-    @partial(jax.jit, in_shardings=l, out_shardings=l)
+    @jax.jit(in_shardings=l, out_shardings=l)
     def f(x):
       return x * x
 
     out = jax.eval_shape(f, arr)
     self.assertEqual(out.format, l)
     self.assertEqual(out.sharding, s)
+
+  def test_valid_custom_layout_after_copy_across_clients(self):
+    if jax._src.lib.ifrt_version < 45:
+      self.skipTest('Only works for JAX_IFRT_VERSION_NUMBER >= 45')
+    if not jtu.test_device_matches(['tpu']):
+      self.skipTest('Only works for TPU')
+
+    custom_dll = Layout(major_to_minor=(1, 0))
+
+    cpu_sharding = jax.sharding.SingleDeviceSharding(
+        jax.local_devices(backend='cpu')[0])
+    cpu_format = Format(custom_dll, cpu_sharding)
+    cpu_array = jax.device_put(np.ones((128, 8)), cpu_format)
+
+    mesh = jtu.create_mesh((1, 1), ('x', 'y'))
+    tpu_sharding = jax.sharding.NamedSharding(mesh, P())
+    tpu_format = Format(custom_dll, tpu_sharding)
+
+    copied_tpu_array = jax.device_put(cpu_array, tpu_format.sharding)
+    canonical_tpu_array = jax.device_put(np.ones((128, 8)), tpu_format)
+    self.assertEqual(
+        copied_tpu_array.format.layout, canonical_tpu_array.format.layout)
+
+  @parameterized.named_parameters(
+      ('device_to_pinned_host', 'device', 'pinned_host'),
+      ('pinned_host_to_device', 'pinned_host', 'device'),
+      ('device_to_unpinned_host', 'device', 'unpinned_host'),
+      ('unpinned_host_to_device', 'unpinned_host', 'device'),
+      ('pinned_host_to_unpinned_host', 'pinned_host', 'unpinned_host'),
+      ('unpinned_host_to_pinned_host', 'unpinned_host', 'pinned_host'),
+  )
+  def test_valid_layout_after_copy_across_memories(
+      self, src_memory_kind, dst_memory_kind):
+    if not jtu.test_device_matches(['tpu']):
+      self.skipTest('Only works for TPU')
+    custom_dll = Layout(major_to_minor=(1, 0))
+
+    mesh = jtu.create_mesh((1, 1), ('x', 'y'))
+    src_tpu_sharding = jax.sharding.NamedSharding(
+        mesh, P(), memory_kind=src_memory_kind)
+    dst_tpu_sharding = jax.sharding.NamedSharding(
+        mesh, P(), memory_kind=dst_memory_kind)
+
+    # TPU unpinned_host memories do not support custom layouts.
+    if src_memory_kind == 'unpinned_host':
+      src_tpu_format = src_tpu_sharding
+    else:
+      src_tpu_format = Format(custom_dll, src_tpu_sharding)
+    if dst_memory_kind == 'unpinned_host':
+      dst_tpu_format = dst_tpu_sharding
+    else:
+      dst_tpu_format = Format(custom_dll, dst_tpu_sharding)
+
+    tpu_array = jax.device_put(np.ones((128, 8)), src_tpu_format)
+
+    copied_tpu_array = jax.device_put(tpu_array, dst_tpu_sharding)
+    canonical_tpu_array = jax.device_put(np.ones((128, 8)), dst_tpu_format)
+    self.assertEqual(
+        copied_tpu_array.format.layout, canonical_tpu_array.format.layout)
 
 
 if __name__ == '__main__':

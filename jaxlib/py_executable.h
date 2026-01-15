@@ -1,4 +1,3 @@
-#include "jaxlib/py_user_context.h"
 /* Copyright 2020 The JAX Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,7 +16,6 @@ limitations under the License.
 #ifndef JAXLIB_PY_EXECUTABLE_H_
 #define JAXLIB_PY_EXECUTABLE_H_
 
-#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -28,19 +26,22 @@ limitations under the License.
 #include <variant>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/synchronization/mutex.h"
 #include "llvm/Support/Casting.h"
 #include "nanobind/nanobind.h"
 #include "jaxlib/nb_class_ptr.h"
 #include "jaxlib/py_array.h"
 #include "jaxlib/py_client.h"
+#include "jaxlib/py_user_context.h"
 #include "jaxlib/traceback.h"
+#include "xla/future.h"
 #include "xla/hlo/ir/hlo_module.h"
 #include "xla/pjrt/exceptions.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/pjrt/pjrt_executable.h"
-#include "xla/pjrt/pjrt_future.h"
 #include "xla/pjrt/pjrt_layout.h"
 #include "xla/python/ifrt/array.h"
 #include "xla/python/ifrt/attribute_map.h"
@@ -53,16 +54,18 @@ namespace jax {
 class PyToken {
  public:
   PyToken() = default;
-  explicit PyToken(xla::PjRtFuture<> future) : future_(std::move(future)) {}
+  explicit PyToken(xla::Future<> future) : future_(std::move(future)) {}
 
   static PyToken ReadyPyToken() {
-    return PyToken(xla::PjRtFuture<>(absl::OkStatus()));
+    return PyToken(xla::Future<>(absl::OkStatus()));
   }
 
   absl::Status Await();
 
+  static void Register(nanobind::module_& m);
+
  private:
-  xla::PjRtFuture<> future_;
+  xla::Future<> future_;
 };
 
 // PyShardedToken contains a PyToken for each device's execution.
@@ -70,7 +73,7 @@ class PyShardedToken {
  public:
   // Default construction creates a always-ready token.
   PyShardedToken() = default;
-  explicit PyShardedToken(std::vector<xla::PjRtFuture<>> futures)
+  explicit PyShardedToken(std::vector<xla::Future<>> futures)
       : futures_(std::move(futures)) {}
 
   PyToken GetPyToken(int device_id) const {
@@ -80,8 +83,10 @@ class PyShardedToken {
 
   absl::Status Await();
 
+  static void Register(nanobind::module_& m);
+
  private:
-  std::vector<xla::PjRtFuture<>> futures_;
+  std::vector<xla::Future<>> futures_;
 };
 
 class PyExecuteResults {
@@ -89,7 +94,7 @@ class PyExecuteResults {
   PyExecuteResults(const nb_class_ptr<PyClient>& client,
                    std::vector<xla::ifrt::ArrayRef> ifrt_arrays,
                    int num_computations, PyShardedToken token,
-                   xla::PjRtFuture<> result_status = xla::PjRtFuture<>());
+                   xla::Future<> result_status = xla::Future<>());
 
   std::vector<std::vector<PyArray>> DisassembleIntoSingleDeviceArrays();
 
@@ -98,7 +103,8 @@ class PyExecuteResults {
 
   std::vector<nanobind::object> ConsumeWithHandlers(
       std::vector<std::variant<const PyArrayResultHandler*, nanobind::object>>
-          out_handlers);
+          out_handlers,
+      bool strict);
 
   std::vector<xla::ifrt::ArrayRef> Consume();
 
@@ -111,6 +117,8 @@ class PyExecuteResults {
 
   void CheckNotDisassembled() const;
 
+  static void Register(nanobind::module_& m);
+
  private:
   bool is_exploded_ = false;
   bool token_consumed_ = false;
@@ -119,10 +127,8 @@ class PyExecuteResults {
   int num_computations_;
   PyShardedToken token_;
   // Only set if the computation has tokens.
-  xla::PjRtFuture<> result_status_;
+  xla::Future<> result_status_;
 };
-
-using ExecuteShardedArg = std::variant<PyArray, std::vector<PyArray>>;
 
 // Thin Python wrapper around xla::ifrt::ExecutableRef. We use a wrapper class:
 // a) Standardize around xla::ifrt::ExecutableRef, which is
@@ -168,6 +174,8 @@ class PyExecutable {
     return ifrt_executable_->GetCostAnalysis();
   }
 
+  static void Register(nanobind::module_& m);
+
  private:
   xla::ifrt::ExecutableRef ifrt_executable_;
 };
@@ -193,6 +201,10 @@ class PyLoadedExecutable {
 
   std::vector<nb_class_ptr<PyDevice>> AddressableDevices() const;
 
+  absl::StatusOr<std::string> GetHumanReadableProgramText() const {
+    return ifrt_loaded_executable_->GetHumanReadableProgramText();
+  }
+
   int64_t SizeOfGeneratedCodeInBytes() const {
     return ifrt_loaded_executable_->SizeOfGeneratedCodeInBytes();
   }
@@ -209,8 +221,8 @@ class PyLoadedExecutable {
   // Takes args indexed by argid then deviceid, transposes them, and passes to
   // xla::ifrt::LoadedExecutable::Execute. The result is similarly transposed
   // back into the argid,deviceid format. args is [num_args x num_devices].
-  absl::StatusOr<PyExecuteResults> ExecuteSharded(
-      std::vector<ExecuteShardedArg> args, bool with_tokens);
+  absl::StatusOr<PyExecuteResults> ExecuteSharded(std::vector<PyArray> args,
+                                                  bool with_tokens);
 
   absl::StatusOr<std::vector<std::shared_ptr<xla::HloModule>>> HloModules()
       const;
@@ -262,6 +274,8 @@ class PyLoadedExecutable {
   // Keep `obj` alive as long as PyLoadedExecutable.
   void KeepAlive(nanobind::object obj);
 
+  static void Register(nanobind::module_& m);
+
  private:
   friend class PyClient;
 
@@ -274,7 +288,10 @@ class PyLoadedExecutable {
   std::optional<std::string> fingerprint_;
 
   // Launch ID to use for the next execution.
-  std::atomic<uint32_t> next_launch_id_;
+  const uint64_t launch_id_key_;
+
+  static absl::Mutex next_launch_id_mutex_;
+  static absl::flat_hash_map<uint64_t, uint32_t>* next_launch_id_;
 
   // The options to pass to `executable_.Execute`.
   xla::ifrt::ExecuteOptions options_;

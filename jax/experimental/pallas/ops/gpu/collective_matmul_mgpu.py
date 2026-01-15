@@ -74,13 +74,12 @@ def all_gather_lhs_matmul(
 
   num_sms = jax.devices()[0].core_count  # 132 for H100 SXM GPUs.
 
-  def kernel_body(lhs_local_ref, rhs_ref, out_ref, scratch_ref, out_smem, received_sem):
+  def kernel_body(lhs_local_ref, rhs_ref, out_ref, scratch_ref):
+    received_sem = pl.get_global(plgpu.SemaphoreType.REGULAR)
     wg_idx = lax.axis_index("wg")
     dev_id = lax.axis_index(axis_name)
     send_dev_id = lax.rem(dev_id + axis_size - 1, axis_size)
-    send_scratch_ref = plgpu.remote_ref(
-        scratch_ref, send_dev_id, device_id_type=pl.DeviceIdType.LOGICAL
-    )
+    send_scratch_ref = plgpu.remote_ref(scratch_ref, send_dev_id)
 
     def send_lhs(m_idx, n_idx, k_idx, a_smem, b_smem, send_ref, should_send):
       del b_smem  # Unused.
@@ -114,7 +113,6 @@ def all_gather_lhs_matmul(
           lhs_source_ref,  # Use the lhs from previous step.
           rhs_ref,  # Use the same rhs for all steps.
           out_ref.at[out_device_m_slice],  # Use a slice of the output.
-          out_smem,
           config=config,
           pipeline_callback=functools.partial(
               send_lhs,
@@ -145,34 +143,13 @@ def all_gather_lhs_matmul(
     # Make sure all copies are fully done.
     plgpu.wait_smem_to_gmem(0, wait_read_only=True)
 
-  def kernel_entry(*args):
-    return pl.run_scoped(
-        functools.partial(kernel_body, *args),
-        received_sem=plgpu.SemaphoreType.REGULAR,
-        collective_axes=("cluster_grid", "cluster", "wg"),
-    )
-
-  num_out_slots = min(2, (tile_m * tile_n) // (epi_tile_m * epi_tile_n))
-  out_swizzle = plgpu.find_swizzle(epi_tile_n * jnp.dtype(dtype).itemsize * 8)
-  out_swizzle_elems = out_swizzle // jnp.dtype(dtype).itemsize
-  out_transforms = (
-      plgpu.TilingTransform((8, out_swizzle_elems)),
-      plgpu.SwizzleTransform(out_swizzle),
-  )
   result, _ = plgpu.kernel(
-      kernel_entry,
+      kernel_body,
       out_shape=[
           # The output, with its M dimension all-gathered.
           jax.ShapeDtypeStruct((axis_size * m_shard, n_shard), dtype),
           # The scratch buffer used for the all-gather.
           jax.ShapeDtypeStruct((num_devices - 1, m_shard, k), dtype),
-      ],
-      scratch_shapes=[
-          plgpu.SMEM(
-              (2, num_out_slots, epi_tile_m, epi_tile_n),
-              dtype,
-              transforms=out_transforms,
-          ),
       ],
       grid=(num_sms,),
       grid_names=("cluster_grid",),

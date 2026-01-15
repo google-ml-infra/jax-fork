@@ -229,13 +229,14 @@ from jax._src.lax.lax import (
   tan_p as tan_p,
   tanh as tanh,
   tanh_p as tanh_p,
+  tile as tile,
+  tile_p as tile_p,
   top_k as top_k,
   top_k_p as top_k_p,
   transpose as transpose,
   transpose_p as transpose_p,
   xor_p as xor_p,
   empty as empty,
-  zeros_like_array as _deprecated_zeros_like_array,
 )
 from jax._src.lax.special import (
   bessel_i0e as bessel_i0e,
@@ -357,7 +358,7 @@ from jax._src.lax.fft import (
 )
 from jax._src.lax.parallel import (
   all_gather as all_gather,
-  all_gather_invariant as all_gather_invariant,
+  pcast as pcast,
   all_gather_p as all_gather_p,
   all_to_all as all_to_all,
   all_to_all_p as all_to_all_p,
@@ -383,7 +384,7 @@ from jax._src.lax.parallel import (
   ragged_all_to_all_p as ragged_all_to_all_p,
 )
 from jax._src.core import (
-    pvary as pvary,
+    pvary as _deprecated_pvary,
 )
 from jax._src.lax.other import (
   conv_general_dilated_local as conv_general_dilated_local,
@@ -402,21 +403,29 @@ from jax._src.pjit import sharding_constraint_p as sharding_constraint_p
 from jax._src.dispatch import device_put_p as device_put_p
 
 _deprecations = {
-    # Added on July 24th 2025.
+    # Deprecated in v0.7.1; finalized in v0.9.0.
+    # TODO(jakevdp) remove entry in v0.10.0.
     "zeros_like_array": (
         (
-            "jax.lax.zeros_like_array is deprecated. Use jax.numpy.zeros_like instead."
+            "jax.lax.zeros_like_array was deprecated in JAX 0.7.1 and removed"
+            " in JAX v0.9.0. Use jax.numpy.zeros_like instead."
         ),
-        _deprecated_zeros_like_array,
+        None,
+    ),
+    # Deprecated in v0.8.2.
+    # TODO(jakevdp) finalize in v0.10.0.
+    "pvary": (
+        "jax.lax.pvary is deprecated. Use `jax.lax.pcast(..., to='varying')",
+        _deprecated_pvary,
     ),
 }
 
 import typing as _typing
 if _typing.TYPE_CHECKING:
-  zeros_like_array = _deprecated_zeros_like_array
+  pvary = _deprecated_pvary
 else:
   from jax._src.deprecations import deprecation_getattr as _deprecation_getattr
   __getattr__ = _deprecation_getattr(__name__, _deprecations)
   del _deprecation_getattr
-del _deprecated_zeros_like_array
+del _deprecated_pvary
 del _typing

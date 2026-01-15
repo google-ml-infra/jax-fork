@@ -36,9 +36,19 @@ on:
         type: string
       halt-for-connection:
         description: 'Should this workflow run wait for a remote connection?'
-        type: boolean
-        required: false
-        default: false
+        type: string
+        default: 'no'
+      max-processes:
+        description: 'The value to set for `--maxprocesses` when running pytest. Leave empty to use max processes.'
+        type: string
+        default: ''
+
+permissions: {}
+
+env:
+  UV_DEFAULT_INDEX: "https://us-python.pkg.dev/ml-oss-artifacts-published/pypi-mirror/simple"
+  PIP_INDEX_URL: "https://us-python.pkg.dev/ml-oss-artifacts-published/pypi-mirror/simple"
+
 jobs:
   run-tests:
     defaults:
@@ -58,9 +68,10 @@ jobs:
       JAXCI_HERMETIC_PYTHON_VERSION: "${{ inputs.python }}"
       JAXCI_PYTHON: "python${{ inputs.python }}"
       JAXCI_ENABLE_X64: "${{ inputs.enable-x64 }}"
+      MAX_PROCESSES: ${{ inputs.max-processes }}
 
     steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
         with:
           persist-credentials: false
       - name: Download JAX CPU wheels

@@ -30,7 +30,7 @@ import jax
 import jax.numpy as jnp
 import jax.profiler
 import jax._src.test_util as jtu
-from jax._src.lib import jaxlib_extension_version
+
 from jax._src import profiler
 from jax import jit
 
@@ -111,9 +111,6 @@ class ProfilerTest(unittest.TestCase):
         self.assertIn(b"/device:TPU", proto)
       self.assertIn(b"pxla.py", proto)
 
-  @unittest.skipIf(
-      jaxlib_extension_version < 379, "Requires jaxlib 0.8 or later."
-  )
   def testProgrammaticProfilingConcurrency(self):
     def work():
       x = jax.pmap(lambda x: jax.lax.psum(x + 1, 'i'), axis_name='i')(
@@ -472,6 +469,7 @@ class ProfilerTest(unittest.TestCase):
     thread_profiler.join()
     self._check_xspace_pb_exist(logdir)
 
+  @unittest.skip("Profiler takes >30s on Cloud TPUs")
   @unittest.skipIf(
       not (portpicker and _pywrap_profiler_plugin),
     "Test requires xprof and portpicker")
@@ -509,6 +507,18 @@ class ProfilerTest(unittest.TestCase):
         unittest.mock.ANY,
         unittest.mock.ANY,
     )
+
+  def test_advanced_configuration_getter(self):
+    options = jax.profiler.ProfileOptions()
+    advanced_config = {
+        "tpu_trace_mode": "TRACE_COMPUTE",
+        "tpu_num_sparse_cores_to_trace": 1,
+        "enableFwThrottleEvent": True,
+    }
+    options.advanced_configuration = advanced_config
+    returned_config = options.advanced_configuration
+    self.assertDictEqual(returned_config, advanced_config)
+
 
 if __name__ == "__main__":
   absltest.main(testLoader=jtu.JaxTestLoader())

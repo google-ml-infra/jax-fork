@@ -12,8 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from collections.abc import Callable
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 import functools
 import itertools
 import math
@@ -33,6 +32,8 @@ from jax._src import linear_util as lu
 from jax._src import state
 from jax._src import test_util as jtu
 from jax._src.pallas import pallas_call
+from jax._src.pallas import primitives as pallas_primitives
+from jax._src.pallas import pallas_test_util as ptu
 from jax.experimental import pallas as pl
 from jax.interpreters import partial_eval as pe
 import jax.numpy as jnp
@@ -43,11 +44,9 @@ if sys.platform != "win32":
     from jax.experimental.pallas import mosaic_gpu as plgpu_mgpu
   except ImportError:
     plgpu_mgpu = None
-  from jax.experimental.pallas import triton as plgpu_triton
   from jax.experimental.pallas import tpu as pltpu
 else:
   plgpu_mgpu = None
-  plgpu_triton = None
   pltpu = None
 
 import hypothesis as hp
@@ -127,7 +126,7 @@ def make_shape_dtype_strategy(
     min_size_exp: int,
     max_size_exp: int,
     valid_dtypes: Sequence[jnp.dtype],
-    max_bytes: int = 2**16,
+    max_bytes: int = 2**15,
 ) -> jax.ShapeDtypeStruct:
   dtype = draw(hps.sampled_from(valid_dtypes))
   # To generate shapes with power-of-two sizes, we draw the exponents of the
@@ -175,6 +174,8 @@ def select_n_strategy(
               # TODO(sharadmv,apaszke): enable bf16
               # np.dtype(jnp.bfloat16),
           ],
+          # Max 4K bytes. Helps avoid slow input generation.
+          max_bytes=2**12,
       )
   )
   allowed_elements = hps.integers(min_value=0, max_value=n_cases - 1)
@@ -274,21 +275,7 @@ UNARY_FUNCTIONS = [
 ]
 
 
-class PallasBaseTest(jtu.JaxTestCase):
-  INTERPRET = False
-
-  def setUp(self):
-    if not self.INTERPRET:
-      if jtu.device_under_test() == "cpu":
-        self.skipTest("Only interpret mode supported on CPU")
-      if (jtu.test_device_matches(["cuda"]) and
-          not jtu.is_cuda_compute_capability_at_least("8.0")):
-        self.skipTest("Only works on GPUs with capability >= sm80")
-      if (jtu.test_device_matches(["cuda"]) and use_mosaic_gpu and
-          not jtu.is_cuda_compute_capability_at_least("9.0")):
-        self.skipTest("Mosaic GPU requires capability >= sm90")
-
-    super().setUp()
+class PallasBaseTest(ptu.PallasTest):
 
   @classmethod
   def pallas_call(cls, *args, **kwargs):
@@ -306,7 +293,7 @@ class PallasBaseTest(jtu.JaxTestCase):
       self.skipTest("TODO: Mosaic GPU does not support this yet")
 
 
-@jtu.thread_unsafe_test_class()  # hypothesis is not thread safe
+@jtu.thread_unsafe_test_class(condition=not jtu.hypothesis_is_thread_safe())
 class OpsTest(PallasBaseTest):
 
   @parameterized.named_parameters(
@@ -537,9 +524,6 @@ class OpsTest(PallasBaseTest):
   def test_reduce_int32(self, reduction_op, input_shape):
     if jtu.test_device_matches(["gpu"]):
       self.skipTest("TODO: error on GPU")
-    # TODO(b/395579834): Remove this skip later.
-    if not jtu.if_cloud_tpu_at_least(2025, 9, 1):
-      self.skipTest("Requires libtpu built after 2025-09-01")
 
     def kernel(x_ref, o_ref):
       o_ref[0, 0] = reduction_op(x_ref[...])
@@ -566,6 +550,8 @@ class OpsTest(PallasBaseTest):
   # TODO(sharadmv): test rank < 2, size < 2
   @hp.given(select_n_strategy(max_cases=2, min_rank=2, max_rank=4,
                               min_size_exp=1))
+  @hp.settings(suppress_health_check=([hp.HealthCheck.too_slow]
+                                      if jtu.is_asan() else []))
   def test_select_n(self, args):
     if jtu.test_device_matches(["gpu"]):
       self.skipTest("TODO: error on GPU, lowering bug for select_n")
@@ -669,8 +655,10 @@ class OpsTest(PallasBaseTest):
     shape = (8, 128)
     if to_dtype in {"int2", "uint2"}:
       # Make sure #rows is a least the packing factor of int2.
-      # TODO(b/343490729): XLA convert(f32[16, 128]) fails on v5p.
-      shape = (32, 128)
+      # TODO: b/343490729 - XLA convert(f32[16, 128]) fails on v5p.
+      # TODO: b/459440496 - Support more shapes for int2. The number of rows is
+      # required to be an even multiple of 128.
+      shape = (128, 128)
     x = data.draw(hnp.arrays(from_dtype, shape, elements=elements))
     x = jnp.asarray(x)
     def kernel(x_ref, y_ref):
@@ -716,6 +704,9 @@ class OpsTest(PallasBaseTest):
         or from_dtype in {"int2", "uint2"}
     ):
       self.skipTest("sub-byte casts are buggy on GPU")  # b/391292861
+    if self.INTERPRET and (to_dtype in {"int2", "uint2"} or
+                           from_dtype in {"int2", "uint2"}):
+      self.skipTest("Test fails on CPU.")
     if from_dtype == "float16" or to_dtype == "float16" and not sut_is_mosaic_gpu:
       self.skipTest("float16 is only supported with Mosaic GPU")
     if sut_is_mosaic_gpu:
@@ -732,14 +723,6 @@ class OpsTest(PallasBaseTest):
     } or to_dtype in {"float8_e4m3b11fnuz", "float8_e5m2", "float8_e4m3fn"}:
       if not jtu.test_device_matches(["tpu"]):
         self.skipTest("Not supported on this hardware")
-      if jtu.get_tpu_version() >= 5 and not jtu.if_cloud_tpu_at_least(
-          2025, 3, 9
-      ):
-        self.skipTest("Test requires libtpu from 2025/3/9 or later")
-      if jtu.get_tpu_version() < 5 and not jtu.if_cloud_tpu_at_least(
-          2025, 5, 15
-      ):
-        self.skipTest("Test requires libtpu from 2025/5/15 or later")
     if from_dtype in ("uint2", "int2") and to_dtype == "bool":
       self.skipTest(
           "TODO(b/343490729): XLA compare(s2, s2) yields wrong results"
@@ -770,7 +753,7 @@ class OpsTest(PallasBaseTest):
       self.skipTest("Not supported: cannot extend to sub-32 bit types")
 
     if from_dtype != "bool":
-      from_bitwidth = dtypes.bit_width(from_dtype)
+      from_bitwidth = dtypes.itemsize_bits(from_dtype)
       from_int_dtype = getattr(jnp, "uint" + str(from_bitwidth))
       if randomize:
         # randint has no support for 4 bit integers.
@@ -1009,9 +992,18 @@ class OpsTest(PallasBaseTest):
       -0.2, jnp.inf, -jnp.inf, jnp.nan, 0.0, 1.0, -1.0, 0.5,
   ]
 
-  def test_is_finite(self):
-    if jtu.test_device_matches(["gpu"]):
-      self.skipTest("Not supported on GPU")
+  @parameterized.named_parameters(
+      (dtype.__name__, dtype)
+      for dtype in (jnp.float32, jnp.float16, jnp.bfloat16)
+      # other dtypes are TBD once is_nan and is_inf supports them
+  )
+  def test_is_finite(self, dtype):
+    if jtu.test_device_matches(["tpu"]) and dtype != jnp.float32:
+      # The original test worked only fp32@TPU. Have no way to test TPU with other types.
+      self.skipTest("Not tested on TPU, todo for the respective team")
+    if jtu.test_device_matches(["cuda"]):
+      # The original test worked only on fp32@TPU, have no way to test CUDA
+      self.skipTest("Not tested on CUDA, todo for the respective team")
 
     size = len(self.IS_FINITE_TEST_VALUES)
 
@@ -1022,14 +1014,46 @@ class OpsTest(PallasBaseTest):
     def kernel(x_ref, o_ref):
       o_ref[...] = lax.is_finite(x_ref[...])
 
-    x = jnp.array(self.IS_FINITE_TEST_VALUES, dtype=jnp.float32)
+    x = jnp.array(self.IS_FINITE_TEST_VALUES, dtype=dtype)
     out = kernel(x)
     expected = lax.is_finite(x)
     self.assertArraysEqual(out, expected)
 
-  def test_is_finite_scalar(self):
-    if jtu.test_device_matches(["gpu"]):
-      self.skipTest("Not supported on GPU")
+  @parameterized.parameters(jnp.float32, jnp.bfloat16, jnp.int32, jnp.int16)
+  def test_clamp(self, dtype):
+    if dtype == jnp.int16 and jtu.test_device_matches(["tpu"]):
+      self.skipTest("int16 is not supported on TPU")
+
+    k1, k2, k3 = random.split(jax.random.key(0), num=3)
+    if jnp.issubdtype(dtype, jnp.floating):
+      lo_ = random.normal(k1, (8, 128), dtype=dtype)
+      hi_ = random.normal(k2, (8, 128), dtype=dtype)
+      x = random.normal(k3, (8, 128), dtype=dtype)
+    else:
+      lo_ = random.randint(k1, (8, 128), -100, 100, dtype=dtype)
+      hi_ = random.randint(k2, (8, 128), -100, 100, dtype=dtype)
+      x = random.randint(k3, (8, 128), -100, 100, dtype=dtype)
+    lo = jnp.minimum(lo_, hi_)
+    hi = jnp.maximum(lo_, hi_)
+    @functools.partial(
+        self.pallas_call, out_shape=jax.ShapeDtypeStruct((8, 128), dtype),
+    )
+    def kernel(lo_ref, x_ref, hi_ref, o_ref):
+      o_ref[...] = lax.clamp(lo_ref[...], x_ref[...], hi_ref[...])
+    np.testing.assert_array_equal(kernel(lo, x, hi), lax.clamp(lo, x, hi))
+
+  @parameterized.named_parameters(
+      (dtype.__name__, dtype)
+      for dtype in (jnp.float32, jnp.float16, jnp.bfloat16)
+      # other dtypes are TBD once is_nan and is_inf supports them
+  )
+  def test_is_finite_scalar(self, dtype):
+    if jtu.test_device_matches(["tpu"]) and dtype != jnp.float32:
+      # The original test worked only fp32@TPU. Have no way to test TPU with other types.
+      self.skipTest("Not tested on TPU, todo for the respective team")
+    if jtu.test_device_matches(["cuda"]):
+      # The original test worked only on fp32@TPU, have no way to test CUDA
+      self.skipTest("Not tested on CUDA, todo for the respective team")
 
     size = len(self.IS_FINITE_TEST_VALUES)
 
@@ -1043,7 +1067,7 @@ class OpsTest(PallasBaseTest):
       for i in range(8):
         o_ref[i] = jnp.isfinite(x_ref[i])
 
-    x = jnp.array(self.IS_FINITE_TEST_VALUES, dtype=jnp.float32)
+    x = jnp.array(self.IS_FINITE_TEST_VALUES, dtype=dtype)
     out = kernel(x)
     expected = lax.is_finite(x)
     self.assertArraysEqual(out, expected)
@@ -1084,7 +1108,8 @@ class OpsTest(PallasBaseTest):
       for fn, dtype in itertools.product(*args)
   )
   def test_elementwise(self, fn, dtype):
-    self.skip_if_mosaic_gpu()
+    if fn not in (jnp.sin, jnp.cos) or dtype == "float64":
+      self.skip_if_mosaic_gpu()
 
     if not jax.config.x64_enabled and jnp.dtype(dtype).itemsize == 8:
       self.skipTest("64-bit types require x64_enabled")
@@ -1392,8 +1417,6 @@ class OpsTest(PallasBaseTest):
 
     if jtu.test_device_matches(["tpu"]):
       if dtype == jnp.bfloat16:
-        if not jtu.if_cloud_tpu_at_least(2025, 7, 25):
-          self.skipTest("Requires libtpu built after 2025-07-25")
         if not jtu.is_device_tpu_at_least(version=4):
           self.skipTest("Requires TPUv4+")
 
@@ -1465,7 +1488,7 @@ class OpsTest(PallasBaseTest):
     if jtu.test_device_matches(["gpu"]):
       self.skipTest("TPU only test")
 
-    if jtu.test_device_matches(["tpu"]) and not jtu.if_cloud_tpu_at_least(
+    if jtu.test_device_matches(["tpu"]) and not jtu.is_cloud_tpu_at_least(
         2025, 10, 5
     ):
       self.skipTest("Requires libtpu built after 2025-10-05")
@@ -1514,6 +1537,45 @@ class OpsTest(PallasBaseTest):
     )
 
   @parameterized.product(
+      shapes_and_dims_numbers=(
+          ((3, 4, 128), (4, 2, 128), (((2,), (2,)), ((1,), (0,)))),
+          ((3, 4, 128), (2, 4, 128), (((2,), (2,)), ((1,), (1,)))),
+          ((3, 4, 256), (2, 3, 256), (((2,), (2,)), ((0,), (1,)))),
+          ((4, 3, 2, 32), (2, 128, 32, 2), (((3,), (2,)), ((2,), (3,)))),
+      ),
+  )
+  def test_dot_general_non_front_batch_dims(self, shapes_and_dims_numbers):
+    if jtu.test_device_matches(["gpu"]):
+      self.skipTest("TPU only test")
+
+    if jtu.test_device_matches(["tpu"]) and not jtu.is_cloud_tpu_at_least(
+        2025, 11, 30
+    ):
+      self.skipTest("Requires libtpu built after 2025-11-30")
+
+    x_shape, y_shape, dims_numbers = shapes_and_dims_numbers
+
+    k1, k2 = random.split(jax.random.key(0))
+    x = jax.random.normal(k1, x_shape, dtype=jnp.float32)
+    y = jax.random.normal(k2, y_shape, dtype=jnp.float32)
+
+    # Just infer shape from jax.
+    expected = jax.lax.dot_general(x, y, dimension_numbers=dims_numbers)
+
+    @functools.partial(
+        self.pallas_call,
+        out_shape=jax.ShapeDtypeStruct(expected.shape, jnp.float32),
+    )
+    def kernel(x_ref, y_ref, out_ref):
+      out_ref[...] = jax.lax.dot_general(
+          x_ref[...],
+          y_ref[...],
+          dimension_numbers=dims_numbers,
+      )
+
+    np.testing.assert_allclose(kernel(x, y), expected, atol=1e-5, rtol=1e-5)
+
+  @parameterized.product(
       batch_size=(None, 1, 2),
       # dims_numbers is without batch dims
       shapes_and_dims_numbers=(
@@ -1549,7 +1611,7 @@ class OpsTest(PallasBaseTest):
     if jtu.test_device_matches(["gpu"]):
       self.skipTest("TPU only test")
 
-    if jtu.test_device_matches(["tpu"]) and not jtu.if_cloud_tpu_at_least(
+    if jtu.test_device_matches(["tpu"]) and not jtu.is_cloud_tpu_at_least(
         2025, 10, 5
     ):
       self.skipTest("Requires libtpu built after 2025-10-05")
@@ -1645,8 +1707,6 @@ class OpsTest(PallasBaseTest):
       self.skipTest("TPU only test")
 
     if jtu.test_device_matches(["tpu"]):
-      if not jtu.if_cloud_tpu_at_least(2025, 8, 10):
-        self.skipTest("Requires libtpu built after 2025-07-24")
       if not jtu.is_device_tpu_at_least(5) and rhs_is_vector:
         self.skipTest("Requires TPUv5+ for sublane gather")
 
@@ -1695,8 +1755,6 @@ class OpsTest(PallasBaseTest):
     if jtu.test_device_matches(["tpu"]):
       if out_dtype == "bfloat16" and not jtu.is_device_tpu_at_least(6):
         self.skipTest("bfloat16 is not supported on older TPU generations")
-      if not jtu.if_cloud_tpu_at_least(2025, 1, 9):
-        self.skipTest("Requires libtpu built after 2025-01-09")
     elif jtu.test_device_matches(["gpu"]):
       if dtype == "bfloat16":
         self.skipTest("bfloat16 not supported")
@@ -1829,143 +1887,6 @@ class OpsTest(PallasBaseTest):
       o_ref[...] = f()
 
     np.testing.assert_allclose(f(), kernel())
-
-  @parameterized.parameters("float16", "bfloat16", "float32")
-  def test_approx_tanh(self, dtype):
-    self.skip_if_mosaic_gpu()
-
-    if jtu.test_device_matches(["tpu"]):
-      self.skipTest("Not implemented on TPU")
-
-    if self.INTERPRET:
-      self.skipTest("approx_tanh is not supported in interpret mode")
-
-    if (dtype == "bfloat16" and
-        not jtu.is_cuda_compute_capability_at_least("9.0")):
-      self.skipTest("tanh.approx.bf16 requires a GPU with capability >= sm90")
-
-    @functools.partial(
-        self.pallas_call, out_shape=jax.ShapeDtypeStruct((4,), dtype),
-    )
-    def kernel(x_ref, o_ref):
-      o_ref[...] = plgpu_triton.approx_tanh(x_ref[...])
-
-    x = jnp.asarray([-1, 0.42, 0.24, 1]).astype(dtype)
-    # We upcast to float32 because NumPy <2.0 does not handle custom dtypes
-    # properly. See https://github.com/jax-ml/jax/issues/11014.
-    np.testing.assert_allclose(
-        kernel(x).astype(jnp.float32),
-        jnp.tanh(x).astype(jnp.float32),
-        atol=5e-3,
-        rtol=5e-3,
-    )
-
-  def test_elementwise_inline_asm(self):
-    self.skip_if_mosaic_gpu()
-
-    if jtu.test_device_matches(["tpu"]):
-      self.skipTest("Not implemented: elementwise_inline_asm_p")
-
-    if self.INTERPRET:
-      self.skipTest(
-          "elementwise_inline_asm is not supported in interpret mode"
-      )
-
-    @functools.partial(
-        self.pallas_call,
-        out_shape=jax.ShapeDtypeStruct((256,), jnp.float16),
-    )
-    def kernel(x_ref, o_ref):
-      [o_ref[...]] = plgpu_triton.elementwise_inline_asm(
-          "tanh.approx.f16x2 $0, $1;",
-          args=[x_ref[...]],
-          constraints="=r,r",
-          pack=2,
-          result_shape_dtypes=[jax.ShapeDtypeStruct(x_ref.shape, x_ref.dtype)],
-      )
-
-    x = jnp.arange(256).astype(jnp.float16)
-    np.testing.assert_allclose(kernel(x), jnp.tanh(x), atol=5e-3, rtol=5e-3)
-
-  def test_debug_barrier(self):
-    self.skip_if_mosaic_gpu()
-
-    if jtu.test_device_matches(["tpu"]):
-      self.skipTest("Not implemented: debug_barrier_p")
-
-    if self.INTERPRET:
-      self.skipTest("debug_barrier is not supported in interpret mode")
-
-    @functools.partial(
-        self.pallas_call,
-        out_shape=jax.ShapeDtypeStruct((2,), jnp.float32),
-    )
-    def kernel(x_ref, o_ref):
-      o_ref[...] = x_ref[...]
-      plgpu_triton.debug_barrier()
-
-    x = jnp.array([4.2, 2.4]).astype(jnp.float32)
-    np.testing.assert_array_equal(kernel(x), x)
-
-  @unittest.skipIf(
-      sys.platform == "win32",
-      "plgpu_triton.CompilerParams unavailable on Windows",
-  )
-  def test_debug_print(self):
-    self.skip_if_mosaic_gpu()
-
-    if jtu.test_device_matches(["tpu"]):
-      self.skipTest("Test for TPU is covered in tpu_pallas_test.py")
-
-    # TODO: this test flakes on gpu
-    if jtu.test_device_matches(["gpu"]):
-      self.skipTest("This test flakes on gpu")
-
-    @functools.partial(
-        self.pallas_call,
-        out_shape=jax.ShapeDtypeStruct((2,), jnp.float32),
-        compiler_params=plgpu_triton.CompilerParams(
-            num_warps=1, num_stages=1
-        ),
-    )
-    def kernel(x_ref, o_ref):
-      pl.debug_print("It works!")
-
-    x = jnp.array([4.2, 2.4]).astype(jnp.float32)
-    with jtu.capture_stdout() as output:
-      jax.block_until_ready(kernel(x))
-      jax.effects_barrier()
-
-    self.assertIn("It works!", output())
-
-  @unittest.skipIf(
-      sys.platform == "win32",
-      "plgpu_triton.CompilerParams unavailable on Windows",
-  )
-  def test_debug_print_with_values(self):
-    if jtu.test_device_matches(["tpu"]):
-      self.skipTest("Test for TPU is covered in tpu_pallas_test.py")
-
-    # TODO: this test flakes on gpu
-    if jtu.test_device_matches(["gpu"]):
-      self.skipTest("This test flakes on gpu")
-
-    @functools.partial(
-        self.pallas_call,
-        out_shape=jax.ShapeDtypeStruct((2,), jnp.float32),
-        compiler_params=plgpu_triton.CompilerParams(
-            num_warps=1, num_stages=1
-        ),
-    )
-    def kernel(x_ref, o_ref):
-      pl.debug_print("x[0] =", x_ref[0])
-
-    x = jnp.array([4.2, 2.4]).astype(jnp.float32)
-    with jtu.capture_stdout() as output:
-      jax.block_until_ready(kernel(x))
-      jax.effects_barrier()
-
-    self.assertIn("x[0] = 4.2", output())
 
   @parameterized.parameters(
       ((2, 4), (8,)),
@@ -2104,8 +2025,6 @@ class OpsTest(PallasBaseTest):
             "The Pallas TPU lowering currently supports only blocks of rank"
             " >= 1"
         )
-      if dtype is jnp.bool_ and not jtu.if_cloud_tpu_at_least(2025, 6, 5):
-        self.skipTest("Requires libtpu built after 2025-06-05")
       if (
           len(in_shape) == 1
           and len(out_shape) == 1
@@ -2159,14 +2078,13 @@ class OpsTest(PallasBaseTest):
       trans_x=[False, True],
       trans_y=[False, True],
   )
-  @jtu.skip_if_triton_exceeds_shared_memory(device_patterns="RTX PRO 6000 Blackwell")
-  @jtu.skip_if_mosaic_gpu_exceeds_shared_memory(device_patterns="RTX PRO 6000 Blackwell")
+  @jtu.skip_if_triton_exceeds_shared_memory(
+    device_patterns=("RTX PRO 6000 Blackwell", "GB10$"))
+  @jtu.skip_if_mosaic_gpu_exceeds_shared_memory(
+    device_patterns=("RTX PRO 6000 Blackwell", "GB10$"))
   def test_dot(self, lhs_and_rhs_shape, dtype, trans_x, trans_y):
     self.skip_if_mosaic_gpu()
 
-    # TODO(apaszke): Remove after 12 weeks have passed.
-    if not jtu.if_cloud_tpu_at_least(2024, 12, 19):
-      self.skipTest("Requires libtpu built after 2024-12-19")
     lhs_shape, rhs_shape = lhs_and_rhs_shape
 
     final_lhs_shape = lhs_shape[::-1] if trans_x else lhs_shape
@@ -2364,7 +2282,7 @@ class OpsTest(PallasBaseTest):
     )
     def swap(_, _2, x_ref, y_ref):
       x = x_ref[:]
-      y = pl.swap(y_ref, (slice(None),), x)
+      y = pallas_primitives.swap(y_ref, (slice(None),), x)
       x_ref[:] = y
 
     x = random.normal(random.key(0), (m, n))
@@ -2388,7 +2306,7 @@ class OpsTest(PallasBaseTest):
     )
     def masked_swap(_, _2, mask_ref, x_ref, y_ref):
       x = x_ref[:]
-      y = pl.swap(y_ref, (slice(None),), x, mask=mask_ref[:])
+      y = pallas_primitives.swap(y_ref, (slice(None),), x, mask=mask_ref[:])
       x_ref[:] = y
 
     x = random.normal(random.key(0), (m, n))
@@ -2415,7 +2333,9 @@ class OpsTest(PallasBaseTest):
     )
     def masked_oob_swap_slice(_, _2, mask_ref, start_idx_ref, x_ref, y_ref):
       x, mask = x_ref[:], mask_ref[:]
-      y = pl.swap(y_ref, (pl.dslice(start_idx_ref[()], n)), x, mask=mask)
+      y = pallas_primitives.swap(
+          y_ref, (pl.dslice(start_idx_ref[()], n)), x, mask=mask
+      )
       x_ref[:] = y
 
     x = random.normal(random.key(0), (n,))
@@ -2655,9 +2575,6 @@ class OpsTest(PallasBaseTest):
   ):
     if jtu.test_device_matches(["gpu"]):
       self.skipTest("Not implemented on GPU")
-    # TODO(apaszke): Remove after 12 weeks have passed.
-    if not jtu.if_cloud_tpu_at_least(2024, 12, 19):
-      self.skipTest("Requires libtpu built after 2024-12-19")
 
     x = jnp.arange(np.prod(array_shapes), dtype=dtype).reshape(array_shapes)
 
@@ -2732,8 +2649,6 @@ class OpsTest(PallasBaseTest):
             f" smem_bytes={x_dim_size * y_dim_size * z_dim_size * 4} > 32768"
         )
     self.skip_if_mosaic_gpu()
-    if not jtu.if_cloud_tpu_at_least(2025, 5, 22):
-      self.skipTest("Requires libtpu built after 2025-5-22")
 
     x = jnp.arange(x_dim_size * y_dim_size * z_dim_size, dtype=dtype).reshape(
         (x_dim_size, y_dim_size, z_dim_size)
@@ -2772,29 +2687,6 @@ class OpsTest(PallasBaseTest):
     if jtu.test_device_matches(["gpu"]):
       self.skipTest("Not implemented on GPU")
     in_shape, transpose_axes = shape_and_axes
-
-    if transpose_axes in (
-        (1, 2, 0),
-        (2, 0, 1),
-        (2, 1, 0),
-    ) and not jtu.if_cloud_tpu_at_least(2025, 8, 16):
-      self.skipTest("Requires libtpu built after 2025-8-16")
-
-    rank = len(in_shape)
-    if (
-        rank > 3
-        and transpose_axes[-3:] == (rank - 2, rank - 3, rank - 1)
-        and not jtu.if_cloud_tpu_at_least(2025, 8, 29)
-    ):
-      self.skipTest("Requires libtpu built after 2025-8-29")
-
-    if (
-        rank == 5
-        and in_shape == (1, 2, 9, 3, 4)
-        and not jtu.if_cloud_tpu_at_least(2025, 9, 19)
-    ):
-      self.skipTest("Requires libtpu built after 2025-9-19")
-
     x = jnp.arange(math.prod(in_shape), dtype=jnp.float32).reshape(in_shape)
     expected = jnp.transpose(x, axes=transpose_axes)
 
@@ -2816,8 +2708,6 @@ class OpsTest(PallasBaseTest):
       self.skipTest("Not supported on this hardware")
     if jtu.get_tpu_version() < 6:
       self.skipTest("Requires TPUv6 or newer")
-    if not jtu.if_cloud_tpu_at_least(2025, 9, 22):
-      self.skipTest("Requires libtpu built after 2025-9-22")
 
     dtype = jnp.int8
     xspec = pl.BlockSpec((32, 128), lambda i: (i, 0))
@@ -2870,6 +2760,23 @@ class OpsTest(PallasBaseTest):
     )
     np.testing.assert_array_equal(result, expected)
 
+  def test_delay(self):
+    if jtu.test_device_matches(["gpu"]):
+      if not use_mosaic_gpu:
+        self.skipTest("Delay is only implemented on the MGPU backend for GPUs.")
+    if self.INTERPRET:
+      self.skipTest("Not implemented in interpret mode.")
+    # This is mostly to test that the kernel compiles. It's difficult to
+    # test the exact timing of the delay.
+    def kernel(x_ref, o_ref):
+      pl.delay(100_000)
+      o_ref[...] = x_ref[...]
+    x = jax.random.normal(jax.random.key(0), (128,), dtype=jnp.float32)
+    result = pl.pallas_call(
+        kernel, out_shape=x,
+        interpret=self.INTERPRET)(x)
+    np.testing.assert_array_equal(result, x)
+
 
 class OpsInterpretTest(OpsTest):
   INTERPRET = True
@@ -2901,10 +2808,7 @@ class PallasPrimitivesTest(PallasBaseTest):
   ])
   def test_load_pretty_print(self, expr, expected):
     def body(x_ref):
-      with jtu.ignore_warning(
-          category=DeprecationWarning, message="pl.load is deprecated"
-      ):
-        x = pl.load(x_ref, expr())
+      x = pallas_primitives.load(x_ref, expr())
       return [x]
     jaxpr, _ , _ = pe.trace_to_jaxpr_dynamic(
         wrap_init(body, 1), [state.shaped_array_ref((4, 3, 2), jnp.int32)])
@@ -2919,10 +2823,9 @@ class PallasPrimitivesTest(PallasBaseTest):
   ])
   def test_store_pretty_print(self, expr, expected):
     def body(x_ref):
-      with jtu.ignore_warning(
-          category=DeprecationWarning, message="pl.(load|store) is deprecated"
-      ):
-        pl.store(x_ref, expr(), pl.load(x_ref, expr()))
+      pallas_primitives.store(
+          x_ref, expr(), pallas_primitives.load(x_ref, expr())
+      )
       return []
     jaxpr, _ , _ = pe.trace_to_jaxpr_dynamic(
         wrap_init(body, 1), [state.shaped_array_ref((4, 3, 2), jnp.int32)])
@@ -2942,10 +2845,9 @@ class PallasPrimitivesTest(PallasBaseTest):
   ])
   def test_swap_pretty_print(self, expr, expected):
     def body(x_ref):
-      with jtu.ignore_warning(
-          category=DeprecationWarning, message="pl.(load|swap) is deprecated"
-      ):
-        x = pl.swap(x_ref, expr(), pl.load(x_ref, expr()))
+      x = pallas_primitives.swap(
+          x_ref, expr(), pallas_primitives.load(x_ref, expr())
+      )
       return [x]
     jaxpr, _ , _ = pe.trace_to_jaxpr_dynamic(
         wrap_init(body, 1), [state.shaped_array_ref((4, 3, 2), jnp.int32)])
@@ -2955,8 +2857,6 @@ class PallasPrimitivesTest(PallasBaseTest):
   def test_reciprocal(self, approx):
     if not jtu.test_device_matches(["tpu"]):
       self.skipTest("Not implemented on non-TPU devices")
-    if not jtu.if_cloud_tpu_at_least(2025, 3, 8):
-      self.skipTest("Test requires libtpu from 2025/3/8 or later")
     shape = (32, 256)
     x = jnp.arange(np.prod(shape), dtype=jnp.float32).reshape(shape)
 

@@ -42,6 +42,7 @@ limitations under the License.
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/Matchers.h"
+#include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/OperationSupport.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/Region.h"
@@ -57,6 +58,22 @@ namespace mlir {
 namespace tpu {
 
 namespace {
+
+// This should only be used to canonicalize away EraseLayoutOps that feed ops
+// that only consume memrefs and don't return them.
+LogicalResult propagateTiledLayoutToConsumer(Operation* op,
+                                             PatternRewriter& rewriter) {
+  bool modified = false;
+  for (unsigned int i = 0; i < op->getNumOperands(); ++i) {
+    if (auto erase_layout_op =
+            op->getOperand(i).getDefiningOp<tpu::EraseLayoutOp>()) {
+      modified = true;
+      rewriter.modifyOpInPlace(
+          op, [&]() { op->setOperand(i, erase_layout_op.getOperand()); });
+    }
+  }
+  return success(modified);
+}
 
 llvm::RoundingMode convertTpuRoundingModeToLLVMIR(tpu::RoundingMode mode) {
   switch (mode) {
@@ -85,8 +102,7 @@ static FailureOr<APFloat> convertFloatValue(
 
 LogicalResult UnrollVectorsOp::canonicalize(UnrollVectorsOp op,
                                             PatternRewriter &rewriter) {
-  RollVectorsOp roll_op =
-      dyn_cast_or_null<RollVectorsOp>(op.getOperand().getDefiningOp());
+  RollVectorsOp roll_op = op.getOperand().getDefiningOp<RollVectorsOp>();
   if (!roll_op) {
     return failure();
   }
@@ -106,8 +122,8 @@ LogicalResult UnrollVectorsOp::canonicalize(UnrollVectorsOp op,
 LogicalResult BitcastOp::verify() {
   auto in_ty = getInput().getType();
   auto out_ty = getOutput().getType();
-  auto in_bitwidth = in_ty.getElementTypeBitWidth();
-  auto out_bitwidth = out_ty.getElementTypeBitWidth();
+  auto in_bitwidth = getElementTypeBitwidth(in_ty);
+  auto out_bitwidth = getElementTypeBitwidth(out_ty);
   if (in_bitwidth != out_bitwidth) {
     if (in_ty.getRank() < 2 || out_ty.getRank() < 2) {
       return emitError(
@@ -131,8 +147,24 @@ LogicalResult BitcastOp::verify() {
   return success();
 }
 
+OpFoldResult BitcastVregOp::fold(FoldAdaptor adaptor) {
+  // Bitcast from X -> X is a no-op.
+  if (getType() == getInput().getType()) {
+    return getInput();
+  }
+  // Bitcast from X -> Y -> ... -> Z -> X is a no-op.
+  Value input = getInput();
+  while (auto op = dyn_cast<BitcastVregOp>(input.getDefiningOp())) {
+    input = op.getInput();
+    if (getType() == input.getType()) {
+      return input;
+    }
+  }
+  return nullptr;
+}
+
 LogicalResult MemRefSliceOp::verify() {
-  auto source_type = getMemRefType(getMemRef());
+  auto source_type = getMemRef().getType();
   auto target_type = getType();
   auto source_layout = source_type.getLayout();
   auto target_layout = target_type.getLayout();
@@ -142,6 +174,11 @@ LogicalResult MemRefSliceOp::verify() {
   if (!source_type.hasStaticShape()) {
     return emitOpError(
         "Only slicing of memrefs with static shapes is supported.");
+  }
+  if (getDynamicSizes().size() != target_type.getNumDynamicDims()) {
+    return emitOpError(
+        "Number of provided dynamic dimensions sizes must match the number of "
+        "dynamic dimensions in the target type.");
   }
   auto source_shape = source_type.getShape();
   bool is_semaphore =
@@ -158,57 +195,17 @@ LogicalResult MemRefSliceOp::verify() {
   }
   // TODO(apaszke): Check that the result has a smaller shape.
   // TODO(apaszke): Check that strides are equivalent.
-  // Source and target attributes may be different before propagation is done by
-  // the canonicalizer, so we allow this when attributes are "unset" in the
-  // target type. Note that MemRefType does not allow a null layout so we treat
-  // the default identity affine map as an "unset" value instead.
+  // Source and target memory spaces may be different before propagation is done
+  // by memory space specialization.
   bool is_target_memory_space_provided = target_memory_space != nullptr;
   if (is_target_memory_space_provided &&
       target_memory_space != source_type.getMemorySpace()) {
     return emitOpError(
         "Memory spaces must match if the target memory space is provided.");
   }
-  if (isa<TiledLayoutAttr>(source_layout) &&
-      !isa<TiledLayoutAttr>(target_layout)) {
-    // TODO(slebedev): Remove this special-case once we move layout propagation
-    // to the infer-memref-layout pass.
-  } else if (isa<StridedLayoutAttr>(target_layout)) {
-    SmallVector<int64_t> source_strides;
-    int64_t source_offset;
-    if (failed(
-            source_type.getStridesAndOffset(source_strides, source_offset))) {
-      return failure();
-    }
-    int64_t target_offset = source_offset;
-    if (target_offset != ShapedType::kDynamic) {
-      for (auto [base_idx, source_stride] :
-           llvm::zip(getBaseIdx(), source_strides)) {
-        if (auto idx = getConstantIntValue(base_idx)) {
-          target_offset += *idx * source_stride;
-        } else {
-          target_offset = ShapedType::kDynamic;
-          break;
-        }
-      }
-    }
-    auto expected_layout =
-        StridedLayoutAttr::get(getContext(), target_offset, source_strides);
-    if (target_layout != expected_layout) {
-      return emitOpError("Layout mismatch: got ")
-             << target_layout << ", expected " << expected_layout << ".";
-    }
-  } else {
-    bool is_target_layout_identity_map =
-        isa<AffineMapAttr>(target_layout) && target_layout.isIdentity();
-    if (!is_target_layout_identity_map && target_layout != source_layout) {
-      return emitOpError(
-          "Layouts must match if the target layout is not an identity map.");
-    }
-  }
-  if (getDynamicSizes().size() != target_type.getNumDynamicDims()) {
-    return emitOpError(
-        "Number of provided dynamic dimensions sizes must match the number of "
-        "dynamic dimensions in the target type.");
+  if (isa<TiledLayoutAttr>(source_layout) !=
+      isa<TiledLayoutAttr>(target_layout)) {
+    return emitOpError("Source and target layouts must match.");
   }
   return success();
 }
@@ -243,6 +240,7 @@ struct MemRefSliceFoldConstantDynamicDim
       } else {
         new_dynamic_sizes.push_back(dynamic_size);
       }
+      ++dynamic_dim_index;
     }
     // Update the memref_slice op and create a cast op to convert to the old
     // type.
@@ -252,6 +250,8 @@ struct MemRefSliceFoldConstantDynamicDim
       op.getResult().setType(new_type);
       op.getDynamicSizesMutable().assign(new_dynamic_sizes);
     });
+    mlir::OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPointAfter(op);
     auto cast_op = memref::CastOp::create(rewriter, op.getLoc(), old_type, op);
     rewriter.replaceAllUsesExcept(op, cast_op, cast_op);
     return success();
@@ -277,7 +277,7 @@ struct MemRefSliceEraseLayout : public OpRewritePattern<MemRefSliceOp> {
     auto slice = MemRefSliceOp::create(rewriter, op.getLoc(), new_result_type,
                                        layout_ref, op.getBaseIdx(),
                                        op.getDynamicSizes());
-    rewriter.replaceOpWithNewOp<EraseLayoutOp>(op, op.getType(), slice);
+    rewriter.replaceOpWithNewOp<EraseLayoutOp>(op, slice);
     return success();
   }
 };
@@ -303,80 +303,52 @@ LogicalResult MemRefSqueezeOp::verify() {
 
   auto source_shape = source_type.getShape();
   auto target_shape = target_type.getShape();
-  auto squeezed_or =
-      computeSqueezedDimsChecked(*this, source_shape, target_shape);
-  if (failed(squeezed_or)) {
-    return failure();
+  FAILUREOR_ASSIGN_OR_RETURN(
+      auto squeezed,
+      computeSqueezedDimsChecked(*this, source_shape, target_shape));
+  if (squeezed.empty() && source_shape != target_shape) {
+    return emitOpError(
+        "Source and target shapes must be the same if no dimensions are "
+        "squeezed.");
   }
 
   auto source_layout = source_type.getLayout();
   auto target_layout = target_type.getLayout();
-  if (isa<TiledLayoutAttr>(source_layout) &&
+  if (!isa<TiledLayoutAttr>(source_layout) &&
       !isa<TiledLayoutAttr>(target_layout)) {
-    // TODO(slebedev): Remove this special-case once we move layout propagation
-    // to the infer-memref-layout pass.
-  } else if (isa<StridedLayoutAttr>(target_layout)) {
-    SmallVector<int64_t> source_strides;
-    int64_t source_offset;
-    if (failed(
-            source_type.getStridesAndOffset(source_strides, source_offset))) {
-      return failure();
-    }
-    SmallVector<int64_t> target_strides;
-    for (auto [i, stride] : llvm::enumerate(source_strides)) {
-      if (!llvm::is_contained(*squeezed_or, i)) {
-        target_strides.push_back(stride);
-      }
-    }
-    auto expected_layout =
-        StridedLayoutAttr::get(getContext(), source_offset, target_strides);
-    if (target_layout != expected_layout) {
-      return emitOpError("Layout mismatch: got ")
-             << target_layout << ", expected " << expected_layout << ".";
-    }
-  }
-
-  auto erase_layout_op = getInput().getDefiningOp<tpu::EraseLayoutOp>();
-  if (!erase_layout_op) {
     return success();
   }
 
-  auto layout_ref = erase_layout_op.getOperand();
-  MemRefType layout_ty = getMemRefType(layout_ref);
-  auto layout_attr = dyn_cast<tpu::TiledLayoutAttr>(layout_ty.getLayout());
-  if (!layout_attr) {
-    return emitOpError(
-        "Input from EraseLayoutOp is expected to have a TiledLayoutAttr.");
-  }
-  auto &squeezed = squeezed_or.value();
-  if (squeezed.empty() && source_shape != target_shape) {
-    return failure();
-  }
-
-  auto tiles = layout_attr.getTiles();
-  if (tiles.size() == 1) {
-    auto tile = layout_attr.getTiles().front();
-    auto tile_dims = tile.dimensions();
-    int first_tiled = source_shape.size() - tile_dims.size();
-    for (int dim : squeezed) {
-      if (dim >= first_tiled) {
-        int tile_idx = dim - first_tiled;
-        if (tile_idx < 0 || tile_idx >= static_cast<int>(tile_dims.size())) {
-          return emitOpError() << "Internal error: tile index out of bounds.";
-        }
-        if (tile_dims[tile_idx] != 1) {
-          return emitOpError()
-                 << "All tiled squeezed dimensions must be of size 1.";
+  auto tiles = cast<TiledLayoutAttr>(source_layout).getTiles();
+  switch (tiles.size()) {
+    case 0:
+      break;
+    case 1: {
+      auto tile = tiles.front();
+      auto tile_dims = tile.dimensions();
+      int first_tiled = source_shape.size() - tile_dims.size();
+      for (int dim : squeezed) {
+        if (dim >= first_tiled) {
+          int tile_idx = dim - first_tiled;
+          if (tile_idx < 0 || tile_idx >= static_cast<int>(tile_dims.size())) {
+            return emitOpError() << "Internal error: tile index out of bounds.";
+          }
+          if (tile_dims[tile_idx] != 1) {
+            return emitOpError()
+                   << "All tiled squeezed dimensions must be of size 1.";
+          }
         }
       }
+      break;
     }
-  } else {
-    auto first_tile = tiles.front();
-    for (int dim : squeezed) {
-      int first_tiled = source_shape.size() - first_tile.dimensions().size();
-      if (dim >= first_tiled) {
-        return emitOpError() << "When multiple tiles are present, no tiled "
-                                "dimensions can be squeezed.";
+    default: {
+      auto first_tile = tiles.front();
+      for (int dim : squeezed) {
+        int first_tiled = source_shape.size() - first_tile.dimensions().size();
+        if (dim >= first_tiled) {
+          return emitOpError() << "When multiple tiles are present, no tiled "
+                                  "dimensions can be squeezed.";
+        }
       }
     }
   }
@@ -445,7 +417,7 @@ LogicalResult MemRefSqueezeOp::canonicalize(MemRefSqueezeOp op,
 
   auto new_squeeze =
       MemRefSqueezeOp::create(rewriter, op.getLoc(), new_ty, layout_ref);
-  rewriter.replaceOpWithNewOp<tpu::EraseLayoutOp>(op, target_type, new_squeeze);
+  rewriter.replaceOpWithNewOp<tpu::EraseLayoutOp>(op, new_squeeze);
   return success();
 }
 
@@ -588,7 +560,7 @@ LogicalResult MemRefReshapeOp::canonicalize(MemRefReshapeOp op,
   }
   auto layout_ref = erase_layout_op.getOperand();
   auto layout_ty = layout_ref.getType();
-  auto layout = dyn_cast<tpu::TiledLayoutAttr>(layout_ty.getLayout());
+  auto layout = cast<tpu::TiledLayoutAttr>(layout_ty.getLayout());
   CHECK(!layout.getTiles().empty());
   auto tile = layout.getTiles().front().dimensions();
   auto new_tile_strides = ComputeTileStrides(dst_ty, tile);
@@ -599,7 +571,7 @@ LogicalResult MemRefReshapeOp::canonicalize(MemRefReshapeOp op,
                       layout_ty.getMemorySpace());
   auto reshape =
       MemRefReshapeOp::create(rewriter, op.getLoc(), new_result_ty, layout_ref);
-  rewriter.replaceOpWithNewOp<EraseLayoutOp>(op, op.getType(), reshape);
+  rewriter.replaceOpWithNewOp<EraseLayoutOp>(op, reshape);
   return success();
 }
 
@@ -616,8 +588,8 @@ LogicalResult MemRefBitcastOp::verify() {
   if (src_ty.getRank() <= 1) {
     return emitOpError("Not implemented: 1d memref bitcast.");
   }
-  auto src_bitwidth = src_ty.getElementTypeBitWidth();
-  auto tgt_bitwidth = tgt_ty.getElementTypeBitWidth();
+  auto src_bitwidth = getElementTypeBitwidth(src_ty);
+  auto tgt_bitwidth = getElementTypeBitwidth(tgt_ty);
   for (int i = 0; i < src_ty.getRank(); ++i) {
     auto src_dim_size = src_ty.getDimSize(i);
     auto tgt_dim_size = tgt_ty.getDimSize(i);
@@ -672,8 +644,8 @@ LogicalResult MemRefBitcastOp::canonicalize(MemRefBitcastOp op,
   if (!erase_layout_op) {
     return failure();
   }
-  auto src_bitwidth = src_ty.getElementTypeBitWidth();
-  auto tgt_bitwidth = dst_ty.getElementTypeBitWidth();
+  auto src_bitwidth = getElementTypeBitwidth(src_ty);
+  auto tgt_bitwidth = getElementTypeBitwidth(dst_ty);
   auto layout_ref = erase_layout_op.getOperand();
   auto layout_ty = layout_ref.getType();
   auto layout = cast<tpu::TiledLayoutAttr>(layout_ty.getLayout());
@@ -694,13 +666,13 @@ LogicalResult MemRefBitcastOp::canonicalize(MemRefBitcastOp op,
                       layout_ty.getMemorySpace());
   auto bitcast =
       MemRefBitcastOp::create(rewriter, op.getLoc(), new_result_ty, layout_ref);
-  rewriter.replaceOpWithNewOp<EraseLayoutOp>(op, op.getType(), bitcast);
+  rewriter.replaceOpWithNewOp<EraseLayoutOp>(op, bitcast);
   return success();
 }
 
 template <typename Op>
 LogicalResult verifyStridedOp(Op op, MemRefType memref_ty,
-                              VectorType vector_ty) {
+                              VectorType vector_ty, int64_t min_stride) {
   auto indices = op.getIndices();
   auto strides = op.getStrides();
   if (memref_ty.getRank() != indices.size()) {
@@ -719,8 +691,9 @@ LogicalResult verifyStridedOp(Op op, MemRefType memref_ty,
     return failure();
   }
   for (int64_t i = 0; i < memref_ty.getRank(); ++i) {
-    if (strides[i] < 1) {
-      op.emitError("Strides[") << i << "]=" << strides[i] << " must be >= 1";
+    if (strides[i] < min_stride) {
+      op.emitError("Strides[") << i << "]=" << strides[i] << " must be >= "
+          << min_stride;
       return failure();
     }
   }
@@ -729,12 +702,13 @@ LogicalResult verifyStridedOp(Op op, MemRefType memref_ty,
 
 LogicalResult StridedLoadOp::verify() {
   return verifyStridedOp<StridedLoadOp>(*this, getMemRefType(getBase()),
-                                        getType());
+                                        getType(), /*min_stride=*/0);
 }
 
 LogicalResult StridedStoreOp::verify() {
   return verifyStridedOp<StridedStoreOp>(*this, getMemRefType(getBase()),
-                                         getValueToStore().getType());
+                                         getValueToStore().getType(),
+                                         /*min_stride=*/1);
 }
 
 template <typename Op>
@@ -749,7 +723,7 @@ LogicalResult verifyStoreOp(Op op) {
         "Expected base and valueToStore element type to match");
   }
   if (op.getMask()) {
-    if (value_ty.getElementTypeBitWidth() != 32) {
+    if (getElementTypeBitwidth(value_ty) != 32) {
       return op.emitError(
           "Not implemented: masked store with non-32-bit element type");
     }
@@ -772,6 +746,11 @@ LogicalResult VectorStoreOp::verify() {
   return verifyStoreOp(*this);
 }
 
+LogicalResult VectorStoreOp::canonicalize(VectorStoreOp op,
+                                          PatternRewriter& rewriter) {
+  return propagateTiledLayoutToConsumer(op, rewriter);
+}
+
 template <typename Op>
 LogicalResult verifyLoadOp(Op op) {
   MemRefType ref_ty = op.getBase().getType();
@@ -783,7 +762,7 @@ LogicalResult verifyLoadOp(Op op) {
     return op.emitOpError("Expected base and result element type to match.");
   }
   if (op.getMask()) {
-    if (value_ty.getElementTypeBitWidth() != 32) {
+    if (getElementTypeBitwidth(value_ty) != 32) {
       return op.emitError(
           "Not implemented: masked load with non-32-bit element type");
     }
@@ -810,6 +789,11 @@ LogicalResult VectorLoadOp::verify() {
   return verifyLoadOp(*this);
 }
 
+LogicalResult VectorLoadOp::canonicalize(VectorLoadOp op,
+                                         PatternRewriter& rewriter) {
+  return propagateTiledLayoutToConsumer(op, rewriter);
+}
+
 LogicalResult VectorLoadIdxOp::verify() {
   VectorType value_ty = getResult().getType();
   MemRefType ref_ty = getBase().getType();
@@ -830,6 +814,11 @@ LogicalResult VectorLoadIdxOp::verify() {
   return verifyLoadOp(*this);
 }
 
+LogicalResult VectorLoadIdxOp::canonicalize(VectorLoadIdxOp op,
+                                            PatternRewriter& rewriter) {
+  return propagateTiledLayoutToConsumer(op, rewriter);
+}
+
 LogicalResult VectorStoreIdxOp::verify() {
   VectorType value_ty = getValueToStore().getType();
   MemRefType ref_ty = getBase().getType();
@@ -839,12 +828,9 @@ LogicalResult VectorStoreIdxOp::verify() {
                "memref with dimension: ")
            << ref_ty.getRank() << ". Got: " << llvm::size(getIndices()) << ".";
   }
-  if (llvm::size(getIndices()) != value_ty.getRank()) {
-    return emitOpError(
-               "Expected one index vector for each dimension of the value "
-               "to store with dimension: ")
-           << value_ty.getRank() << ". Got: " << llvm::size(getIndices())
-           << ".";
+  if (value_ty.getRank() != 1) {
+    return emitOpError("Expected value to have rank 1. Got: ")
+           << value_ty.getRank() << ".";
   }
   for (const auto [i, index] : llvm::enumerate(getIndices())) {
     VectorType index_ty = llvm::cast<VectorType>(index.getType());
@@ -857,12 +843,49 @@ LogicalResult VectorStoreIdxOp::verify() {
   return verifyStoreOp(*this);
 }
 
+LogicalResult VectorStoreIdxOp::canonicalize(VectorStoreIdxOp op,
+                                             PatternRewriter& rewriter) {
+  return propagateTiledLayoutToConsumer(op, rewriter);
+}
+
 LogicalResult ReinterpretCastOp::verify() {
   auto source_type = getMemRefType(getInput());
   auto target_type = getType();
-  return success(
-      source_type.getMemorySpace() &&  // Require memory space annotations.
-      source_type.getMemorySpace() == target_type.getMemorySpace());
+  if (source_type.getMemorySpace() != target_type.getMemorySpace()) {
+    return emitOpError("Source and target memory spaces must match, but got ")
+           << source_type.getMemorySpace() << " and "
+           << target_type.getMemorySpace();
+  }
+  return success();
+}
+
+LogicalResult ReinterpretCastOp::canonicalize(ReinterpretCastOp op,
+                                              PatternRewriter& rewriter) {
+  if (auto erase_layout_op = op.getInput().getDefiningOp<EraseLayoutOp>()) {
+    rewriter.modifyOpInPlace(op, [&]() {
+      op.getInputMutable().assign(erase_layout_op.getOperand());
+    });
+    return success();
+  }
+  return failure();
+}
+
+LogicalResult EraseLayoutOp::inferReturnTypes(
+    MLIRContext* context, std::optional<Location> location,
+    EraseLayoutOp::Adaptor adaptor,
+    ::llvm::SmallVectorImpl<Type>& inferredReturnTypes) {
+  inferredReturnTypes.push_back(
+      MemRefType::Builder(cast<MemRefType>(adaptor.getOperand().getType()))
+          .setLayout(nullptr));
+  return success();
+}
+
+OpFoldResult EraseLayoutOp::fold(FoldAdaptor op) {
+  // If the operand has no interesting layout then there's no need to erase it.
+  if (getOperand().getType().getLayout().isIdentity()) {
+    return op.getOperand();
+  }
+  return OpFoldResult();
 }
 
 template <typename Op>
@@ -965,7 +988,7 @@ LogicalResult MatmulOp::verify() {
     return emitOpError(
         "Not implemented: matmul acc and result have different types");
   }
-  if (acc_ty.getElementTypeBitWidth() != 32) {
+  if (getElementTypeBitwidth(acc_ty) != 32) {
     return emitOpError("Expected matmul acc to be 32-bit");
   }
 
@@ -1101,15 +1124,8 @@ LogicalResult MatmulOp::verify() {
     const std::optional<int64_t> batch_dim_rhs =
         rhs_batch_dims.empty() ? std::nullopt
                                : std::optional<int64_t>(rhs_batch_dims[0]);
-    if (batch_dim_lhs != batch_dim_rhs) {
-      emitOpError("Not Implemented: batch dims must be equal");
-      return failure();
-    }
-    if (batch_dim_lhs.has_value() && (batch_dim_lhs.value() != 0)) {
-      emitOpError("Not Implemented: batch dims pos must be 0");
-      return failure();
-    }
-    // Invariant above enforces only 1 batch dim atm, and that both are eq
+
+    // Invariant above enforces only 1 batch dim atm.
     std::optional<int64_t> batch_size = std::nullopt;
     if (batch_dim_lhs.has_value()) {
       batch_size = lhs_ty.getShape()[batch_dim_lhs.value()];
@@ -1129,22 +1145,13 @@ LogicalResult MatmulOp::verify() {
           "Illegal: output dim order must have an even number of elements.");
       return failure();
     }
-    if (batch_size.has_value()) {
-      if (output_dim_order[0] != 0 || output_dim_order[1] != 0) {
-        emitOpError(
-            "Not implemented: Output with batch size must be the lhs 0 idx for "
-            "now.");
-        return failure();
-      }
-    }
 
-    // Invariants above enforce a single batch idx for now, and that it is in
-    // position 0. Future extensions to this will be to:
-    // 1. Support multiple batch dims
-    // 2. Support batch dims in any position in the output dim order
+    // Invariants above enforce a single batch idx for now. Future extension to
+    // this will be to support multiple batch dims.
 
-    // Verify that the output dim order is always in the form of [0, batch_dims,
-    // 0, lhs_non_contracting_dims, 1, rhs_non_contracting_dims].
+    // Verify that the output dim order is always in the form of [0,
+    // lhs_batch_dims, 0, lhs_non_contracting_dims, 1,
+    // rhs_non_contracting_dims].
     llvm::SmallVector<int64_t> expected_output_dim_order;
     expected_output_dim_order.reserve(2 * (lhs_batch_dims.size() +
                                            lhs_non_contracting_dims.size() +
@@ -1164,7 +1171,7 @@ LogicalResult MatmulOp::verify() {
     if (!absl::c_equal(output_dim_order, expected_output_dim_order)) {
       emitOpError(
           "Illegal: output dim order must be in the form of [0, "
-          "batch_dims, 0, lhs_non_contracting_dims, 1, "
+          "lhs_batch_dims, 0, lhs_non_contracting_dims, 1, "
           "rhs_non_contracting_dims]");
       return failure();
     }
@@ -1243,6 +1250,36 @@ LogicalResult ScanOp::verify() {
            << mask_ty.getShape()[0] << ".";
   }
 
+  return success();
+}
+
+LogicalResult SortOp::verify() {
+  VectorType keys_ty = getKeys().getType();
+  VectorType values_ty = getValues().getType();
+  if (keys_ty.getShape() != values_ty.getShape()) {
+    return emitOpError("Key and value shapes must match: ")
+           << keys_ty.getShape() << " vs " << values_ty.getShape();
+  }
+  if (getMask()) {
+    VectorType mask_ty = getMask().getType();
+    if (keys_ty.getShape() != mask_ty.getShape()) {
+      return emitOpError("Key and input mask shapes must match: ")
+             << keys_ty.getShape() << " vs " << mask_ty.getShape();
+    }
+  }
+  VectorType output_mask_ty = getOutputMask().getType();
+  if (keys_ty.getShape() != output_mask_ty.getShape()) {
+    return emitOpError("Key and output mask shapes must match: ")
+           << keys_ty.getShape() << " vs " << output_mask_ty.getShape();
+  }
+  if (keys_ty != getSortedKeys().getType()) {
+    return emitOpError("Key and sorted_key types must match: ")
+           << keys_ty << " vs " << getSortedKeys().getType();
+  }
+  if (values_ty != getSortedValues().getType()) {
+    return emitOpError("Value and sorted_value types must match: ")
+           << values_ty << " vs " << getSortedValues().getType();
+  }
   return success();
 }
 
@@ -1359,6 +1396,11 @@ LogicalResult EnqueueDMAOp::verify() {
         "subcores");
   }
   return success();
+}
+
+LogicalResult EnqueueDMAOp::canonicalize(EnqueueDMAOp op,
+                                         PatternRewriter& rewriter) {
+  return propagateTiledLayoutToConsumer(op, rewriter);
 }
 
 LogicalResult EnqueueIndirectDMAOp::verifyGather(
@@ -1540,6 +1582,11 @@ LogicalResult EnqueueIndirectDMAOp::verify() {
                        /*operand_ty=*/target_ty);
 }
 
+LogicalResult EnqueueIndirectDMAOp::canonicalize(EnqueueIndirectDMAOp op,
+                                                 PatternRewriter& rewriter) {
+  return propagateTiledLayoutToConsumer(op, rewriter);
+}
+
 // TODO(b/395630795): Remove after 2025-08-10.
 LogicalResult WaitDMAOp::verify() {
   auto sem_type = getMemRefType(getSemaphore());
@@ -1563,6 +1610,11 @@ LogicalResult WaitDMA2Op::verify() {
   return success();
 }
 
+LogicalResult WaitDMA2Op::canonicalize(WaitDMA2Op op,
+                                       PatternRewriter& rewriter) {
+  return propagateTiledLayoutToConsumer(op, rewriter);
+}
+
 FailureOr<bool> WaitIndirectDMAOp::isGather() {
   return mlir::tpu::isGather(*getOperation(), getSrc(), getDst());
 }
@@ -1581,6 +1633,11 @@ LogicalResult WaitIndirectDMAOp::verify() {
     return emitOpError("Indirect DMA wait semaphore must be rank 0");
   }
   return isGather();
+}
+
+LogicalResult WaitIndirectDMAOp::canonicalize(WaitIndirectDMAOp op,
+                                              PatternRewriter& rewriter) {
+  return propagateTiledLayoutToConsumer(op, rewriter);
 }
 
 LogicalResult RegionOp::verify() {
@@ -1802,12 +1859,52 @@ LogicalResult ReciprocalOp::verify() {
 }
 
 LogicalResult UnpackSubelementsOp::verify() {
-  const int packing_factor = getType().getElementTypeBitWidth() /
-                             getSource().getType().getElementTypeBitWidth();
-  if (auto index = getIndex(); index < 0 || index >= packing_factor) {
+  const int packing_factor = getElementTypeBitwidth(getType()) /
+                             getElementTypeBitwidth(getSource().getType());
+  if (auto index = getIndex(); index >= packing_factor) {
     return emitOpError("Index must be between 0 and the packing factor (")
            << packing_factor << "), got " << index;
   }
+  return success();
+}
+
+LogicalResult UnpackSubelementsOp::canonicalize(UnpackSubelementsOp op,
+                                                PatternRewriter& rewriter) {
+  auto src_elem_ty = op.getSource().getType().getElementType();
+  auto dst_elem_ty = op.getType().getElementType();
+  if (!src_elem_ty.isSignlessInteger() || !dst_elem_ty.isSignlessInteger()) {
+    return failure();
+  }
+  if (!op.getSignExtended()) {
+    // Unpack of pack with the same format is reversible if not sign extended.
+    if (auto pack = dyn_cast<PackSubelementsOp>(op.getSource().getDefiningOp());
+        pack && pack.getPackFormat() == op.getPackFormat() &&
+        pack.getSources().front().getType() == op.getType()) {
+      Value source = pack.getPaddedSources(
+          pack.getSources(), pack.getPositions(),
+          getElementTypeBitwidth(op.getType()) /
+              getElementTypeBitwidth(pack.getType()))[op.getIndex()];
+      if (source) {
+        rewriter.replaceAllOpUsesWith(op, source);
+        return success();
+      }
+    }
+    return failure();
+  }
+  // Set `sign_extended` to false if it's used by pack that reduces the source
+  // bitwidth.
+  for (auto user : op->getUsers()) {
+    auto pack = dyn_cast<PackSubelementsOp>(user);
+    if (!pack) {
+      return failure();
+    }
+    auto packed_elem_ty = pack.getType().getElementType();
+    if (!packed_elem_ty.isSignlessInteger() ||
+        getTypeBitwidth(packed_elem_ty) > getTypeBitwidth(src_elem_ty)) {
+      return failure();
+    }
+  }
+  rewriter.modifyOpInPlace(op, [&]() { op.setSignExtended(false); });
   return success();
 }
 
@@ -1843,9 +1940,9 @@ LogicalResult PackSubelementsOp::verify() {
   if (getPositions().size() != getSources().size()) {
     return emitOpError("Size of sources and positions must match");
   }
-  const int packing_factor = cast<VectorType>(getSources().front().getType())
-                                 .getElementTypeBitWidth() /
-                             getType().getElementTypeBitWidth();
+  const int packing_factor =
+      getElementTypeBitwidth(cast<VectorType>(getSources().front().getType())) /
+      getElementTypeBitwidth(getType());
   SmallVector<bool> seen_positions(packing_factor, false);
   for (const int32_t position : getPositions()) {
     if (position < 0 || packing_factor <= position) {
@@ -1856,6 +1953,66 @@ LogicalResult PackSubelementsOp::verify() {
       return emitOpError("Positions must be unique");
     }
     seen_positions[position] = true;
+  }
+  return success();
+}
+
+namespace {
+LogicalResult verifyElementwisePacking(Operation *op, Type unpacked_ty,
+                                       Type packed_ty) {
+  if (unpacked_ty.isF32() && !packed_ty.isBF16()) {
+    return op->emitOpError(
+        "Only packing/unpacking between f32 and bf16 is supported for floats");
+  }
+  if (unpacked_ty.isSignlessInteger(32) &&
+      !packed_ty.isSignlessInteger(16) &&
+      !packed_ty.isSignlessInteger(8) &&
+      !packed_ty.isSignlessInteger(4)) {
+    return op->emitOpError(
+        "Only packing/unpacking between i32 and i16/i8/i4 is supported for "
+        "integers");
+  }
+  return success();
+}
+}  // namespace
+
+LogicalResult PackElementwiseOp::verify() {
+  if (getSources().empty()) {
+    return emitOpError("At least one source is required");
+  }
+  const auto src_vty = cast<VectorType>(getSources().front().getType());
+  if (getElementTypeBitwidth(src_vty) != getElementTypeBitwidth(getType())) {
+    return emitOpError("All sources must have the same bitwidth as the result");
+  }
+  if (!getType().getElementType().isSignlessInteger()) {
+    return emitOpError("Output type must be a signless integer type");
+  }
+
+  auto src_elem_ty = src_vty.getElementType();
+  auto tgt_elem_ty = getTargetType();
+  if (!(src_elem_ty.isF32() && tgt_elem_ty.isBF16()) &&
+      !(src_elem_ty.isSignlessInteger() && tgt_elem_ty.isSignlessInteger())) {
+    return emitOpError(
+        "Only packing f32 -> bf16 and integer -> integer is supported");
+  }
+  const int packing_factor =
+      getElementTypeBitwidth(src_vty) / getTypeBitwidth(getTargetType());
+  if (packing_factor != getSources().size()) {
+    return emitOpError("The number of sources must match the packing factor (")
+           << packing_factor << "), got " << getSources().size();
+  }
+  return success();
+}
+
+LogicalResult UnpackElementwiseOp::verify() {
+  if (failed(verifyElementwisePacking(*this, getType(), getSourceType()))) {
+    return failure();
+  }
+  const int packing_factor =
+      getElementTypeBitwidth(getType()) / getTypeBitwidth(getSourceType());
+  if (auto index = getIndex(); index >= packing_factor) {
+    return emitOpError("Index must be between 0 and the packing factor (")
+           << packing_factor << "), got " << index;
   }
   return success();
 }
@@ -1899,9 +2056,9 @@ LogicalResult DynamicGatherOp::verify() {
 
 LogicalResult AllReduceOp::verify() {
   auto in_ty = getInput().getType();
-  auto in_bitwidth = in_ty.getElementTypeBitWidth();
+  auto in_bitwidth = getElementTypeBitwidth(in_ty);
   auto out_ty = getOutput().getType();
-  auto out_bitwidth = out_ty.getElementTypeBitWidth();
+  auto out_bitwidth = getElementTypeBitwidth(out_ty);
   auto kind = getKind();
 
   if (in_bitwidth == 1) {
@@ -1957,7 +2114,7 @@ LogicalResult AllReduceOp::verify() {
 LogicalResult ReduceIndexOp::verify() {
   auto in_ty = getInput().getType();
   auto out_ty = getOutput().getType();
-  auto bitwidth = in_ty.getElementTypeBitWidth();
+  auto bitwidth = getElementTypeBitwidth(in_ty);
   auto axis = getAxis();
   auto kind = getKind();
   if (kind != ReductionKind::kArgMax &&
@@ -2003,22 +2160,13 @@ LogicalResult ReduceIndexOp::verify() {
 }
 
 LogicalResult AssumeMultipleOp::verify() {
-  auto operand_value = getValue();
-  auto divisor = getMultiple();
-  if (auto cst_op = operand_value.getDefiningOp<arith::ConstantOp>()) {
-    auto int_attr = dyn_cast<IntegerAttr>(cst_op.getValue());
-    // Illegal usage of AssumeMultipleOp.
-    if (!int_attr) {
-      return emitOpError(
-                 "Illegal user annotation, expected an integer, but got ")
-             << cst_op.getValue();
-    }
-    if (int_attr.getInt() % divisor != 0) {
-      return emitOpError(
-                 "Illegal user annotation, expected an integer that is "
-                 "divisible by the multiple, but got ")
-             << int_attr.getInt() << " % " << divisor;
-    }
+  if (getMultiple() < 1) {
+    return emitError("Multiple must be >= 1, got ") << getMultiple();
+  }
+  if (auto value = mlir::getConstantIntValue(getValue());
+      value.has_value() && (*value % getMultiple() != 0)) {
+    return emitError("Operand is a constant ")
+           << *value << " that is not a multiple of " << getMultiple();
   }
   return success();
 }
@@ -2129,6 +2277,18 @@ OpFoldResult ReshapeOp::fold(FoldAdaptor adaptor) {
     return cst.reshape(getType());
   }
   return nullptr;
+}
+
+LogicalResult StochasticConvertElementwiseOp::verify() {
+  auto dst_ty = getDstType();
+  if (!dst_ty.isBF16() &&
+      !llvm::isa<mlir::Float8E5M2Type, mlir::Float8E4M3FNType,
+                 mlir::Float8E4M3B11FNUZType>(dst_ty)) {
+    return emitOpError(
+        "Only bf16, f8e5m2, f8e4m3fn, and f8e4m3b11fnuz are supported as "
+        "destination types.");
+  }
+  return success();
 }
 
 }  // namespace tpu

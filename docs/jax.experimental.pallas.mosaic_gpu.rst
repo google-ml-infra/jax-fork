@@ -14,6 +14,7 @@ Classes
    CompilerParams
    MemorySpace
    Layout
+   SemaphoreType
    SwizzleTransform
    TilingTransform
    TransposeTransform
@@ -25,6 +26,8 @@ Functions
 .. autosummary::
    :toctree: _autosummary
 
+   as_torch_kernel
+   kernel
    layout_cast
    set_max_registers
    planar_snake

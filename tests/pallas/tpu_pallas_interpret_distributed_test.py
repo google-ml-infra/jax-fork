@@ -20,16 +20,14 @@ contains only tests that use shard_map.
 
 from absl.testing import absltest
 from absl.testing import parameterized
-
 import jax
 from jax import lax
 from jax._src import shard_map
 from jax._src import test_util as jtu
-import jax._src.pallas.mosaic.interpret as mosaic_interpret
+from jax._src.pallas.mosaic.interpret import interpret_pallas_call as mosaic_interpret
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
-
 import numpy as np
 
 jax.config.parse_flags_with_absl()
@@ -57,7 +55,7 @@ class InterpretDistributedTest(jtu.JaxTestCase):
   def test_right_permute_example(self, dma_execution_mode, detect_races):
     num_devices = jax.device_count()
     partition = P(None, 'x')
-    mesh = jax.make_mesh((num_devices,), ('x',))
+    mesh = jtu.create_mesh((num_devices,), ('x',))
     sharding = jax.sharding.NamedSharding(mesh, partition)
 
     # Create an input array that shards the last dimension across
@@ -98,9 +96,9 @@ class InterpretDistributedTest(jtu.JaxTestCase):
         num_scalar_prefetch=0,
         # MemorySpace.ANY will (usually) place the tensor in HBM.
         in_specs=[
-            pl.BlockSpec(memory_space=pltpu.ANY),
+            pl.BlockSpec(memory_space=pl.ANY),
         ],
-        out_specs=pl.BlockSpec(memory_space=pltpu.ANY),
+        out_specs=pl.BlockSpec(memory_space=pl.ANY),
         scratch_shapes=(
             # We allocate DMA semaphores in scratch memory.
             [pltpu.SemaphoreType.DMA] * 2
@@ -143,7 +141,7 @@ class InterpretDistributedTest(jtu.JaxTestCase):
   def test_all_gather_example(self, dma_execution_mode, detect_races):
     num_devices = jax.device_count()
     partition = P('x', None)
-    mesh = jax.make_mesh((num_devices,), ('x',))
+    mesh = jtu.create_mesh((num_devices,), ('x',))
     sharding = jax.sharding.NamedSharding(mesh, partition)
 
     # Create an input array that shards the first dimension across
@@ -211,9 +209,9 @@ class InterpretDistributedTest(jtu.JaxTestCase):
       num_scalar_prefetch=0,
       in_specs=[
         # MemorySpace.ANY will (usually) place the tensor in HBM.
-        pl.BlockSpec(memory_space=pltpu.ANY),
+        pl.BlockSpec(memory_space=pl.ANY),
       ],
-      out_specs=pl.BlockSpec(memory_space=pltpu.ANY),
+      out_specs=pl.BlockSpec(memory_space=pl.ANY),
       scratch_shapes=(
         # DMA semaphores are allocated in scratch memory.
         # We allocated one semaphore for a local HBM-VMEM copy,
@@ -266,7 +264,7 @@ class InterpretDistributedTest(jtu.JaxTestCase):
   def test_all_reduce_sum_example(self, dma_execution_mode, detect_races):
     num_devices = jax.device_count()
     partition = P(None, 'x')
-    mesh = jax.make_mesh((num_devices,), ('x',))
+    mesh = jtu.create_mesh((num_devices,), ('x',))
     sharding = jax.sharding.NamedSharding(mesh, partition)
 
     input_arr = jax.random.uniform(
@@ -378,7 +376,7 @@ class InterpretDistributedTest(jtu.JaxTestCase):
         # Our output lives in VMEM
         pl.BlockSpec(memory_space=pltpu.VMEM),
         # Our double-buffer lives in HBM
-        pl.BlockSpec(memory_space=pltpu.ANY),
+        pl.BlockSpec(memory_space=pl.ANY),
       ],
       grid=(num_devices,),
       scratch_shapes=(
@@ -427,7 +425,7 @@ class InterpretDistributedTest(jtu.JaxTestCase):
   def test_reduce_scatter_sum_example(self, dma_execution_mode, detect_races):
     num_devices = jax.device_count()
     partition = P(None, 'x')
-    mesh = jax.make_mesh((num_devices,), ('x',))
+    mesh = jtu.create_mesh((num_devices,), ('x',))
     sharding = jax.sharding.NamedSharding(mesh, partition)
 
     # We need a block size of (16, 128) to ensure that a half-slice is at least
@@ -658,7 +656,7 @@ class InterpretDistributedTest(jtu.JaxTestCase):
       ],
       out_specs=[
         pl.BlockSpec(memory_space=pltpu.VMEM),
-        pl.BlockSpec(memory_space=pltpu.ANY),
+        pl.BlockSpec(memory_space=pl.ANY),
       ],
       grid=(num_devices, 2),
       scratch_shapes=(
@@ -721,7 +719,7 @@ class InterpretDistributedTest(jtu.JaxTestCase):
       self.skipTest('pallas.emit_pipeline + x64 is not currently supported')
     num_devices = jax.device_count()
     partition = P(None, 'x')
-    mesh = jax.make_mesh((num_devices,), ('x',))
+    mesh = jtu.create_mesh((num_devices,), ('x',))
     sharding = jax.sharding.NamedSharding(mesh, partition)
 
     # We pick a large outer kernel block size that we do not want to place
@@ -747,7 +745,7 @@ class InterpretDistributedTest(jtu.JaxTestCase):
     inner_block_spec = pl.BlockSpec(
       index_map=lambda i, j: (i, j),
       block_shape=inner_block_size,
-      memory_space=pltpu.ANY,
+      memory_space=pl.ANY,
     )
 
     LEFT = 0
@@ -959,11 +957,11 @@ class InterpretDistributedTest(jtu.JaxTestCase):
     grid_spec = pltpu.PrefetchScalarGridSpec(
       num_scalar_prefetch=0,
       in_specs=[
-        pl.BlockSpec(memory_space=pltpu.ANY),
+        pl.BlockSpec(memory_space=pl.ANY),
       ],
       out_specs=[
-        pl.BlockSpec(memory_space=pltpu.ANY),
-        pl.BlockSpec(memory_space=pltpu.ANY),
+        pl.BlockSpec(memory_space=pl.ANY),
+        pl.BlockSpec(memory_space=pl.ANY),
       ],
       grid=(num_devices, 2),
       scratch_shapes=(
@@ -1064,9 +1062,9 @@ class InterpretDistributedTest(jtu.JaxTestCase):
               out_shape=jax.ShapeDtypeStruct((8, 128), input_arr.dtype),
               in_specs=[
                   pl.BlockSpec(memory_space=pltpu.SMEM),
-                  pl.BlockSpec(memory_space=pltpu.ANY),
+                  pl.BlockSpec(memory_space=pl.ANY),
               ],
-              out_specs=pl.BlockSpec(memory_space=pltpu.ANY),
+              out_specs=pl.BlockSpec(memory_space=pl.ANY),
               scratch_shapes=[pltpu.SemaphoreType.DMA, pltpu.SemaphoreType.DMA],
               interpret=pltpu.InterpretParams(
                   dma_execution_mode='eager',
@@ -1090,7 +1088,7 @@ class InterpretDistributedTest(jtu.JaxTestCase):
   def test_shard_map_of_core_map(self, num_cores):
     num_devices = jax.device_count()
     partition = P('x', None)
-    mesh = jax.make_mesh((num_devices,), ('x',))
+    mesh = jtu.create_mesh((num_devices,), ('x',))
     sharding = jax.sharding.NamedSharding(mesh, partition)
 
     core_mesh = pltpu.create_tensorcore_mesh('core', num_cores=num_cores)

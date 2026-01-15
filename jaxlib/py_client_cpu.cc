@@ -50,14 +50,18 @@ namespace jax {
 
 struct CpuTransposePlanCache {
   static ffi::TypeId id;
+  static ffi::TypeInfo info;
+
   explicit CpuTransposePlanCache(int capacity) : cache(capacity) {}
   xla::TransposePlanCache cache;
 };
 
 ffi::TypeId CpuTransposePlanCache::id = {};
+ffi::TypeInfo CpuTransposePlanCache::info =
+    ffi::MakeTypeInfo<CpuTransposePlanCache>();
 
 XLA_FFI_REGISTER_TYPE(ffi::GetXlaFfiApi(), "CpuTransposePlanCache",
-                      &CpuTransposePlanCache::id);
+                      &CpuTransposePlanCache::id, &CpuTransposePlanCache::info);
 
 static ffi::ErrorOr<std::unique_ptr<CpuTransposePlanCache>>
 CpuTransposePlanCacheInstantiate(uint64_t index) {
@@ -115,18 +119,19 @@ ffi::Error XlaFfiPythonCpuCallback(xla::FfiLoadedHostCallbacks* callbacks,
     PyTuple_SET_ITEM(nb_args.ptr(), i, array.release().ptr());
   }
 
-  xla::EnterHostCallback();
   // TODO(dsuo): Change this to use the Python vectorcall protocol, which allows
   // you to avoid constructing a tuple for the arguments.
   nb::tuple result_tuple;
-  try {
-    auto result_object = callback(*nb::borrow<nb::args>(nb_args));
-    result_tuple = nb::cast<nb::tuple>(result_object);
-  } catch (nb::python_error& e) {
-    return ffi::Error::Internal(
-        absl::StrFormat("CpuCallback error calling callback: %s", e.what()));
+  {
+    xla::HostCallbackScope scope;
+    try {
+      auto result_object = callback(*nb::borrow<nb::args>(nb_args));
+      result_tuple = nb::cast<nb::tuple>(result_object);
+    } catch (nb::python_error& e) {
+      return ffi::Error::Internal(
+          absl::StrFormat("CpuCallback error calling callback: %s", e.what()));
+    }
   }
-  xla::LeaveHostCallback();
 
   for (size_t i = 0; i < rets.size(); ++i) {
     auto ret = rets.get<ffi::AnyBuffer>(i).value();
@@ -168,7 +173,7 @@ ffi::Error XlaFfiPythonCpuCallback(xla::FfiLoadedHostCallbacks* callbacks,
       absl::c_reverse_copy(expected_shape.layout().minor_to_major(),
                            reversed_layout.begin());
       options.permutation = reversed_layout;
-      options.input_layout = xla::TransposePlan::Striding{strides};
+      options.input_striding = xla::TransposePlan::Striding{strides};
       auto maybe_plan = transpose_cache->cache.GetOrCreate(options);
       if (!maybe_plan.ok()) {
         return ffi::Error::Internal(maybe_plan.status().ToString());
@@ -229,9 +234,8 @@ XLA_FFI_REGISTER_HANDLER(ffi::GetXlaFfiApi(),
 XLA_FFI_DEFINE_HANDLER_SYMBOL(
     kXlaBufferPythonCpuCallback, (XlaBufferCallback<kDLCPU>),
     ffi::Ffi::Bind()
+        .Ctx<ffi::Context>()
         .Ctx<ffi::DeviceOrdinal>()
-        .Ctx<ffi::FfiApi>()
-        .Ctx<ffi::FfiExecutionContext>()
         .Ctx<ffi::UserData<xla::FfiLoadedHostCallbacks>>()
         .Attr<uint64_t>("index")
         .RemainingArgs()

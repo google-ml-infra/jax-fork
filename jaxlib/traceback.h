@@ -58,6 +58,9 @@ class Traceback : public nanobind::object {
   // Returns a traceback if it is enabled, otherwise returns nullopt.
   static std::optional<Traceback> Get();
 
+  // Returns true if traceback collection is enabled.
+  static bool IsEnabled();
+
   // Returns a string representation of the traceback.
   std::string ToString() const;
 
@@ -76,7 +79,7 @@ class Traceback : public nanobind::object {
   // Returns a list of Frames for the traceback.
   std::vector<Frame> Frames() const;
 
-  static void RegisterType(nanobind::module_& m);
+  static void Register(nanobind::module_& m);
 
  private:
   static bool Check(PyObject* o);

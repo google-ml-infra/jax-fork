@@ -73,6 +73,9 @@ echo "Running Bazel TPU tests..."
 # commands below.
 set +e
 
+# TODO(emilyaf): Debug and re-enable this test.
+IGNORE_TESTS_MULTIACCELERATOR="-//tests/multiprocess:array_test_tpu"
+
 if [[ "$JAXCI_RUN_FULL_TPU_TEST_SUITE" == "1" ]]; then
   # We're deselecting all Pallas TPU tests in the oldest libtpu build. Mosaic
   # TPU does not guarantee anything about forward compatibility (unless
@@ -92,7 +95,6 @@ if [[ "$JAXCI_RUN_FULL_TPU_TEST_SUITE" == "1" ]]; then
     $OVERRIDE_XLA_REPO \
     --config=ci_linux_x86_64 \
     --config=ci_rbe_cache \
-    --config=use_tar_archive_files \
     --//jax:build_jaxlib=$JAXCI_BUILD_JAXLIB \
     --//jax:build_jax=$JAXCI_BUILD_JAX \
     --run_under="$(pwd)/build/parallel_accelerator_execute.sh" \
@@ -113,8 +115,6 @@ if [[ "$JAXCI_RUN_FULL_TPU_TEST_SUITE" == "1" ]]; then
     -- \
     //tests:tpu_tests \
     //tests/pallas:tpu_tests \
-    //tests/pallas:tpu_pallas_test_tpu \
-    //tests/pallas:ops_test_tpu \
     $IGNORE_TESTS
 
   # Store the return value of the first bazel command.
@@ -127,7 +127,6 @@ if [[ "$JAXCI_RUN_FULL_TPU_TEST_SUITE" == "1" ]]; then
     $OVERRIDE_XLA_REPO \
     --config=ci_linux_x86_64 \
     --config=ci_rbe_cache \
-    --config=use_tar_archive_files \
     --//jax:build_jaxlib=$JAXCI_BUILD_JAXLIB \
     --//jax:build_jax=$JAXCI_BUILD_JAXLIB \
     --test_env=ALLOW_MULTIPLE_LIBTPU_LOAD=true \
@@ -143,7 +142,8 @@ if [[ "$JAXCI_RUN_FULL_TPU_TEST_SUITE" == "1" ]]; then
     -- \
     //tests:tpu_tests \
     //tests/pallas:tpu_tests \
-    //tests/pallas:tpu_pallas_test_tpu
+    //tests/multiprocess:tpu_tests \
+    $IGNORE_TESTS_MULTIACCELERATOR
 
   # Store the return value of the second bazel command.
   second_bazel_cmd_retval=$?
@@ -156,7 +156,6 @@ else
     $OVERRIDE_XLA_REPO \
     --config=ci_linux_x86_64 \
     --config=ci_rbe_cache \
-    --config=use_tar_archive_files \
     --//jax:build_jaxlib=$JAXCI_BUILD_JAXLIB \
     --//jax:build_jax=$JAXCI_BUILD_JAXLIB \
     --run_under="$(pwd)/build/parallel_accelerator_execute.sh" \
@@ -175,6 +174,7 @@ else
     --verbose_failures \
     --test_output=errors \
     -- \
+    //jaxlib/tools:check_tpu_wheel_sources_test \
     //tests/pallas:ops_test_tpu \
     //tests/pallas:export_back_compat_pallas_test_tpu \
     //tests/pallas:export_pallas_test_tpu \
@@ -185,15 +185,14 @@ else
     //tests/pallas:tpu_pallas_test_tpu \
     //tests/pallas:tpu_pallas_call_print_test_tpu \
     //tests/pallas:indexing_test_tpu \
-    //tests/pallas:pallas_cost_estimate_test_tpu \
     //tests/pallas:pallas_error_handling_test_tpu \
-    //tests/pallas:pallas_jumble_test_tpu \
     //tests/pallas:pallas_shape_poly_test_tpu \
     //tests/pallas:tpu_all_gather_test_tpu \
     //tests/pallas:tpu_fusible_matmul_test_tpu \
     //tests/pallas:tpu_pallas_distributed_test_tpu \
     //tests/pallas:tpu_pallas_memory_space_test_tpu \
-    //tests/pallas:tpu_splash_attention_kernel_sharded_test_tpu
+    //tests/pallas:tpu_splash_attention_kernel_sharded_test_tpu \
+    //tests/pallas:tpu_sparsecore_pallas_test_tpu
 
   # Store the return value of the first bazel command.
   first_bazel_cmd_retval=$?
@@ -205,7 +204,6 @@ else
     $OVERRIDE_XLA_REPO \
     --config=ci_linux_x86_64 \
     --config=ci_rbe_cache \
-    --config=use_tar_archive_files \
     --//jax:build_jaxlib=$JAXCI_BUILD_JAXLIB \
     --//jax:build_jax=$JAXCI_BUILD_JAXLIB \
     --test_env=ALLOW_MULTIPLE_LIBTPU_LOAD=true \

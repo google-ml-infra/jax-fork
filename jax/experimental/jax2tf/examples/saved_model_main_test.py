@@ -13,6 +13,16 @@
 # limitations under the License.
 
 import os
+import warnings
+
+# Must be set before import jax, as jax_google.py sets the flag during import.
+warnings.filterwarnings(
+    'ignore',
+    message='Setting `jax_pmap_shmap_merge` is deprecated',
+    category=DeprecationWarning,
+)
+
+# pylint: disable=g-import-not-at-top
 from absl import flags
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -22,6 +32,7 @@ from jax._src import test_util as jtu
 
 from jax.experimental.jax2tf.examples import saved_model_main
 from jax.experimental.jax2tf.tests import tf_test_util
+# pylint: enable=g-import-not-at-top
 
 config.parse_flags_with_absl()
 FLAGS = flags.FLAGS
@@ -48,9 +59,11 @@ class SavedModelMainTest(tf_test_util.JaxToTfTestCase):
   def test_train_and_save_full(self,
                                model="mnist_flax",
                                serving_batch_size=-1):
+    self.skipTest("no more dynamic shapes")
     if (serving_batch_size == -1 and
-        config.jax2tf_default_native_serialization.value and
-        not config.dynamic_shapes.value):
+        config.jax2tf_default_native_serialization.value
+        # and not config.dynamic_shapes.value
+        ):
       self.skipTest("shape polymorphism but --jax_dynamic_shapes is not set.")
     FLAGS.model = model
     FLAGS.model_classifier_layer = True

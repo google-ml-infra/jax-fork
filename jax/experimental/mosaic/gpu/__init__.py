@@ -54,10 +54,6 @@ from .layouts import (
     to_layout_attr as to_layout_attr,
 )
 
-from .transform_inference import (
-    infer_transforms as infer_transforms,
-)
-
 from .fragmented_array import (
     FragmentedArray as FragmentedArray,
     FragmentedLayout as FragmentedLayout,
@@ -67,9 +63,12 @@ from .fragmented_array import (
     TCGEN05_COL_LAYOUT as TCGEN05_COL_LAYOUT,
     TiledLayout as TiledLayout,
     WGMMA_LAYOUT as WGMMA_LAYOUT,
+    WGMMA_LAYOUT_8BIT as WGMMA_LAYOUT_8BIT,
     WGMMA_ROW_LAYOUT as WGMMA_ROW_LAYOUT,
     WGMMA_COL_LAYOUT as WGMMA_COL_LAYOUT,
     WGMMA_TRANSPOSED_LAYOUT as WGMMA_TRANSPOSED_LAYOUT,
+    WGMMA_LAYOUT_UPCAST_2X as WGMMA_LAYOUT_UPCAST_2X,
+    WGMMA_LAYOUT_UPCAST_4X as WGMMA_LAYOUT_UPCAST_4X,
     TMEM_NATIVE_LAYOUT as TMEM_NATIVE_LAYOUT,
     TMA_GATHER_INDICES_LAYOUT as TMA_GATHER_INDICES_LAYOUT,
     tmem_native_layout as tmem_native_layout,
@@ -102,10 +101,10 @@ from .utils import (
     memref_transpose as memref_transpose,
     memref_unfold as memref_unfold,
     memref_unsqueeze as memref_unsqueeze,
+    nanosleep as nanosleep,
     query_cluster_cancel as query_cluster_cancel,
     single_thread as single_thread,
     single_thread_predicate as single_thread_predicate,
-    system_memory_barrier as system_memory_barrier,
     thread_idx as thread_idx,
     tile_shape as tile_shape,
     try_cluster_cancel as try_cluster_cancel,

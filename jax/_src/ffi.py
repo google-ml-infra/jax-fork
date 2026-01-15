@@ -19,7 +19,7 @@ import ctypes
 import dataclasses
 import functools
 import os
-from typing import Any, overload
+from typing import Any, TypedDict, NotRequired, overload
 
 import numpy as np
 
@@ -29,6 +29,7 @@ from jax._src import effects
 from jax._src import util
 from jax._src import xla_bridge
 from jax._src.hashable_array import HashableArray
+from jax._src.frozen_dict import FrozenDict
 from jax._src.interpreters import ad
 from jax._src.interpreters import batching
 from jax._src.interpreters import mlir
@@ -68,6 +69,20 @@ def register_ffi_target(
                                                 **kwargs)
 
 
+class TypeRegistration(TypedDict):
+  """A dictionary type for registering FFI types.
+
+  Attributes:
+    type_id: A ``PyCapsule`` object containing a pointer to the
+      ``XLA_FFI_TypeId``.
+    type_info: An optional ``PyCapsule`` object containing a pointer to the type
+      ``XLA_FFI_TypeInfo``.
+  """
+
+  type_id: Any
+  type_info: NotRequired[Any]
+
+
 def register_ffi_type_id(
     name: str,
     obj: Any,
@@ -80,7 +95,24 @@ def register_ffi_type_id(
     obj: a ``PyCapsule`` object encapsulating a pointer to the type ID.
     platform: the target platform.
   """
-  return xla_client.register_custom_type_id(name, obj, platform=platform)
+  raise ValueError(
+      "register_ffi_type_id is not supported after jaxlib version 381.")
+
+def register_ffi_type(
+    name: str,
+    type_registration: TypeRegistration,
+    platform: str = "cpu",
+) -> None:
+  """Registers a custom type for a FFI target.
+
+  Args:
+    name: the name of the type. This name must be unique within the process.
+    type_registration: a ``TypeRegistration`` defining the external type.
+    platform: the target platform.
+  """
+  return xla_client.register_custom_type(
+      name, type_registration, platform=platform
+  )
 
 
 def register_ffi_target_as_batch_partitionable(name: str) -> None:
@@ -296,16 +328,20 @@ ResultMetadata = DuckTypedArray | core.AbstractToken
 def _result_avals(results: Sequence[ResultMetadata]) -> tuple[core.AbstractValue, ...]:
   avals: list[core.AbstractValue] = []
   for idx, result in enumerate(results):
-    if isinstance(result, core.AbstractToken):
-      avals.append(result)
+    if result is core.abstract_token:
+      avals.append(result)  # type: ignore
     else:
       if not hasattr(result, "shape") or not hasattr(result, "dtype"):
         raise ValueError(
             "All elements of result_shape_dtypes must have 'shape' and 'dtype' "
             f"attributes. Got {result} at position {idx}.")
-      avals.append(core.ShapedArray(result.shape, result.dtype))
+      # Update the dtype because shaped_abstractify can canonicalize the dtype.
+      # We need to call shaped_abstractify here to handle sharding, vma and
+      # memory_kind bits.
+      # TODO(yashkatariya): Maybe add an option to shaped_abstractify/typeof
+      # to not canonicalize dtype.
+      avals.append(core.shaped_abstractify(result).update(dtype=result.dtype))
   return tuple(avals)
-
 
 def _check_compatible_avals(a: core.AbstractValue, b: core.AbstractValue) -> bool:
   if isinstance(a, core.AbstractToken) and isinstance(b, core.AbstractToken):
@@ -455,7 +491,7 @@ def ffi_call(
     result_avals = _result_avals(result_shape_dtypes)
   else:
     multiple_results = False
-    result_avals = _result_avals((result_shape_dtypes,))
+    result_avals = _result_avals([result_shape_dtypes])
     output_layouts_ = (output_layouts,)  # type: ignore
 
   if custom_call_api_version >= 4 and legacy_backend_config is not None:
@@ -549,7 +585,7 @@ def _wrap_kwargs_hashable(kwargs: dict[str, Any]) -> Sequence[tuple[str, Any]]:
     if isinstance(v, np.ndarray):
       hashable_kwargs.append((k, HashableArray(v)))
     elif isinstance(v, dict):
-      hashable_kwargs.append((k, HashableDict(v)))
+      hashable_kwargs.append((k, FrozenDict(v)))
     else:
       try:
         hash(v)
@@ -566,28 +602,11 @@ def _unwrap_kwargs_hashable(kwargs: Sequence[tuple[str, Any]]) -> dict[str, Any]
   for k, v in kwargs:
     if isinstance(v, HashableArray):
       unwrapped_kwargs[k] = v.val
-    elif isinstance(v, HashableDict):
-      unwrapped_kwargs[k] = dict(v.val)
+    elif isinstance(v, FrozenDict):
+      unwrapped_kwargs[k] = v._d
     else:
       unwrapped_kwargs[k] = v
   return unwrapped_kwargs
-
-
-class HashableDict:
-  __slots__ = ["val"]
-
-  def __init__(self, val):
-    assert isinstance(val, dict)
-    self.val = tuple(sorted(val.items()))
-
-  def __repr__(self):
-    return f"HashableDict({dict(self.val)})"
-
-  def __hash__(self):
-    return hash(self.val)
-
-  def __eq__(self, other):
-    return isinstance(other, HashableDict) and self.val == other.val
 
 
 @dataclasses.dataclass(frozen=True)
@@ -607,12 +626,11 @@ def ffi_call_abstract_eval(
     has_side_effect: bool,
     **_,
 ):
-  out_vma = core.standard_vma_rule('ffi_call', *avals_in)
+  core.standard_vma_rule('ffi_call', *avals_in)
   effects = {_FfiEffect} if has_side_effect else core.no_effects
   return tuple(r if r is core.abstract_token else
                r.update(sharding=(core.get_cur_mesh_sharding()
-                                  if r.sharding.mesh.empty else r.sharding),  # type: ignore
-                        vma=out_vma)
+                                  if r.sharding.mesh.empty else r.sharding))  # type: ignore
                for r in result_avals), effects
 
 

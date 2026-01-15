@@ -131,8 +131,7 @@ def to_default_dtype(arr: ArrayLike) -> np.ndarray:
   """Convert a value to an array with JAX's default dtype.
 
   This is generally used for type conversions of values returned by numpy functions,
-  to make their dtypes take into account the state of the ``jax_enable_x64`` and
-  ``jax_default_dtype_bits`` flags.
+  to make their dtypes take into account the state of the ``jax_enable_x64`` flag.
   """
   arr = np.asarray(arr)
   dtype_fn = _dtypes.default_types.get(arr.dtype.kind)
@@ -143,8 +142,7 @@ def with_jax_dtype_defaults(func: Callable[..., Any], use_defaults: bool = True)
 
   This is generally used to wrap numpy functions within tests, in order to make
   their default output dtypes match those of corresponding JAX functions, taking
-  into account the state of the ``jax_enable_x64`` and ``jax_default_dtype_bits``
-  flags.
+  into account the state of the ``jax_enable_x64`` flag.
 
   Args:
     use_defaults : whether to convert any given output to the default dtype. May be
@@ -264,13 +262,6 @@ def event_listener(name, *args):
   elif name == "batched_device_put_end":
     thread_local_state.nested_device_put_count -= 1
 
-  elif name == "pjit._infer_params_impl":
-    # For infer_params, we collect per-function data, but only while a context
-    # manager is active.
-    infer_counts = thread_local_state.infer_params_fun_counts
-    if infer_counts is not None:
-      (fun,) = args
-      infer_counts[fun] += 1
   elif name == "lower_jaxpr_to_fun":
     # For infer_params, we collect per-function data, but only while a context
     # manager is active.
@@ -298,7 +289,7 @@ def count_events(event):
 count_device_put = count_events("batched_device_put")
 count_device_put_fast_path_hit = count_events("batched_copy_array")
 count_pjit_cpp_cache_miss = count_events("jit_cpp_cache_miss")
-count_jit_tracing_cache_miss = count_events("create_pjit_jaxpr")
+count_jit_tracing_cache_miss = count_events("trace_to_jaxpr")
 count_aot_jit_cpp_cache_miss = count_events("stages_compiled_call")
 count_jit_and_pmap_lowerings = count_events("lower_jaxpr_to_module")
 count_jit_compilation_cache_miss = count_events("pxla_cached_compilation")
@@ -331,8 +322,12 @@ def count_subjaxpr_to_hlo_conversion(fun_name):
   assert thread_local_state.lower_jaxpr_to_fun_counts is None
   counts = collections.Counter()
   thread_local_state.lower_jaxpr_to_fun_counts = counts
+  def get():
+    key, *others = {k for k in counts if fun_name in k}  # type: ignore
+    if others: raise Exception(f"ambiguous name: {fun_name}")
+    return counts[key]
   try:
-    yield lambda: counts[fun_name]
+    yield get
   finally:
     thread_local_state.lower_jaxpr_to_fun_counts = None
 
@@ -427,11 +422,20 @@ def is_tsan():
 def is_sanitized():
   return _jaxlib._jax.is_sanitized()
 
+def is_gil_disabled() -> bool:
+  return not sys._is_gil_enabled() if hasattr(sys, "_is_gil_enabled") else False
+
+def is_test_rbe():
+  """Check for a variable set by the RBE toolchain under testing."""
+  return (
+      os.getenv("IS_JAX_RBE_TESTING", "").lower() in {"true", "1", "yes", "y"}
+      )
+
 # Returns True if it is not cloud TPU. If it is cloud TPU, returns True if it is
 # built at least `date``.
 # TODO(b/327203806): after libtpu adds a XLA version and the oldest support
 # libtpu contains the XLA version, remove using built time to skip tests.
-def if_cloud_tpu_at_least(year: int, month: int, day: int):
+def is_cloud_tpu_at_least(year: int, month: int, day: int):
   date = datetime.date(year, month, day)
   if not is_cloud_tpu():
     return True
@@ -488,6 +492,8 @@ def is_device_tpu(version: int | None = None, variant: str = "") -> bool:
     return "v6 lite" in device_kind
   elif expected_version == "v5p":
     return device_kind.endswith("v5")
+  elif expected_version == "v7x":
+    return "TPU7x" in device_kind
   return expected_version in device_kind
 
 def pattern_search(patterns: str | Sequence[str], string: str):
@@ -495,14 +501,14 @@ def pattern_search(patterns: str | Sequence[str], string: str):
     patterns = (patterns,)  # type: ignore
 
   for pattern in patterns:
-    if pattern in string:
+    if re.search(pattern, string):
       return pattern
   return None
 
-def device_kind_matches(device_patterns: str | Sequence[str]):
+def device_kind_match(device_patterns: str | Sequence[str]):
   device_kind = xla_bridge.devices()[0].device_kind
   matching_pattern = pattern_search(device_patterns, device_kind)
-  return matching_pattern is not None
+  return matching_pattern
 
 def skip_if_errors(
     *,
@@ -541,6 +547,18 @@ skip_if_triton_exceeds_shared_memory = functools.partial(
   error_patterns="Shared memory size limit exceeded",
   reason=lambda err, dev: f"Triton kernel exceeds shared memory on {dev}",
 )
+
+def get_cuda_nonportable_max_cluster_size():
+  # Per-device nonportable maximum cluster sizes for Jetson Thor and DGX
+  # Spark (GB10) determined by querying cuOccupancyMaxPotentialClusterSize
+  if device_kind_match("Thor$"):
+    return 8
+  elif device_kind_match("GB10$"):
+    return 12
+  # 16 is the nonportable maximum cluster size on:
+  # - Hopper: https://docs.nvidia.com/cuda/hopper-tuning-guide/index.html#:~:text=cluster%20size%20of-,16,-by%20opting%20in
+  # - Blackwell: https://docs.nvidia.com/cuda/blackwell-tuning-guide/index.html#:~:text=cluster%20size%20of-,16,-by%20opting%20in
+  return 16
 
 def is_cuda_compute_capability_at_least(capability: str) -> bool:
   if not is_device_cuda():
@@ -1234,36 +1252,28 @@ class JaxTestCase(parameterized.TestCase):
     'jax_legacy_prng_key': 'error',
   }
 
-  _context_stack: ExitStack | None = None
-
-
   def setUp(self):
     super().setUp()
-    self.enter_context(assert_global_configs_unchanged())
+    self.enterContext(assert_global_configs_unchanged())
 
     # We use the adler32 hash for two reasons.
     # a) it is deterministic run to run, unlike hash() which is randomized.
     # b) it returns values in int32 range, which RandomState requires.
     self._rng = npr.RandomState(zlib.adler32(self._testMethodName.encode()))
 
-    # TODO(phawkins): use TestCase.enterContext once Python 3.11 is the minimum
-    # version.
-    self._context_stack = ExitStack()
-    self.addCleanup(self._context_stack.close)
-    stack = self._context_stack
-    stack.enter_context(global_config_context(**self._default_global_config))
+    self.enterContext(global_config_context(**self._default_global_config))
     for config_name, value in self._default_thread_local_config.items():
-      stack.enter_context(config.config_states[config_name](value))
+      self.enterContext(config.config_states[config_name](value))
 
     if TEST_WITH_PERSISTENT_COMPILATION_CACHE.value:
       assert TEST_NUM_THREADS.value <= 1, "Persistent compilation cache is not thread-safe."
-      stack.enter_context(config.enable_compilation_cache(True))
-      stack.enter_context(config.raise_persistent_cache_errors(True))
-      stack.enter_context(config.persistent_cache_min_compile_time_secs(0))
-      stack.enter_context(config.persistent_cache_min_entry_size_bytes(0))
-      tmp_dir = stack.enter_context(tempfile.TemporaryDirectory())
-      stack.enter_context(config.compilation_cache_dir(tmp_dir))
-      stack.callback(compilation_cache.reset_cache)
+      self.enterContext(config.enable_compilation_cache(True))
+      self.enterContext(config.raise_persistent_cache_errors(True))
+      self.enterContext(config.persistent_cache_min_compile_time_secs(0))
+      self.enterContext(config.persistent_cache_min_entry_size_bytes(0))
+      tmp_dir = self.enterContext(tempfile.TemporaryDirectory())
+      self.enterContext(config.compilation_cache_dir(tmp_dir))
+      self.addCleanup(compilation_cache.reset_cache)
 
   def tearDown(self) -> None:
     assert core.reset_trace_state()
@@ -1333,14 +1343,16 @@ class JaxTestCase(parameterized.TestCase):
                             rtol=rtol, canonicalize_dtypes=canonicalize_dtypes,
                             err_msg=err_msg)
     elif is_sequence(actual) and not hasattr(actual, '__array__'):
-      self.assertTrue(is_sequence(desired) and not hasattr(desired, '__array__'))
+      self.assertTrue(is_sequence(desired) and not hasattr(desired, '__array__'),
+                      msg=f"Expected sequence, got {desired}")
       self.assertEqual(len(actual), len(desired))
       for actual_elt, desired_elt in zip(actual, desired):
         self.assertAllClose(actual_elt, desired_elt, check_dtypes=check_dtypes, atol=atol,
                             rtol=rtol, canonicalize_dtypes=canonicalize_dtypes,
                             err_msg=err_msg)
     elif hasattr(actual, '__array__') or np.isscalar(actual):
-      self.assertTrue(hasattr(desired, '__array__') or np.isscalar(desired))
+      self.assertTrue(hasattr(desired, '__array__') or np.isscalar(desired),
+                      msg=f"Expected array-like, got {desired}")
       if check_dtypes:
         self.assertDtypesMatch(actual, desired, canonicalize_dtypes=canonicalize_dtypes)
       actual = np.asarray(actual)
@@ -1548,12 +1560,14 @@ def with_explicit_mesh(sizes, names, axis_types=None, iota_order=False):
 def create_mesh(mesh_shape, axis_names, iota_order=False, axis_types=None):
   size = math.prod(mesh_shape)
   if len(xla_bridge.devices()) < size:
-    raise unittest.SkipTest(f"Test requires {size} global devices.")
+    raise unittest.SkipTest(f"Test requires {size} global devices and found {len(xla_bridge.devices())}.")
   if iota_order:
     devices = sorted(xla_bridge.devices(), key=lambda d: d.id)
     mesh_devices = np.array(devices[:size]).reshape(mesh_shape)
     return mesh_lib.Mesh(mesh_devices, axis_names, axis_types=axis_types)
   else:
+    if axis_types is None:
+      axis_types = (mesh_lib.AxisType.Auto,) * len(mesh_shape)
     return sharding_impls.make_mesh(mesh_shape, axis_names, axis_types)
 
 class _cached_property:
@@ -1733,7 +1747,7 @@ def register_event_duration_listener(callback):
     monitoring.register_event_duration_secs_listener(callback)
     yield
   finally:
-    monitoring._unregister_event_duration_listener_by_callback(callback)
+    monitoring.unregister_event_duration_listener(callback)
 
 
 @contextmanager
@@ -1877,8 +1891,8 @@ class vectorize_with_mpmath(np.vectorize):
     self.extra_prec_multiplier = kwargs.pop('extra_prec_multiplier', 0)
     self.extra_prec = kwargs.pop('extra_prec', 0)
     self.mpmath = mpmath
-    self.contexts = dict()
-    self.contexts_inv = dict()
+    self.contexts = {}
+    self.contexts_inv = {}
     for fp_format, prec in self.float_prec.items():
       ctx = self.mpmath.mp.clone()
       ctx.prec = prec
@@ -2331,6 +2345,17 @@ class numpy_with_mpmath:
       assert 0  # unreachable
 
 # Hypothesis testing support
+def hypothesis_is_thread_safe() -> bool:
+  """Returns True if the installed hypothesis version is thread-safe.
+
+  Hypothesis versions >= 6.136.9 are thread-safe.
+  """
+  try:
+    import hypothesis as hp  # pytype: disable=import-error
+    return tuple(int(x) for x in hp.__version__.split('.')) >= (6, 136, 9)
+  except (ModuleNotFoundError, ImportError):
+    return True
+
 def setup_hypothesis(max_examples=30) -> None:
   """Sets up the hypothesis profiles.
 
@@ -2390,3 +2415,13 @@ def setup_hypothesis(max_examples=30) -> None:
   profile = HYPOTHESIS_PROFILE.value
   logging.info("Using hypothesis profile: %s", profile)
   hp.settings.load_profile(profile)
+
+
+def runtime_environment() -> str | None:
+  """Returns None, "bazel" or "pytest"."""
+  if sys.executable is None:
+    return None
+  elif 'bazel-out' in sys.executable:
+    return "bazel"
+  else:
+    return "pytest"

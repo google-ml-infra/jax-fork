@@ -22,6 +22,14 @@ package(default_applicable_licenses = [])
 jax_generate_backend_suites()
 
 py_library(
+    name = "jax2tf_tests",
+    srcs = [
+        "__init__.py",
+    ],
+    visibility = ["//jax:internal"],
+)
+
+py_library(
     name = "jax2tf_limitations",
     srcs = [
         "jax2tf_limitations.py",
@@ -218,8 +226,6 @@ jax_multiplatform_test(
     enable_configs = [
         "tpu_v3_x4",
     ],
-    env = {
-    },
     tags = [
         "jax2tf",
         "requires-net:external",  # For running with xprof

@@ -55,23 +55,26 @@ def LLVM_PointerShared : LLVM_PointerInAddressSpace<3>;
 
 def MosaicGPU_InitializeBarrierOp : Op<MosaicGPU_Dialect, "initialize_barrier",
                                       []> {
-  let summary = "Initializes a memref of barriers";
+  let summary = "Initializes barrier objects at specified location.";
   let description = [{
-    Initializes a memref of barriers each meant to synchronize exactly
+    Initializes `num_barriers` barriers each meant to synchronize exactly
     `arrival_count` threads.
 
-    The base pointer of the result memref corresponds to `base_pointer`, which
-    must be a pointer to a shared memory location.
+    `base_pointer` must be a pointer to a shared memory location.
   }];
 
   let arguments = (ins
     LLVM_PointerShared:$base_pointer,
-    ConfinedAttr<I64Attr, [IntPositive]>:$arrival_count);
-  let results = (outs MemRefOf<[MosaicGPU_Barrier]>:$barriers_ref);
+    ConfinedAttr<I64Attr, [IntPositive]>:$arrival_count,
+    ConfinedAttr<I32Attr, [IntPositive]>:$num_barriers);
+}
 
-  let assemblyFormat = [{
-    $base_pointer $arrival_count attr-dict `:` type($barriers_ref)
-  }];
+def MosaicGPU_ArriveOp : Op<MosaicGPU_Dialect, "arrive", []> {
+  let summary = "Executes an arrive operation on the given barrier.";
+
+  let arguments = (ins
+    MemRefRankOf<[MosaicGPU_Barrier], [0]>:$barrier,
+    BoolAttr:$orders_tensor_core);
 }
 
 def MosaicGPU_ArriveExpectTxOp : Op<MosaicGPU_Dialect, "arrive_expect_tx", []> {
@@ -192,6 +195,25 @@ def MosaicGPU_SwizzlingMode : I32EnumAttr<"SwizzlingMode",
   let cppNamespace = "::mosaic_gpu";
 }
 
+def MosaicGPU_TMAReduction : I32EnumAttr<"TMAReduction",
+    "Reduction operation for TMA.",
+    [
+      I32EnumAttrCase<"Add", 0, "add">,
+      I32EnumAttrCase<"Min", 1, "min">,
+      I32EnumAttrCase<"Max", 2, "max">,
+      I32EnumAttrCase<"Inc", 3, "inc">,
+      I32EnumAttrCase<"Dec", 4, "dec">,
+      I32EnumAttrCase<"And", 5, "and">,
+      I32EnumAttrCase<"Or", 6, "or">,
+      I32EnumAttrCase<"Xor", 7, "xor">,
+      I32EnumAttrCase<"Umin", 8, "umin">,
+      I32EnumAttrCase<"Umax", 9, "umax">,
+      I32EnumAttrCase<"Smin", 10, "smin">,
+      I32EnumAttrCase<"Smax", 11, "smax">
+    ]>{
+  let cppNamespace = "::mosaic_gpu";
+}
+
 def TileTransformAttr : MosaicGPU_Attr<"TileTransform", "tile"> {
   let parameters = (ins ArrayRefParameter<"int32_t", "tiling">:$tiling);
   let summary = "Specifies a transform that tiles suffix dimensions of a memref in SMEM.";
@@ -239,6 +261,10 @@ def MosaicGPU_AsyncLoadOp : Op<MosaicGPU_Dialect, "async_load",
     values in `slice_lengths` are the lengths. Providing -1 in `slice_lengths`
     indicates that the slice length is 1 and that the corresponding dimension
     should be collapsed and does not appear in the `destination` MemRef.
+    If an index is a vector of ints, its elements serve as GMEM indices from
+    which the data should be gathered from GMEM. In this case, the
+    `slice_lengths` must have a value equal to the size of the vector. Only one
+    index may be a vector.
 
     The data is written in row-major order to the contiguous SMEM `destination`.
     The `source` data does not need to be contiguous, except for the last
@@ -260,22 +286,13 @@ def MosaicGPU_AsyncLoadOp : Op<MosaicGPU_Dialect, "async_load",
     AnyMemRef:$source,
     AnyMemRef:$destination,
     MemRefRankOf<[MosaicGPU_Barrier], [0]>:$barrier,
-    Variadic<I32>:$indices,
+    Variadic<AnyTypeOf<[I32, VectorOfRankAndType<[1], [I32, I16, I8]>]>>:$indices,
     PtxPredicate:$predicate,
 
     // Attributes
     DenseI64ArrayAttr:$slice_lengths,
     TypedArrayAttrBase<MosaicGPU_Dimension, "dimensions">:$collective
   );
-
-  let assemblyFormat = [{
-    `source` `(` $source `:` type($source) `)`
-    `destination` `(` $destination `:` type($destination) `)`
-    `barrier` `(` $barrier `:` type($barrier) `)`
-    `indices` `(` $indices `)`
-    `predicate` `(` $predicate `)`
-    attr-dict
-  }];
 
   let hasVerifier = 1;
 }
@@ -292,7 +309,10 @@ def MosaicGPU_AsyncPrefetchOp : Op<MosaicGPU_Dialect, "async_prefetch",
     have a length equal to the rank of the `source`. The values in `indices` are
     the starting indices of each dimension and the values in `slice_lengths` are
     the lengths. Providing -1 in `slice_lengths` indicates that the slice length
-    is 1.
+    is 1. If an index is a vector of ints, its elements serve as GMEM indices
+    from which the data should be gathered from GMEM. In this case, the
+    `slice_lengths` must have a value equal to the size of the vector. Only one
+    index may be a vector.
 
     The `collective` attribute can be provided to partition the prefetch over
     multiple blocks in a cluster.
@@ -302,20 +322,13 @@ def MosaicGPU_AsyncPrefetchOp : Op<MosaicGPU_Dialect, "async_prefetch",
 
   let arguments = (ins
     AnyMemRef:$source,
-    Variadic<I32>:$indices,
+    Variadic<AnyTypeOf<[I32, VectorOfRankAndType<[1], [I32, I16, I8]>]>>:$indices,
     PtxPredicate:$predicate,
 
     // Attributes
     DenseI64ArrayAttr:$slice_lengths,
     TypedArrayAttrBase<MosaicGPU_Dimension, "dimensions">:$collective
   );
-
-  let assemblyFormat = [{
-    `source` `(` $source `:` type($source) `)`
-    `indices` `(` $indices `)`
-    `predicate` `(` $predicate `)`
-    attr-dict
-  }];
 
   let hasVerifier = 1;
 }
@@ -334,7 +347,10 @@ def MosaicGPU_AsyncStoreOp : Op<MosaicGPU_Dialect, "async_store",
     The values in `indices` are the starting indices of each dimension and the
     values in `slice_lengths` are the lengths. Providing -1 in `slice_lengths`
     indicates that this dimension is collapsed in the `source` and needs to be
-    expanded to a slice of size 1 in the `destination`.
+    expanded to a slice of size 1 in the `destination`. If an index is a vector
+    of ints, its elements serve as GMEM indices to which the data should be
+    scattered to GMEM. In this case, the `slice_lengths` must have a value equal
+    to the size of the vector. Only one index may be a vector.
 
     The data is written in row-major order to the GMEM `destination`. The
     `source` data in SMEM needs to be contiguous, but the `destination` GMEM
@@ -342,26 +358,63 @@ def MosaicGPU_AsyncStoreOp : Op<MosaicGPU_Dialect, "async_store",
 
     The `predicate` allows scheduling the transfer conditionally. The async copy
     is always scheduled by at most a single lane in the warpgroup.
+
+    The `reduction_op` attribute can be provided to perform a reduction when
+    storing to GMEM. For example, using `add` will add the SMEM values to
+    existing values in GMEM.
   }];
 
   let arguments = (ins
     AnyMemRef:$source,
     AnyMemRef:$destination,
-    Variadic<I32>:$indices,
+    Variadic<AnyTypeOf<[I32, VectorOfRankAndType<[1], [I32, I16, I8]>]>>:$indices,
     PtxPredicate:$predicate,
 
     // Attributes
     DenseI64ArrayAttr:$slice_lengths,
-    DefaultValuedOptionalAttr<BoolAttr, "true">:$commit_group
+    DefaultValuedOptionalAttr<BoolAttr, "true">:$commit_group,
+    OptionalAttr<MosaicGPU_TMAReduction>:$reduction_op
   );
 
-  let assemblyFormat = [{
-    `source` `(` $source `:` type($source) `)`
-    `destination` `(` $destination `:` type($destination) `)`
-    `indices` `(` $indices `)`
-    `predicate` `(` $predicate `)`
-    attr-dict
+  let hasVerifier = 1;
+}
+
+def MosaicGPU_VectorLoadOp : Op<MosaicGPU_Dialect, "vector_load",
+      [DeclareOpInterfaceMethods<InferTypeOpInterface>, MemoryEffects<[MemRead]>]> {
+  let summary = "Reads an n-D slice of memory into an n-D vector.";
+  let description = [{
+    Similar to `vector.load` (vector dialect) but supports loading from
+    non-contiguous memory.
+
+    If `optimized` is true, raises an error if we cannot generate an optimised
+    transfer. If unset, fall back to a non-optimized transfer if unable to
+    generate an optimized transfer.
   }];
+
+  let arguments = (ins
+    AnyNon0RankedMemRef:$source,
+    OptionalAttr<BoolAttr>:$optimized
+  );
+  let results = (outs AnyFixedVectorOfNonZeroRank);
+}
+
+def MosaicGPU_VectorStoreOp : Op<MosaicGPU_Dialect, "vector_store",
+      [MemoryEffects<[MemWrite]>]> {
+  let summary = "Writes an n-D vector to an n-D slice of memory.";
+  let description = [{
+    Similar to `vector.store` (vector dialect) but supports storing to
+    non-contiguous memory.
+
+    If `optimized` is true, raises an error if we cannot generate an optimised
+    transfer. If unset, fall back to a non-optimized transfer if unable to
+    generate an optimized transfer.
+  }];
+
+  let arguments = (ins
+    AnyFixedVectorOfNonZeroRank:$valueToStore,
+    AnyNon0RankedMemRef:$destination,
+    OptionalAttr<BoolAttr>:$optimized
+  );
 
   let hasVerifier = 1;
 }
@@ -427,7 +480,7 @@ def MosaicGPU_BroadcastInDimOp : Op<MosaicGPU_Dialect, "broadcast_in_dim", []> {
 }
 
 
-def MosaicGPU_SliceSMEMOp : Op<MosaicGPU_Dialect, "slice_smem", []> {
+def MosaicGPU_SliceSMEMOp : Op<MosaicGPU_Dialect, "slice_smem", [Pure]> {
   let summary = "Constructs an SMEM MemRef with the requested type that begins at the specified SMEM offset address.";
 
   let arguments = (ins I32:$offset);
@@ -441,7 +494,8 @@ def MosaicGPU_WGMMASupportedAccumulatorType : AnyTypeOf<[F16, F32, I32],
     "A type supported by the accumulator `wgmma.mma_async` instruction">;
 
 
-def MosaicGPU_WGMMAOp : Op<MosaicGPU_Dialect, "wgmma", [InferTypeOpInterface]> {
+def MosaicGPU_WGMMAOp : Op<MosaicGPU_Dialect, "wgmma",
+    [DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
   let summary = "Multiply two matrices asynchronously using warpgroup level matrix multiply operations.";
   let description = [{
     Schedules WGMMA operations that perform the following matrix multiply and
@@ -491,24 +545,6 @@ def MosaicGPU_WGMMAOp : Op<MosaicGPU_Dialect, "wgmma", [InferTypeOpInterface]> {
     `b` `(` $b `:` type($b) `)`
     attr-dict
     `->` type(results)
-  }];
-
-  let extraClassDeclaration = [{
-    static llvm::LogicalResult inferReturnTypes(
-        mlir::MLIRContext *,
-        std::optional<mlir::Location> location,
-        mlir::ValueRange operands,
-        mlir::DictionaryAttr attributes,
-        mlir::OpaqueProperties properties,
-        mlir::RegionRange regions,
-        llvm::SmallVectorImpl<mlir::Type> &inferredReturnTypes) {
-      if (operands.empty()) {
-        return ::mlir::emitOptionalError(
-          location, "expected non-empty operands");
-      }
-      inferredReturnTypes.assign({operands[0].getType()});
-      return ::mlir::success();
-    }
   }];
 
   let hasVerifier = 1;
@@ -569,32 +605,13 @@ def MosaicGPU_TcGen05MMAOp : Op<MosaicGPU_Dialect, "tcgen05_mma", [AttrSizedOper
 }
 
 def MosaicGPU_OptimizationBarrierOp : Op<MosaicGPU_Dialect, "optimization_barrier",
-    [InferTypeOpInterface]> {
+    [DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
   let summary = "Prevents MLIR from moving operations across the barrier.";
 
   let arguments = (ins
     Variadic<AnyType>:$operands
   );
   let results = (outs Variadic<AnyType>);
-
-  let extraClassDeclaration = [{
-    static llvm::LogicalResult inferReturnTypes(
-        mlir::MLIRContext *,
-        std::optional<mlir::Location> location,
-        mlir::ValueRange operands,
-        mlir::DictionaryAttr attributes,
-        mlir::OpaqueProperties properties,
-        mlir::RegionRange regions,
-        llvm::SmallVectorImpl<mlir::Type> &inferredReturnTypes) {
-      if (operands.empty()) {
-        return ::mlir::emitOptionalError(
-          location, "expected non-empty operands");
-      }
-      ::mlir::TypeRange operand_types = operands.getTypes();
-      inferredReturnTypes.assign(operand_types.begin(), operand_types.end());
-      return ::mlir::success();
-    }
-  }];
 }
 
 def MosaicGPU_ReturnOp : Op<MosaicGPU_Dialect, "return",
@@ -611,7 +628,7 @@ def MosaicGPU_ReturnOp : Op<MosaicGPU_Dialect, "return",
   }];
 
   // The operand's type must match the parent CustomPrimitiveOp's result type.
-  let arguments = (ins Variadic<AnyVectorOfAnyRank>:$operands);
+  let arguments = (ins Variadic<AnyType>:$operands);
   let assemblyFormat = [{ attr-dict ($operands^ `:` type($operands))? }];
   let hasVerifier = 1;
 }
@@ -638,8 +655,8 @@ def MosaicGPU_CustomPrimitiveOp : Op<MosaicGPU_Dialect, "custom_primitive",
     ArrayAttr:$out_layouts
   );
 
-  let results = (outs Variadic<AnyVectorOfAnyRank>);
-  let regions = (region AnyRegion:$body);
+  let results = (outs Variadic<AnyType>);
+  let regions = (region SizedRegion<1>:$body);
 
   let hasVerifier = 1;
 }
@@ -670,7 +687,7 @@ def MosaicGPU_TmemAllocOp : Op<MosaicGPU_Dialect, "tmem_alloc", []> {
     TMEM will be stored. The op returns a memref to the allocated TMEM. The
     result must have a shape with dimensions [rows, logical_columns]. If
     `packing` is 1, then the number of logical (unpacked) columns is equal to
-    the number of allocated columns in TMEM. Otherwise, these equations
+    the number of allocated columns in TMEM. Otherwise, these constraints
     must hold:
 
         packing = 32 / bitwidth(element type of result)
@@ -733,31 +750,13 @@ def MosaicGPU_TmemDeallocOp : Op<MosaicGPU_Dialect, "tmem_dealloc", []> {
 }
 
 def MosaicGPU_AsyncLoadTmemOp : Op<MosaicGPU_Dialect, "async_load_tmem",
-    [InferTypeOpInterface]> {
+    [DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
   let summary = "Copies TMEM to registers asynchronously.";
 
   let arguments = (ins MemRefRankOf<[AnyType], [2]>:$source);
   let results = (outs VectorOfRank<[2]>);
 
   let hasVerifier = 1;
-
-  let extraClassDeclaration = [{
-    static llvm::LogicalResult inferReturnTypes(
-        mlir::MLIRContext *,
-        std::optional<mlir::Location> location,
-        mlir::ValueRange operands,
-        mlir::DictionaryAttr attributes,
-        mlir::OpaqueProperties properties,
-        mlir::RegionRange regions,
-        llvm::SmallVectorImpl<mlir::Type> &inferredReturnTypes) {
-      mlir::MemRefType memref_type =
-          mlir::cast<mlir::MemRefType>(operands[0].getType());
-      auto vector_type = mlir::VectorType::get(
-          memref_type.getShape(), memref_type.getElementType());
-      inferredReturnTypes.assign({vector_type});
-      return ::mlir::success();
-    }
-  }];
 }
 
 def MosaicGPU_AsyncStoreTmemOp : Op<MosaicGPU_Dialect, "async_store_tmem", []> {
@@ -769,6 +768,65 @@ def MosaicGPU_AsyncStoreTmemOp : Op<MosaicGPU_Dialect, "async_store_tmem", []> {
   );
 
   let hasVerifier = 1;
+}
+
+def MosaicGPU_SliceTmemOp : Op<MosaicGPU_Dialect, "slice_tmem", []> {
+  let summary = "Constructs a TMEM MemRef with the requested type that begins at the specified TMEM column offset by the argument";
+  let description = [{
+    The principal use case for this op is to do a single TMEM allocation and
+    slice it into multiple smaller TMEM references. `source` is the large TMEM
+    allocation and `offset` is the number of columns to start slicing from.
+  }];
+
+  let arguments = (ins
+    MemRefRankOf<[AnyType], [2]>:$source,
+    ConfinedAttr<I32Attr, [IntNonNegative]>:$offset
+  );
+
+  let results = (outs MemRefRankOf<[AnyType], [2]>);
+
+  let hasVerifier = 1;
+}
+
+def MosaicGPU_DebugPrintOp : Op<MosaicGPU_Dialect, "debug_print", []> {
+  let summary = "Prints value from inside a MGPU kernel";
+
+  let arguments = (ins
+    StrAttr:$format,
+    AnyVectorOfAnyRank:$value
+  );
+}
+
+def MosaicGPU_PrintLayoutOp : Op<MosaicGPU_Dialect, "print_layout", []> {
+  let summary = "Prints the layout of the given array or TMEM reference.";
+
+  let arguments = (ins
+    StrAttr:$format,
+    AnyTypeOf<[AnyMemRef, AnyVectorOfAnyRank]>:$value
+  );
+
+  let hasVerifier = 1;
+}
+
+def MosaicGPU_BroadcastedIotaOp : Op<MosaicGPU_Dialect, "broadcasted_iota", []> {
+  let summary = "Create a broadcasted iota vector.";
+  let description = [{
+    Creates an array that has the specified shape and holds values starting at
+    zero and incrementing by one along the specified dimension.
+  }];
+
+  let arguments = (ins
+    ConfinedAttr<I32Attr, [IntNonNegative]>:$dimension
+  );
+
+  let results = (outs AnyFixedVectorOfNonZeroRank);
+
+  let hasVerifier = 1;
+}
+
+// TODO (b/415721295): Remove when the minimum JAXLIB version is 0.8.3.
+def TMAGatherSupportedOp : Op<MosaicGPU_Dialect, "tma_gather_supported"> {
+  let summary = "Dummy op that will be removed. DO NOT USE.";
 }
 
 #endif // THIRD_PARTY_PY_JAX_JAXLIB_MOSAIC_DIALECT_GPU_MOSAIC_GPU_TD_

@@ -133,6 +133,7 @@ cc_library(
         "@llvm-project//llvm:Support",
         "@llvm-project//mlir:DataLayoutInterfaces",
         "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:NVVMDialect",
         "@llvm-project//mlir:Pass",
         "@llvm-project//mlir:Support",
         "@llvm-project//mlir:VectorDialect",
@@ -231,10 +232,11 @@ cc_library(
         "-Wl,--export-dynamic-symbol='mosaic_gpu_*'",
         "-Wl,--export-dynamic-symbol='nvshmem_my_pe'",
         "-Wl,--export-dynamic-symbol='nvshmem_ptr'",
-        "-Wl,--export-dynamic-symbol='nvshmemx_mc_ptr'",
         "-Wl,--export-dynamic-symbol='nvshmemx_barrier_all_on_stream'",
+        "-Wl,--export-dynamic-symbol='nvshmemx_cumodule_finalize'",
         "-Wl,--export-dynamic-symbol='nvshmemx_cumodule_init'",
         "-Wl,--export-dynamic-symbol='nvshmemx_init_status'",
+        "-Wl,--export-dynamic-symbol='nvshmemx_mc_ptr'",
     ],
     deps = [
         ":nvshmem",
@@ -326,11 +328,13 @@ cc_library(
         "@tsl//tsl/platform:path",
         "@tsl//tsl/profiler/lib:traceme",
         "@xla//xla:executable_run_options",
+        "@xla//xla/backends/gpu:ffi",
         "@xla//xla/ffi",
         "@xla//xla/ffi:ffi_api",
         "@xla//xla/service:custom_call_status",
         "@xla//xla/service:custom_call_target_registry",
         "@xla//xla/service/gpu/llvm_gpu_backend:nvptx_libdevice_path",
+        "@xla//xla/service/llvm_ir:llvm_command_line_options",
         "@xla//xla/stream_executor/cuda:assemble_compilation_provider",
         "@xla//xla/stream_executor/cuda:compilation_provider",
         "@xla//xla/stream_executor/cuda:compilation_provider_options",
@@ -346,8 +350,13 @@ cc_test(
     srcs = ["custom_call_test.cc"],
     tags = ["requires-gpu-sm90"],
     deps = [
-        ":custom_call",
+        ":mosaic_gpu_support",
         "//testing/base/public:gunit_main",
+        "@com_google_absl//absl/base:log_severity",
+        "@com_google_absl//absl/log:globals",
+        "@com_google_absl//absl/log:scoped_mock_log",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:status_matchers",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:string_view",
         "@xla//xla/hlo/builder:xla_computation",
@@ -399,4 +408,27 @@ cc_binary(
 cc_library(
     name = "library_paths",
     hdrs = ["library_paths.h"],
+)
+
+cc_library(
+    name = "tiled_layout",
+    srcs = ["tiled_layout.cc"],
+    hdrs = ["tiled_layout.h"],
+    deps = [
+        "@com_google_absl//absl/algorithm:container",
+        "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@xla//xla/tsl/platform:statusor",
+    ],
+)
+
+cc_test(
+    name = "tiled_layout_test",
+    srcs = ["tiled_layout_test.cc"],
+    deps = [
+        ":tiled_layout",
+        "//testing/base/public:gunit_main",
+        "@com_google_absl//absl/status",
+    ],
 )

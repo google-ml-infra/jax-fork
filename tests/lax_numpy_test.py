@@ -46,6 +46,7 @@ from jax.test_util import check_grads
 from jax._src import array
 from jax._src import config
 from jax._src import core
+from jax._src import deprecations
 from jax._src import dtypes
 from jax._src import test_util as jtu
 from jax._src.lax import lax as lax_internal
@@ -103,8 +104,8 @@ def np_view(arr: np.ndarray, dtype) -> np.ndarray:
   if dtype is None:
     return arr
   dtype = np.dtype(dtype)
-  nbits_in = dtypes.bit_width(arr.dtype)
-  nbits_out = dtypes.bit_width(dtype)
+  nbits_in = dtypes.itemsize_bits(arr.dtype)
+  nbits_out = dtypes.itemsize_bits(dtype)
   if nbits_in == 4:
     arr = _bitcast_uint4_to_uint8(arr.view('uint4'))
   if nbits_out == 4:
@@ -893,6 +894,18 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
     self._CompileAndCheck(jnp_fun, args_maker, check_dtypes=check_dtypes,
                           atol=tol, rtol=tol)
 
+  @jtu.sample_product(
+    dtype=number_dtypes,
+    decimals=[1, 10, 100, 1000],
+  )
+  def testRoundLargeDecimals(self, dtype, decimals):
+    # Regression test for https://github.com/jax-ml/jax/issues/31689.
+    # Avoid testing against NumPy here because it returns NaN for large decimals.
+    rng = jtu.rand_default(self.rng())
+    x = rng((10,), dtype)
+    result = jnp.round(x, decimals)
+    self.assertArraysAllClose(x, result, atol=2 * 10. ** -decimals)
+
   @jtu.sample_product(jit=[False, True])
   def testOperatorRound(self, jit):
     jround = jax.jit(round, static_argnums=1) if jit else round
@@ -1333,19 +1346,30 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
 
   @jtu.sample_product(
     dtype=default_dtypes,
-    a_shape=one_dim_array_shapes,
+    shape=one_dim_array_shapes if jtu.numpy_version() < (2, 2, 0) else all_shapes,
     trim=["f", "b", "fb"],
   )
-  def testTrimZeros(self, a_shape, dtype, trim):
+  def testTrimZeros(self, shape, dtype, trim):
     rng = jtu.rand_some_zero(self.rng())
-    args_maker = lambda: [rng(a_shape, dtype)]
-    np_fun = lambda arg1: np.trim_zeros(arg1, trim)
+    args_maker = lambda: [rng(shape, dtype)]
+    np_fun = lambda arg1: np.trim_zeros(np.asarray(arg1), trim)
     jnp_fun = lambda arg1: jnp.trim_zeros(arg1, trim)
     self._CheckAgainstNumpy(np_fun, jnp_fun, args_maker, check_dtypes=True)
 
-  def testTrimZerosNotOneDArray(self):
-    with self.assertRaisesRegex(TypeError, "'filt' must be 1-D array"):
-      jnp.trim_zeros(jnp.array([[0.0, 1.0, 0.0],[2.0, 4.5, 0.0]]))
+  @jtu.sample_product(
+    dtype=default_dtypes,
+    shape=[(2, 3), (3, 4)],
+    trim=["f", "b", "fb"],
+    axis=[None, 0, -1]  # note: contrary to its docs, NumPy errors for multiple axes.
+  )
+  @unittest.skipIf(jtu.numpy_version() < (2, 2, 0), "n-dimensional trim_zeros requires NumPy 2.2")
+  def testTrimZerosAxis(self, shape, dtype, trim, axis):
+    print(shape, trim, axis)
+    rng = jtu.rand_some_zero(self.rng())
+    args_maker = lambda: [rng(shape, dtype)]
+    np_fun = lambda arg1: np.trim_zeros(arg1, trim, axis=axis)
+    jnp_fun = lambda arg1: jnp.trim_zeros(arg1, trim, axis=axis)
+    self._CheckAgainstNumpy(np_fun, jnp_fun, args_maker, check_dtypes=True)
 
   @jtu.sample_product(
     rank=(1, 2),
@@ -2062,17 +2086,26 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
     dtype=default_dtypes,
     n=[0, 4],
     m=[None, 0, 1, 3, 4],
-    k=range(-4, 4),
+    k=[*range(-4, 4), -2**33, 2**33],
   )
   def testTri(self, m, n, k, dtype):
-    np_fun = lambda: np.tri(n, M=m, k=k, dtype=dtype)
-    jnp_fun = lambda: jnp.tri(n, M=m, k=k, dtype=dtype)
-    args_maker = lambda: []
-    self._CheckAgainstNumpy(np_fun, jnp_fun, args_maker)
-    self._CompileAndCheck(jnp_fun, args_maker)
+    np_fun = lambda k: np.tri(n, M=m, k=k, dtype=dtype)
+    jnp_fun = lambda k: jnp.tri(n, M=m, k=k, dtype=dtype)
+    args_maker = lambda: [k]
+    if not config.enable_x64.value and (
+        k < np.iinfo(np.int32).min or k > np.iinfo(np.int32).max
+    ):
+      with self.assertRaises(OverflowError):
+        jnp_fun(k)
+    else:
+      self._CheckAgainstNumpy(np_fun, jnp_fun, args_maker)
+      self._CompileAndCheck(jnp_fun, args_maker)
 
   def test_tri_bug_22751(self):
-    with self.assertRaisesRegex(core.ConcretizationTypeError, "jax.numpy.tri"):
+    with self.assertRaisesRegex(
+        TypeError,
+        'Shapes must be 1D sequences of concrete values of integer type',
+    ):
       jax.jit(jnp.tri)(3, M=3, k=0)
 
   @jtu.sample_product(
@@ -3580,6 +3613,15 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
     self._CheckAgainstNumpy(np.iscomplexobj, jnp.iscomplexobj, args_maker)
     self._CompileAndCheck(jnp.iscomplexobj, args_maker)
 
+  @parameterized.parameters(
+      None, bool(1), int(1), float(1), complex(1),
+      np.int32(0), np.float32(1), np.complex64(1),
+      (np.arange(5),)
+  )
+  def testIsComplexObjTransferGuard(self, val):
+    with jax.transfer_guard("disallow"):
+      jnp.iscomplexobj(val)
+
   def testIsClose(self):
     c_isclose = jax.jit(jnp.isclose)
     c_isclose_nan = jax.jit(partial(jnp.isclose, equal_nan=True))
@@ -4023,7 +4065,7 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
     {'a_dtype': a_dtype, 'dtype': dtype}
     for a_dtype in [jnp.int4, jnp.uint4, *all_dtypes]
     for dtype in [jnp.int4, jnp.uint4, *all_dtypes]
-    if dtypes.bit_width(a_dtype) == dtypes.bit_width(dtype)
+    if dtypes.itemsize_bits(a_dtype) == dtypes.itemsize_bits(dtype)
   ])
   def testViewScalar(self, a_dtype, dtype):
     if jtu.test_device_matches(["tpu"]):
@@ -4837,6 +4879,53 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
     self.assertEqual(len(jaxpr.jaxpr.eqns), num_eqs)
     self.assertEqual(jaxpr.jaxpr.eqns[0].primitive, lax.iota_p)
 
+  @jtu.sample_product(specify_device=[True, False])
+  def testArangeJaxprNonZeroStart(self, specify_device):
+    device = jax.devices()[-1] if specify_device else None
+    jaxpr = jax.make_jaxpr(lambda: jnp.arange(1, 5, device=device))()
+    # Non-zero start should produce iota + add (+ device_put if device specified)
+    num_eqs = 3 if device is not None else 2
+    self.assertEqual(len(jaxpr.jaxpr.eqns), num_eqs)
+    self.assertEqual(jaxpr.jaxpr.eqns[0].primitive, lax.iota_p)
+    self.assertEqual(jaxpr.jaxpr.eqns[1].primitive, lax.add_p)
+
+  @jtu.sample_product(
+      dtype=[np.int32, np.float32],
+      iteration=range(10)
+  )
+  def testArangeRandomValues(self, dtype, iteration):
+    del iteration  # not needed: each test case gets its own random seed.
+    rng = jtu.rand_default(self.rng())
+    start = rng((), dtype)
+    stop = rng((), dtype)
+    jax_result = jnp.arange(start, stop, dtype=dtype)
+    np_result = np.arange(start, stop, dtype=dtype)
+    self.assertAllClose(jax_result, np_result)
+
+  @parameterized.parameters(
+      (1+2j, 5+3j),
+      (0+0j, 5+0j),
+      (1.0+0j, 5.0+0j),
+      (0, 5, 1+1j),
+  )
+  def testArangeComplex(self, *args):
+    dep_id = "jax-numpy-arange-complex"
+    msg = "Passing complex start/stop/step to jnp.arange is deprecated"
+    if deprecations.is_accelerated(dep_id):
+      with self.assertRaisesRegex(ValueError, msg):
+        jax_result = jnp.arange(*args)
+    else:
+      with self.assertWarnsRegex(DeprecationWarning, msg):
+        jax_result = jnp.arange(*args)
+      np_result = np.arange(*args)
+      self.assertArraysEqual(jax_result, np_result)
+
+  @parameterized.parameters(int, float, np.int32, np.float32)
+  def testArangeTransferGuard(self, typ):
+    # Ensure that simple arange calls avoid host-to-device transfer.
+    with jax.transfer_guard("disallow"):
+      jnp.arange(typ(5))
+
   def testIssue830(self):
     a = jnp.arange(4, dtype=jnp.complex64)
     self.assertEqual(a.dtype, jnp.complex64)
@@ -4928,6 +5017,14 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
     jnp_fun = partial(jnp.corrcoef, rowvar=rowvar)
     self._CheckAgainstNumpy(np_fun, jnp_fun, args_maker, check_dtypes=False)
     self._CompileAndCheck(jnp_fun, args_maker)
+
+  def testCorrCoefDtype(self):
+    x = jnp.arange(5)
+    result_bf16 = jnp.corrcoef(x, x, dtype='bfloat16')
+    self.assertEqual(result_bf16.dtype, np.dtype('bfloat16'))
+
+    with self.assertRaisesRegex(ValueError, "corrcoef: dtype must be a subclass of float or complex"):
+      jnp.corrcoef(x, x, dtype=int)
 
   @jtu.sample_product(
     [dict(dtype=dtype, end_dtype=end_dtype, begin_dtype=begin_dtype,
@@ -5692,13 +5789,11 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
       self._CompileAndCheck(jnp.logaddexp2, args_maker, rtol=tol, atol=tol)
 
   def testDefaultDtypes(self):
-    precision = config.default_dtype_bits.value
-    assert precision in ['32', '64']
     self.assertEqual(jnp.bool_, np.bool_)
-    self.assertEqual(jnp.int_, np.int32 if precision == '32' else np.int64)
-    self.assertEqual(jnp.uint, np.uint32 if precision == '32' else np.uint64)
-    self.assertEqual(jnp.float_, np.float32 if precision == '32' else np.float64)
-    self.assertEqual(jnp.complex_, np.complex64 if precision == '32' else np.complex128)
+    self.assertEqual(jnp.int_, np.int64)
+    self.assertEqual(jnp.uint, np.uint64)
+    self.assertEqual(jnp.float_, np.float64)
+    self.assertEqual(jnp.complex_, np.complex128)
 
   def testFromBuffer(self):
     buf = b'\x01\x02\x03'
@@ -6135,6 +6230,7 @@ class NumpySignaturesTest(jtu.JaxTestCase):
             'datetime_as_string',
             'datetime_data',
             'errstate',
+            'fix',
             'flatiter',
             'format_float_positional',
             'format_float_scientific',
@@ -6178,43 +6274,6 @@ class NumpySignaturesTest(jtu.JaxTestCase):
             'trapz',
             'typename'}
 
-    # symbols removed in NumPy 2.0
-    skip |= {'add_docstring',
-             'add_newdoc',
-             'add_newdoc_ufunc',
-             'alltrue',
-             'asfarray',
-             'byte_bounds',
-             'compare_chararrays',
-             'cumproduct',
-             'deprecate',
-             'deprecate_with_doc',
-             'disp',
-             'fastCopyAndTranspose',
-             'find_common_type',
-             'get_array_wrap',
-             'geterrobj',
-             'issctype',
-             'issubclass_',
-             'issubsctype',
-             'lookfor',
-             'mat',
-             'maximum_sctype',
-             'msort',
-             'obj2sctype',
-             'product',
-             'recfromcsv',
-             'recfromtxt',
-             'round_',
-             'safe_eval',
-             'sctype2char',
-             'set_numeric_ops',
-             'set_string_function',
-             'seterrobj',
-             'sometrue',
-             'source',
-             'who'}
-
     self.assertEmpty(skip.intersection(dir(jnp)))
 
     names = (name for name in dir(np) if not (name.startswith('_') or name in skip))
@@ -6226,46 +6285,55 @@ class NumpySignaturesTest(jtu.JaxTestCase):
 
     # TODO(jakevdp): fix some of the following signatures. Some are due to wrong argument names.
     unsupported_params = {
+      'arange': ['start_or_stop', 'like'],
+      'array': ['ndmax', 'like', 'subok'],
       'argpartition': ['kind', 'order'],
       'asarray': ['like'],
       'broadcast_to': ['subok'],
       'clip': ['kwargs', 'out'],
+      'concat': ['out', 'dtype', 'casting'],
+      'concatenate': ['out', 'casting'],
       'copy': ['subok'],
-      'corrcoef': ['ddof', 'bias', 'dtype'],
-      'cov': ['dtype'],
+      'corrcoef': ['ddof', 'bias'],
       'cumulative_prod': ['out'],
       'cumulative_sum': ['out'],
+      'dot': ['out'],
       'empty_like': ['subok', 'order'],
       'einsum': ['kwargs'],
       'einsum_path': ['einsum_call'],
+      'empty': ['order', 'like'],
       'eye': ['order', 'like'],
       'hstack': ['casting'],
       'identity': ['like'],
       'isin': ['kind'],
       'full': ['order', 'like'],
       'full_like': ['subok', 'order'],
+      'frombuffer': ['like'],
       'fromfunction': ['like'],
+      'frompyfunc': ['kwargs'],
+      'fromstring': ['like'],
       'load': ['mmap_mode', 'allow_pickle', 'fix_imports', 'encoding', 'max_header_size'],
-      'nanpercentile': ['weights'],
-      'nanquantile': ['weights'],
-      'nanstd': ['correction', 'mean'],
-      'nanvar': ['correction', 'mean'],
+      'nanpercentile': ['interpolation', 'weights'],
+      'nanquantile': ['interpolation', 'weights'],
+      'nanstd': ['correction'],
+      'nanvar': ['correction'],
       'ones': ['order', 'like'],
       'ones_like': ['subok', 'order'],
       'partition': ['kind', 'order'],
-      'percentile': ['weights'],
-      'quantile': ['weights'],
+      'percentile': ['interpolation', 'weights'],
+      'promote_types': ['type1', 'type2'],
+      'quantile': ['interpolation', 'weights'],
       'row_stack': ['casting'],
       'stack': ['casting'],
-      'std': ['mean'],
       'tri': ['like'],
-      'trim_zeros': ['axis'],
-      'var': ['mean'],
+      'unravel_index': ['order'],
       'vstack': ['casting'],
+      'zeros': ['order', 'like'],
       'zeros_like': ['subok', 'order']
     }
 
     extra_params = {
+      'arange': ['start'],
       'compress': ['size', 'fill_value'],
       'einsum': ['subscripts', 'precision'],
       'einsum_path': ['subscripts'],
@@ -6280,6 +6348,11 @@ class NumpySignaturesTest(jtu.JaxTestCase):
     for name in names:
       jnp_fun = getattr(jnp, name)
       np_fun = getattr(np, name)
+      if isinstance(getattr(np, name), np.ufunc):
+        # Skip all `np.ufunc`s since many of the missing ufunc keywords may not
+        # be relevant for JAX. However, args such as `axis` and `keepdims` may
+        # be useful to `matmul` and others.
+        continue
       if name in ['histogram', 'histogram2d', 'histogramdd']:
         # numpy 1.24 re-orders the density and weights arguments.
         # TODO(jakevdp): migrate histogram APIs to match newer numpy versions.
@@ -6296,6 +6369,12 @@ class NumpySignaturesTest(jtu.JaxTestCase):
       if name == "reshape":
         # Similar issue to clip: we'd need logic specific to the NumPy version
         # because of the change in argument name from `newshape` to `shape`.
+        continue
+      if name == "asarray":
+        # The order of the `device` and `copy` kwargs are swapped between jnp
+        # and np.
+        # jnp.asarray: a, dtype, order, copy, device, out_sharding
+        # np.asarray: a, dtype, order, device, copy, like
         continue
       # Note: can't use inspect.getfullargspec for some functions due to numpy issue
       # https://github.com/numpy/numpy/issues/12225

@@ -15,6 +15,7 @@
 load(
     "//jaxlib:jax.bzl",
     "buffer_callback_internal_users",
+    "experimental_transfer_users",
     "if_cuda_is_configured",
     "jax_visibility",
     "mosaic_gpu_internal_users",
@@ -22,7 +23,6 @@ load(
     "pallas_fuser_users",
     "pallas_gpu_internal_users",
     "pallas_sc_internal_users",
-    "pallas_tpu_internal_users",
     "py_deps",
     "py_library_providing_imports_info",
     "pytype_strict_library",
@@ -40,6 +40,12 @@ package_group(
     name = "buffer_callback_users",
     includes = ["//jax:internal"],
     packages = buffer_callback_internal_users,
+)
+
+package_group(
+    name = "experimental_transfer_users",
+    includes = ["//jax:internal"],
+    packages = experimental_transfer_users,
 )
 
 package_group(
@@ -70,12 +76,6 @@ package_group(
     name = "pallas_sc_users",
     includes = ["//jax:internal"],
     packages = pallas_sc_internal_users,
-)
-
-package_group(
-    name = "pallas_tpu_users",
-    includes = ["//jax:internal"],
-    packages = pallas_tpu_internal_users,
 )
 
 package_group(
@@ -124,11 +124,13 @@ pytype_strict_library(
         "//jax",
         "//jax/_src:api",
         "//jax/_src:api_util",
+        "//jax/_src:config",
         "//jax/_src:traceback_util",
         "//jax/_src:tree_util",
         "//jax/_src:util",
         "//jax/_src:xla_bridge",
         "//jax/_src/lib",
+        "//jax/extend:backend",
         "//jax/extend:ifrt_programs",
     ] + py_deps("numpy") + py_deps("cloudpickle"),
 )
@@ -244,7 +246,10 @@ pytype_strict_library(
 # This target only supports sm_90 GPUs.
 py_library_providing_imports_info(
     name = "mosaic_gpu",
-    srcs = glob(["mosaic/gpu/*.py"]),
+    srcs = glob(
+        include = ["mosaic/gpu/*.py"],
+        exclude = ["mosaic/gpu/test_util.py"],
+    ),
     data = if_cuda_is_configured([
         "@local_config_cuda//cuda:runtime_nvdisasm",
         "@nvidia_nvshmem//:libnvshmem_device",
@@ -261,11 +266,13 @@ py_library_providing_imports_info(
         "//jax/_src:config",
         "//jax/_src:core",
         "//jax/_src:dtypes",
+        "//jax/_src:mesh",
         "//jax/_src:mlir",
         "//jax/_src:sharding_impls",
         "//jax/_src:stages",
         "//jax/_src:util",
         "//jax/_src/lib",
+        "//jax/extend:backend",
         "//jaxlib/mlir:arithmetic_dialect",
         "//jaxlib/mlir:builtin_dialect",
         "//jaxlib/mlir:control_flow_dialect",
@@ -281,7 +288,18 @@ py_library_providing_imports_info(
         "//jaxlib/mlir:scf_dialect",
         "//jaxlib/mlir:vector_dialect",
         "//jaxlib/mosaic/python:gpu_dialect",
-    ] + py_deps("absl/flags") + py_deps("numpy"),
+    ] + py_deps("absl-all") + py_deps("numpy"),
+)
+
+pytype_strict_library(
+    name = "mosaic_gpu_test_util",
+    testonly = True,
+    srcs = ["mosaic/gpu/test_util.py"],
+    deps = [
+        ":mosaic_gpu",
+        "//jax",
+        "//jax/_src/lib",
+    ],
 )
 
 pytype_strict_library(
@@ -331,9 +349,7 @@ pytype_strict_library(
             "pallas/triton.py",
         ],
     ),
-    visibility = [
-        "//visibility:public",
-    ],
+    visibility = ["//visibility:public"],
     deps = [
         "//jax",
         "//jax/_src:deprecations",
@@ -419,28 +435,27 @@ pytype_strict_library(
         "//jax/_src/pallas/mosaic_gpu:pallas_call_registration",  # build_cleaner: keep
         "//jax/_src/pallas/mosaic_gpu:pipeline",
         "//jax/_src/pallas/mosaic_gpu:primitives",
+        "//jax/_src/pallas/mosaic_gpu:torch",
     ],
 )
 
 pytype_strict_library(
     name = "pallas_tpu",
     srcs = ["pallas/tpu.py"],
-    visibility = [
-        ":pallas_tpu_users",
-    ],
+    visibility = ["//visibility:public"],
     deps = [
         ":pallas",  # build_cleaner: keep
         "//jax/_src:deprecations",
         "//jax/_src/pallas",
         "//jax/_src/pallas/mosaic:core",
         "//jax/_src/pallas/mosaic:helpers",
-        "//jax/_src/pallas/mosaic:interpret",
         "//jax/_src/pallas/mosaic:lowering",
         "//jax/_src/pallas/mosaic:pallas_call_registration",  # build_cleaner: keep
         "//jax/_src/pallas/mosaic:pipeline",
         "//jax/_src/pallas/mosaic:primitives",
         "//jax/_src/pallas/mosaic:random",
-        "//jax/_src/pallas/mosaic:verification",
+        "//jax/_src/pallas/mosaic:tpu_info",
+        "//jax/_src/pallas/mosaic/interpret:interpret_pallas_call",
     ],
 )
 
@@ -460,9 +475,7 @@ pytype_strict_library(
 pytype_strict_library(
     name = "pallas_tpu_ops",
     srcs = glob(["pallas/ops/tpu/**/*.py"]),
-    visibility = [
-        ":pallas_tpu_users",
-    ],
+    visibility = ["//visibility:public"],
     deps = [
         ":pallas",
         ":pallas_tpu",
@@ -502,11 +515,34 @@ pytype_strict_library(
 )
 
 pytype_strict_library(
+    name = "hijax",
+    srcs = ["hijax.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//jax/_src:ad",
+        "//jax/_src:ad_util",
+        "//jax/_src:core",
+        "//jax/_src:effects",
+        "//jax/_src:hijax",
+        "//jax/_src:lax",
+    ],
+)
+
+pytype_strict_library(
     name = "profiler",
     srcs = ["profiler.py"],
     visibility = ["//visibility:public"],
     deps = [
         "//jax/_src/lib",
+    ],
+)
+
+pytype_strict_library(
+    name = "random",
+    srcs = ["random.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//jax/_src:stateful_rng",
     ],
 )
 
@@ -542,8 +578,10 @@ pytype_strict_library(
         "//jax/_src:ad",
         "//jax/_src:api",
         "//jax/_src:api_util",
+        "//jax/_src:batching",
         "//jax/_src:core",
         "//jax/_src:mlir",
+        "//jax/_src:partial_eval",
         "//jax/_src:tree_util",
         "//jax/_src:util",
         "//jax/_src/lib",
@@ -560,9 +598,13 @@ pytype_strict_library(
 )
 
 pytype_strict_library(
+    # jax.experimental.shard_map is a legacy API and should not
+    # be used in new code. Use jax.shard_map instead.
     name = "shard_map",
     srcs = ["shard_map.py"],
-    visibility = ["//visibility:public"],
+    visibility = [
+        "//jax:internal",
+    ] + jax_visibility("experimental/shard_map"),
     deps = [
         "//jax",
         "//jax/_src:mesh",
@@ -592,9 +634,7 @@ pytype_strict_library(
 pytype_strict_library(
     name = "source_mapper",
     srcs = glob(include = ["source_mapper/**/*.py"]),
-    visibility = [
-        "//visibility:public",
-    ],
+    visibility = ["//visibility:public"],
     deps = [
         "//jax",
         "//jax/_src:config",
@@ -667,7 +707,10 @@ pytype_strict_library(
 pytype_strict_library(
     name = "transfer",
     srcs = ["transfer.py"],
-    visibility = ["//jax:internal"],
+    visibility = [
+        ":experimental_transfer_users",
+        "//jax:internal",
+    ],
     deps = [
         "//jax",
         "//jax/_src:util",
@@ -718,20 +761,5 @@ filegroup(
         "scheduling_groups.py",
         "shard_map.py",
     ],
-    visibility = ["//jax:internal"],
-)
-
-filegroup(
-    name = "jax_experimental",
-    srcs = glob(
-        [
-            "*.py",
-        ],
-        exclude = [
-            "buffer_callback.py",
-            "mental/mosaic/gpu/*.py",
-            "serialize_executable.py",
-        ],
-    ),
     visibility = ["//jax:internal"],
 )

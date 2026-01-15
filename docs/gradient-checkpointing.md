@@ -19,7 +19,7 @@ kernelspec:
 
 In this tutorial, you will learn how to control JAX automatic differentiation's saved values using {func}`jax.checkpoint` (also known as {func}`jax.remat`), which can be particularly helpful in machine learning.
 
-If you are new to automatic differentiation (autodiff) or need to refresh your memory, JAX has {ref}`automatic-differentiation` and {ref}`advanced-autodiff` tutorials.
+If you are new to automatic differentiation (autodiff) or need to refresh your memory, JAX has an {ref}`automatic-differentiation` tutorial and several {ref}`Advanced automatic differentiation guides <advanced_guides>`.
 
 **TL;DR** Use the {func}`jax.checkpoint` decorator (aliased as {func}`jax.remat`) with {func}`jax.grad` to control which intermediates are saved on the forward pass versus the recomputed intermediates on the backward pass, trading off memory and FLOPs.
 
@@ -144,7 +144,7 @@ print_fwd_bwd(f3, W1, W2, W3, x)
 
 ### Let's think step by step
 
-**Note:** It may help to check out the {ref}`advanced-autodiff` tutorial prior to continuing here.
+**Note:** It may help to check out the {ref}`"Advanced automatic differentiation" guides <advanced_guides>` prior to continuing here.
 
 #### `jax.checkpoint` fundamentals
 
@@ -359,7 +359,7 @@ Another policy which refers to names is `jax.checkpoint_policies.save_only_these
 You may consider offloading to CPU memory instead of recomputing when checkpointing to save accelerator memory. `jax.checkpoint_policies.offload_dot_with_no_batch_dims` can offload the results of matrix multiplications with no batch dimensions to the CPU.
 
 ```{code-cell}
-from jax.ad_checkpoint import checkpoint
+from jax import checkpoint
 
 def checkpoint_offload_dot_with_no_batch_dims(self):
   policy = jax.checkpoint_policies.offload_dot_with_no_batch_dims(
@@ -380,7 +380,8 @@ def checkpoint_offload_dot_with_no_batch_dims(self):
 One of JAX's checkpoint policies allows specified checkpoint names to be offloaded to CPUs. This policy is implemented through `jax.checkpoint_policies.save_and_offload_only_these_names`, which has four arguments: `names_which_can_be_saved`, `names_which_can_be_offloaded`, the offloading source, and destination. Names listed in `names_which_can_be_saved` are kept on the device, names listed in `names_which_can_be_offloaded` are moved to CPU memory, and other names or operations without names are recomputed. For example, if we have checkpoint names `y`, `z`, and `w`, `y` can be saved on the device, `z` can be offloaded to CPU memory, and `w` can be recomputed.
 
 ```{code-cell}
-from jax.ad_checkpoint import checkpoint, checkpoint_name
+from jax import checkpoint
+from jax.ad_checkpoint import checkpoint_name
 from jax._src import test_util as jtu
 
 def checkpoint_names_saved_offloaded_recomputed(self):

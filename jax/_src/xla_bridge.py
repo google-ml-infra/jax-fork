@@ -41,6 +41,7 @@ from jax._src import hardware_utils
 from jax._src import traceback_util
 from jax._src import util
 from jax._src.cloud_tpu_init import get_tpu_library_path
+from jax._src.lib import jaxlib_extension_version
 from jax._src.lib import xla_client
 from jax._src.lib import _jax
 from jax._src.lib import _profiler
@@ -58,8 +59,6 @@ except ImportError as e:
 
 traceback_util.register_exclusion(__file__)
 
-XlaBackend = xla_client.Client
-
 # The platforms in this set will force forward compatibility for lowering.
 FORCE_FORWARD_COMPAT_LOWERING_PLATFORMS: set[str] = set()
 
@@ -68,24 +67,26 @@ MIN_COMPUTE_CAPABILITY = 52
 # TODO(phawkins): Remove jax_xla_backend.
 _XLA_BACKEND = config.string_flag(
     'jax_xla_backend', '',
-    'Deprecated, please use --jax_platforms instead.')
+    help='Deprecated, please use --jax_platforms instead.')
 BACKEND_TARGET = config.string_flag(
     'jax_backend_target',
     os.getenv('JAX_BACKEND_TARGET', '').lower(),
-    'Either "local" or "rpc:address" to connect to a remote service target.')
+    help='Either "local" or "rpc:address" to connect to a remote service target.')
 # TODO(skye): warn when this is used once we test out --jax_platforms a bit
 _PLATFORM_NAME = config.string_flag(
     'jax_platform_name',
     os.getenv('JAX_PLATFORM_NAME', '').lower(),
-    'Deprecated, please use --jax_platforms instead.')
+    help='Deprecated, please use --jax_platforms instead.')
 CUDA_VISIBLE_DEVICES = config.string_flag(
     'jax_cuda_visible_devices', 'all',
-    'Restricts the set of CUDA devices that JAX will use. Either "all", or a '
-    'comma-separate list of integer device IDs.')
+    help=(
+      'Restricts the set of CUDA devices that JAX will use. Either "all", or a '
+      'comma-separate list of integer device IDs.'))
 _ROCM_VISIBLE_DEVICES = config.string_flag(
     'jax_rocm_visible_devices', 'all',
-    'Restricts the set of ROCM devices that JAX will use. Either "all", or a '
-    'comma-separate list of integer device IDs.')
+    help=(
+      'Restricts the set of ROCM devices that JAX will use. Either "all", or a '
+      'comma-separate list of integer device IDs.'))
 
 MOCK_NUM_GPU_PROCESSES = config.int_flag(
     name="mock_num_gpu_processes",
@@ -108,6 +109,13 @@ _CPU_ENABLE_ASYNC_DISPATCH = config.bool_flag(
     "inline without async dispatch.",
 )
 
+FORCE_DCN_CROSS_HOST_TRANSFERS = config.bool_flag(
+    name="jax_force_dcn_cross_host_transfers",
+    default=False,
+    help="Force cross host transfers to use the DCN socket transfer library "
+         "even when the plugin supports cross-host transfers."
+)
+
 CROSS_HOST_TRANSFER_SOCKET_ADDRESS = config.string_flag(
     name="jax_cross_host_transfer_socket_address",
     default="",
@@ -127,14 +135,16 @@ CROSS_HOST_TRANSPORT_ADDRESSES = config.string_flag(
 CROSS_HOST_TRANSFER_TIMEOUT_SECONDS = config.int_flag(
     "jax_cross_host_transfer_timeout_seconds",
     None,
-    "Timeout for cross host transfer metadata exchange through KV store. "
-    "Default is one minute.",
+    help=(
+      "Timeout for cross host transfer metadata exchange through KV store. "
+      "Default is one minute."
+    ),
 )
 
 CROSS_HOST_TRANSFER_TRANSFER_SIZE = config.int_flag(
     "jax_cross_host_transfer_transfer_size",
     None,
-    "Chunk size for chunked transfer requests."
+    help="Chunk size for chunked transfer requests."
 )
 
 # Warn the user if they call fork(), because it's not going to go well for them.
@@ -187,11 +197,19 @@ def make_tpu_client(
     _jax.initialize_pjrt_plugin('tpu')
   if options is None:
     options = {}
+  if jaxlib_extension_version < 397:
+    return _jax.get_c_api_client(
+        "tpu",
+        options,
+        distributed.global_state.client,
+        _make_transfer_server_factory(),
+    )
   return _jax.get_c_api_client(
       "tpu",
       options,
       distributed.global_state.client,
       _make_transfer_server_factory(),
+      FORCE_DCN_CROSS_HOST_TRANSFERS.value,
   )
 
 
@@ -542,11 +560,19 @@ def make_pjrt_c_api_client(
     distribute_options['partition_index'] = partition_index
   if options is not None:
     distribute_options.update(updated_options)
+  if jaxlib_extension_version < 397:
+    return xla_client.make_c_api_client(
+        plugin_name,
+        distribute_options,
+        distributed.global_state.client,
+        _make_transfer_server_factory(),
+    )
   return xla_client.make_c_api_client(
       plugin_name,
       distribute_options,
       distributed.global_state.client,
       _make_transfer_server_factory(),
+      FORCE_DCN_CROSS_HOST_TRANSFERS.value,
   )
 
 
@@ -1166,10 +1192,12 @@ def make_pjrt_tpu_topology(topology_name='', **kwargs):
       topology_name, **kwargs
   )
 
-def _validate_backend_not_initialized(new_val):
+def _validate_backend_not_initialized(name, new_val):
   if backends_are_initialized():
+    if getattr(config.config, name) == new_val:
+      return
     raise RuntimeError(
-        "jax_num_cpu_devices config should be updated before backends are"
+        f"{name} config should be updated before backends are"
         " initialized i.e. before any JAX operation is executed. You should"
         " initialize this config immediately after `import jax`.")
 
@@ -1180,7 +1208,7 @@ num_cpu_devices = config.int_state(
         "Number of CPU devices to use. If not provided, the value of "
         "the XLA flag --xla_force_host_platform_device_count is used."
         " Must be set before JAX is initialized."),
-    validator=_validate_backend_not_initialized,
+    validator=partial(_validate_backend_not_initialized, "jax_num_cpu_devices"),
 )
 
 cpu_get_local_topology_timeout_minutes = config.int_state(
@@ -1190,7 +1218,8 @@ cpu_get_local_topology_timeout_minutes = config.int_state(
         "Timeout in minutes for getting the local topology of each CPU device"
         " when building the global topology."
     ),
-    validator=_validate_backend_not_initialized,
+    validator=partial(_validate_backend_not_initialized,
+                      "jax_cpu_get_local_topology_timeout_minutes"),
 )
 
 cpu_get_global_topology_timeout_minutes = config.int_state(
@@ -1201,5 +1230,6 @@ cpu_get_global_topology_timeout_minutes = config.int_state(
         " should be strictly greater than"
         " `--jax_cpu_get_local_topology_timeout_minutes`."
     ),
-    validator=_validate_backend_not_initialized,
+    validator=partial(_validate_backend_not_initialized,
+                      "jax_cpu_get_global_topology_timeout_minutes"),
 )

@@ -162,7 +162,7 @@ class Print {
 std::ostream &operator<<(std::ostream &os, Print p);
 
 template <bool adjust_bool = false>
-FailureOr<int8_t> getTypeBitwidth(Type ty) {
+int8_t getTypeBitwidth(Type ty) {
   if (auto integer_ty = dyn_cast<IntegerType>(ty)) {
     const unsigned width = integer_ty.getWidth();
     if constexpr (adjust_bool) {
@@ -172,23 +172,25 @@ FailureOr<int8_t> getTypeBitwidth(Type ty) {
       return width;
     }
   }
-  if (isa<IntegerType, Float32Type, BFloat16Type, Float8E5M2Type,
-          Float8E4M3FNType, Float8E4M3B11FNUZType>(ty)) {
-    return ty.getIntOrFloatBitWidth();
+  if (isa<Float8EXMYType>(ty)) {
+    return 8;
   }
-  return emitError(UnknownLoc::get(ty.getContext()),
-                   "Unsupported type in mosaic dialect: ")
-         << ty;
+  return ty.getIntOrFloatBitWidth();
 }
 
 // Returns the bitwidth of the element type. The function works for both
 // scalar and vector types.
 template <bool adjust_bool = false>
-inline FailureOr<int8_t> getElementTypeBitwidth(Type ty) {
+inline int8_t getElementTypeBitwidth(Type ty) {
   if (auto vty = dyn_cast<VectorType>(ty)) {
     return getTypeBitwidth<adjust_bool>(vty.getElementType());
   }
   return getTypeBitwidth<adjust_bool>(ty);
+}
+
+template <bool adjust_bool = false>
+inline int8_t getElementTypeBitwidth(MemRefType ty) {
+  return getElementTypeBitwidth<adjust_bool>(ty.getElementType());
 }
 
 template <typename T>
@@ -273,22 +275,23 @@ void setLayout(Operation *op, ArrayRef<Layout> in, ArrayRef<Layout> out);
 // Helper functions to create constants.
 inline arith::ConstantOp IdxConst(int64_t idx, OpBuilder &builder,
                                   Location loc) {
-  return builder.create<arith::ConstantOp>(loc, builder.getIndexType(),
-                                           builder.getIndexAttr(idx));
+  return arith::ConstantOp::create(builder, loc, builder.getIndexType(),
+                                   builder.getIndexAttr(idx));
 }
 
 inline arith::ConstantOp I32Const(int32_t value, OpBuilder &builder,
                                   Location loc) {
-  return builder.create<arith::ConstantOp>(loc, builder.getI32Type(),
-                                           builder.getI32IntegerAttr(value));
+  return arith::ConstantOp::create(builder, loc, builder.getI32Type(),
+                                   builder.getI32IntegerAttr(value));
 }
 
 inline arith::ConstantOp I32Const(int32_t value, ArrayRef<int64_t> shape,
                                   OpBuilder &builder, Location loc) {
-  return builder.create<arith::ConstantOp>(
-      loc, DenseElementsAttr::get(
-               VectorType::get(shape, builder.getI32Type()),
-               builder.getIntegerAttr(builder.getI32Type(), value)));
+  return arith::ConstantOp::create(
+      builder, loc,
+      DenseElementsAttr::get(
+          VectorType::get(shape, builder.getI32Type()),
+          builder.getIntegerAttr(builder.getI32Type(), value)));
 }
 
 std::optional<int64_t> getIntConst(Value v);
@@ -298,6 +301,8 @@ std::optional<int64_t> getIntConst(Value v);
 // `tpu.bitcast` and unary element-wise operations are excluded from the
 // results.
 SmallVector<Operation *> getNontrivialTransitiveUsers(Value v);
+
+bool hasVectorOperandsOrResults(Operation& op);
 
 // Return a mod b for a, b > 0, but adjusted to return b when a mod b == 0 such
 // that the result is strictly positive.

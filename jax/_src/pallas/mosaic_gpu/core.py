@@ -142,7 +142,7 @@ class MemorySpace(enum.Enum):
 
   def __call__(
       self,
-      shape: tuple[int, ...],
+      shape: Sequence[int],
       dtype: jnp.dtype,
       *,
       transforms: Sequence[MemoryRefTransform] = (),
@@ -150,6 +150,7 @@ class MemorySpace(enum.Enum):
       collective: bool | None = None,
       layout: TMEMLayout | None = None,
   ) -> pallas_core.MemoryRef:
+    shape = tuple(shape)
     # TODO(sharadmv): Add HiType constructor support.
     if self == MemorySpace.TMEM:
       if transforms:
@@ -158,7 +159,7 @@ class MemorySpace(enum.Enum):
         collective = False
       if layout is None:
         if packed is None:
-          if dtypes.bit_width(dtype) != 32:
+          if dtypes.itemsize_bits(dtype) != 32:
             raise ValueError(
                 "dtypes narrower than 32-bit require either the packed argument"
                 " or an explicit TMEM layout"
@@ -216,14 +217,53 @@ WGxWG_SEMANTICS = (
     mgpu.LoweringSemantics.Warpgroup, PrimitiveSemantics.Warpgroup)
 
 
+# TODO(justinfu): Reconcile with pl.kernel.
 def kernel(
     body: Callable[..., None],
     out_shape: object,
     *,
     scratch_shapes: pallas_core.ScratchShapeTree = (),
     compiler_params: pallas_core.CompilerParams | None = None,
+    # Mesh kwargs
+    grid: tuple[int, ...] = (),
+    grid_names: tuple[str, ...] = (),
+    cluster: tuple[int, ...] = (),
+    cluster_names: tuple[str, ...] = (),
+    num_threads: int | None = None,
+    thread_name: str | None = None,
+    interpret: Any = None,
     **mesh_kwargs: object,
 ):
+  """Entry point for defining a Mosaic GPU kernel.
+
+  Args:
+    body: The kernel body, which should take as arguments the input, output,
+      and scratch Refs. The number of input Refs is determined by the number
+      of arguments passed into kernel returned by this function. The number of
+      output and scratch Refs are determined by `out_shape` and `scratch_shapes`
+      respectively.
+    out_shape: a PyTree of :class:`jax.ShapeDtypeStruct` describing the shape
+      and dtypes of the outputs.
+    scratch_shapes: an iterable (may be nested) of GPUMemoryRef describing
+      scratch Refs to allocate for this kernel.
+    compiler_params: Additional compiler options. See the `CompilerParams`
+      dataclass for more details.
+    grid: A tuple of integers specifying the size of the kernel grid.
+    grid_names: The axis names of the grid. Must be the same length as `grid`.
+    cluster: A tuple of integers specifying the size of the kernel cluster.
+    cluster_names: The axis names of the grid. Must be the same length as
+      `cluster`.
+    num_threads: The number of threads to launch per block. Note that these
+      do not correspond to CUDA threads, but rather to warpgroups on Hopper
+      and Blackwell GPUs.
+    thread_name: The axis name used to query the thread index.
+    **mesh_kwargs: Additional mesh kwargs. See `Mesh` for more details.
+
+  Returns:
+    A function that runs the kernel. It should take any number of input
+    operands and returns an output with the same PyTree structure as
+    `out_shape`.
+  """
   if unwrap_out := not isinstance(out_shape, (tuple, list)):
     out_shape = (out_shape,)
 
@@ -231,13 +271,20 @@ def kernel(
   def wrapper(*operands):
     def stateful(operand_and_out_refs):
       operand_refs, out_refs = operand_and_out_refs
-      mesh = Mesh(**mesh_kwargs)
-      thread_name = mesh.thread_name if mesh.thread_name is not None else ()
+      mesh = Mesh(
+          grid=grid,
+          grid_names=grid_names,
+          cluster=cluster,
+          cluster_names=cluster_names,
+          num_threads=num_threads,
+          thread_name=thread_name,
+          **mesh_kwargs)
+      _thread_name = mesh.thread_name if mesh.thread_name is not None else ()
       def cmap_body():
         pallas_primitives.run_scoped(
             functools.partial(body, *operand_refs, *out_refs),
             *(scratch_shapes if isinstance(scratch_shapes, Sequence) else ()),
-            collective_axes=thread_name,
+            collective_axes=_thread_name,
             **(scratch_shapes if isinstance(scratch_shapes, Mapping) else {}),
         )
       if mesh.kernel_name is not None:
@@ -246,7 +293,9 @@ def kernel(
         # The body function name is used to set the name of the kernel as a
         # fallback if the kernel name is not set explicitly.
         cmap_body.__name__ = getattr(body, "__name__", "anonymous")
-      pallas_core.core_map(mesh, compiler_params=compiler_params)(cmap_body)
+      pallas_core.core_map(
+          mesh, compiler_params=compiler_params, interpret=interpret
+      )(cmap_body)
     _, outs = state_discharge.run_state(stateful)((
         operands,
         jax.tree.map(lambda s: jax.lax.empty(s.shape, s.dtype), out_shape),
@@ -274,8 +323,13 @@ def kernel(
         out_shape=tree_util.tree_map(add_batch_dim, out_shape_),
         scratch_shapes=scratch_shapes,
         compiler_params=compiler_params,
-        grid=(axis_size, *mesh_kwargs_.pop("grid", ())),
-        grid_names=(axis_name, *mesh_kwargs_.pop("grid_names", ())),
+        grid=(axis_size,) + grid,
+        grid_names=(axis_name,) + grid_names,
+        cluster=cluster,
+        cluster_names=cluster_names,
+        num_threads=num_threads,
+        thread_name=thread_name,
+        interpret=interpret,
         **mesh_kwargs_,
     )(*args)
     out_batched = tree_util.tree_map(lambda _: True, out_shape_)
@@ -338,7 +392,10 @@ def _ref_group_size(refs: _GPUMemoryRefTree) -> int:
       raise NotImplementedError(f"Unsupported dtype: {ref.dtype}")
     ref_bits = math.prod(ref.shape) * nbits
     if ref_bits % 8:
-      raise ValueError("Only byte-aligned shapes are supported.")
+      raise ValueError(
+          "Only byte-aligned shapes are supported. Got shape:"
+          f" {ref.dtype}{ref.shape}"
+      )
     size += ref_bits // 8
   return size
 
@@ -348,7 +405,8 @@ def _ref_group_tmem_col_size(refs: _GPUMemoryRefTree) -> int:
   """
   ncols = 0
   for ref in jax.tree.leaves(refs):
-    ref_ncols = ref.layout.cols_in_shape(ref.shape, dtypes.bit_width(ref.dtype))
+    ref_ncols = ref.layout.cols_in_shape(ref.shape,
+                                         dtypes.itemsize_bits(ref.dtype))
     ncols += align_to(ref_ncols, TMEM_COL_ALIGNMENT)
   return ncols
 
@@ -361,7 +419,7 @@ def infer_tmem_layout(
     collective: bool) -> tcgen05.TMEMLayout:
   """Infers the number of columns used and layout for allocating TMEM Refs."""
   if packed:
-    packing = 32 // dtypes.bit_width(dtype)
+    packing = 32 // dtypes.itemsize_bits(dtype)
   else:
     packing = 1
   return tcgen05._infer_tmem_layout(shape, collective=collective, packing=packing)  # type: ignore
@@ -377,7 +435,8 @@ def flatten_ref_union(ref_union: AbstractRefUnion) -> tuple[_Ref, ...]:
     union_bytes = 0
     for ref_group in ref_union.refs:
       byte_offset = 0
-      for ref in jax.tree.leaves(ref_group):
+      def unflatten(ref):
+        nonlocal byte_offset
         byte_offset = align_to(byte_offset, SMEM_ALIGNMENT)
         assert isinstance(ref, state.AbstractRef) or isinstance(
             ref, pallas_core.TransformedRef
@@ -385,10 +444,8 @@ def flatten_ref_union(ref_union: AbstractRefUnion) -> tuple[_Ref, ...]:
         if not isinstance(ref, pallas_core.TransformedRef):
           ref = pallas_core.TransformedRef(ref, transforms=())
         transform = ExtractAliasedRef.from_transformed_ref(ref, byte_offset)
-        flat_refs.append(
-            pallas_core.TransformedRef(
-                ref_union, transforms=(transform, *ref.transforms)
-            )
+        result = pallas_core.TransformedRef(
+            ref_union, transforms=(transform, *ref.transforms)
         )
         if jnp.issubdtype(ref.dtype, jnp.integer):
           nbits = jnp.iinfo(ref.dtype).bits
@@ -398,27 +455,34 @@ def flatten_ref_union(ref_union: AbstractRefUnion) -> tuple[_Ref, ...]:
           raise NotImplementedError(f"Unsupported dtype: {ref.dtype}")
         ref_bits = math.prod(ref.shape) * nbits
         if ref_bits % 8:
-          raise ValueError("Only byte-aligned shapes are supported.")
+          raise ValueError(
+              "Only byte-aligned shapes are supported. Got shape:"
+              f" {ref.dtype}{ref.shape}"
+          )
         byte_offset += ref_bits // 8
+        return result
+      flat_refs.append(jax.tree.map(unflatten, ref_group))
       union_bytes = max(union_bytes, byte_offset)
     assert union_bytes == ref_union.shape[0]
   elif ref_union.memory_space == TMEM:
     union_cols = 0
     for ref_group in ref_union.refs:
       col_offset = 0
-      for ref in jax.tree.leaves(ref_group):
+      def unflatten(ref):
+        nonlocal col_offset
         col_offset = align_to(col_offset, TMEM_COL_ALIGNMENT)
         if not isinstance(ref, pallas_core.TransformedRef):
           ref = pallas_core.TransformedRef(ref, transforms=())
-        ncols = ref.layout.cols_in_shape(ref.shape, dtypes.bit_width(ref.dtype))
+        ncols = ref.layout.cols_in_shape(ref.shape,
+                                         dtypes.itemsize_bits(ref.dtype))
         transform = ExtractAliasedRef.from_transformed_ref(
             ref, col_offset, layout=ref.layout)
-        flat_refs.append(
-            pallas_core.TransformedRef(
-                ref_union, transforms=(transform, *ref.transforms)
-            )
+        result = pallas_core.TransformedRef(
+            ref_union, transforms=(transform, *ref.transforms)
         )
         col_offset += ncols
+        return result
+      flat_refs.append(jax.tree.map(unflatten, ref_group))
       union_cols = max(union_cols, col_offset)
     assert union_cols == ref_union.shape[1], (union_cols, ref_union.shape[1])
   else:
@@ -448,8 +512,8 @@ class AbstractRefUnion(state.AbstractRef):
     del tracer, index, value  # Unused.
     raise ValueError("Ref unions can't be assigned to.")
 
-  def update(self, inner_aval=None, memory_space=None):
-    ref = super().update(inner_aval, memory_space)
+  def update(self, inner_aval=None, memory_space=None, kind=None):
+    ref = super().update(inner_aval, memory_space, kind)
     return AbstractRefUnion(ref.inner_aval, self.refs, self.memory_space)
 
   @functools.cached_property
@@ -612,7 +676,8 @@ class UntileRef(state_types.Transform):
       self, dtype: jnp.dtype, shape: tuple[int, ...]
   ) -> tuple[tuple[int, ...], state_types.Transform]:
     del dtype
-    raise NotImplementedError("Reshapes don't commute with transposes.")
+    # TODO(slebedev): Support this.
+    raise NotImplementedError("Reshapes don't commute with tiling.")
 
   def untransform_index(
       self, dtype: jnp.dtype | ir.Type, idxs: tuple[Index, ...]
@@ -624,9 +689,16 @@ class UntileRef(state_types.Transform):
     for idx, tile in zip(tiled_idxs, self.tiling):
       if isinstance(idx, slice):
         if idx.step is not None and idx.step != 1:
-          raise NotImplementedError("Strided slices unsupported")
-        if (idx.start is not None and idx.start % tile) or (idx.stop is not None and idx.stop % tile):
-          raise ValueError("Non-empty slices must be tile aligned")
+          raise NotImplementedError(
+              f"Strided slices unsupported. Got stride: {idx.step}"
+          )
+        if (idx.start is not None and idx.start % tile) or (
+            idx.stop is not None and idx.stop % tile
+        ):
+          raise ValueError(
+              f"Expected slice start ({idx.start}) and slice stop ({idx.stop})"
+              f" to be divisible by the tile size ({tile})"
+          )
         idxs_after_tiling.append(slice(idx.start // tile, idx.stop // tile))
       elif isinstance(idx, mgpu.DynamicSlice):
         if idx.length % tile:
@@ -698,6 +770,7 @@ class TransposeTransform(MemoryRefTransform):
 
 
 @tree_util.register_dataclass
+@dataclasses.dataclass(frozen=True)
 class TransposeRef(state_types.RefTransposer):
 
   def untransform_transpose(
@@ -757,6 +830,30 @@ class PeerMemRef(state_types.Transform):
     return cls(arrays[0], metadata[0])
 
 
+@tree_util.register_pytree_node_class
+@dataclasses.dataclass
+class MulticastRef(state_types.Transform):
+  collective_axes: tuple[Hashable, ...]
+
+  def transform_shape(self, shape):
+    return shape
+
+  def transform_dtype(self, dtype):
+    return dtype
+
+  def untransform_index(
+      self, idxs: tuple[Index, ...]
+  ) -> tuple[tuple[Index, ...], state_types.Transform]:
+    return idxs, self
+
+  def tree_flatten(self):
+    return (), self.collective_axes
+
+  @classmethod
+  def tree_unflatten(cls, metadata, arrays):
+    return cls(metadata[0])
+
+
 def remote_ref(
     ref: _Ref,
     device_id: jax.typing.ArrayLike,
@@ -767,8 +864,33 @@ def remote_ref(
     if not isinstance(jax_core.get_aval(ref), state_types.AbstractRef):
       raise TypeError("ref must be a reference")
     ref = pallas_core.TransformedRef(ref, transforms=())
+  if any(isinstance(t, MulticastRef) for t in ref.transforms):
+    raise ValueError("Can't make a multicast reference into a peer reference.")
   return pallas_core.TransformedRef(
       ref.ref, (*ref.transforms, PeerMemRef(device_id, device_id_type)),
+  )
+
+
+def multicast_ref(
+    ref: _Ref,
+    collective_axes: Hashable | tuple[Hashable, ...],
+) -> pallas_core.TransformedRef:
+  """Return a multicast reference for cross-device operations.
+
+  Args:
+    ref: The reference to transform.
+    collective_axes: The JAX mesh axes indicating the devices to operate on.
+  """
+  if not isinstance(collective_axes, tuple):
+    collective_axes = (collective_axes,)
+  if not isinstance(ref, pallas_core.TransformedRef):
+    if not isinstance(jax_core.get_aval(ref), state_types.AbstractRef):
+      raise TypeError("ref must be a reference")
+    ref = pallas_core.TransformedRef(ref, transforms=())
+  if any(isinstance(t, PeerMemRef) for t in ref.transforms):
+    raise ValueError("Can't make a peer reference into a multicast reference.")
+  return pallas_core.TransformedRef(
+      ref.ref, (*ref.transforms, MulticastRef(collective_axes)),
   )
 
 
@@ -788,6 +910,9 @@ def transpose_ref(
     ref: pallas_core.TransformedRef | Any,
     permutation: tuple[int, ...],
 ) -> pallas_core.TransformedRef:
+  assert hasattr(ref, "memory_space")
+  if ref.memory_space == MemorySpace.TMEM:
+    raise ValueError("Can't transpose a TMEM reference.")
   return ref.transpose(permutation)
 
 def untile_ref(ref, tiling: tuple[int, ...]) -> pallas_core.TransformedRef:
@@ -864,7 +989,7 @@ class SwizzleTransform(MemoryRefTransform):
     raise NotImplementedError
 
   def __call__(self, aval: jax_core.ShapedArray) -> jax_core.ShapedArray:
-    swizzle_elems = (self.swizzle * 8) // dtypes.bit_width(aval.dtype)
+    swizzle_elems = (self.swizzle * 8) // dtypes.itemsize_bits(aval.dtype)
     if swizzle_elems != aval.shape[-1]:
       raise ValueError(
           f"Swizzle {self.swizzle} requires the trailing dimension to be of"
@@ -1107,8 +1232,8 @@ class WGMMAAbstractAccumulatorRef(state.AbstractRef):
   def __repr__(self) -> str:
     return f'Accumulator{{{self.inner_aval.str_short()}}}'
 
-  def update(self, inner_aval=None, memory_space=None):
-    ref = super().update(inner_aval, memory_space)
+  def update(self, inner_aval=None, memory_space=None, kind=None):
+    ref = super().update(inner_aval, memory_space, kind)
     return WGMMAAbstractAccumulatorRef(
         inner_aval=ref.inner_aval,
         memory_space=ref.memory_space,
@@ -1135,8 +1260,8 @@ class AbstractTMEMRef(state.AbstractRef):
   def __repr__(self) -> str:
     return f'TMEM({self.inner_aval.str_short()}, layout={self.layout}, collective={self.collective})'
 
-  def update(self, inner_aval=None, memory_space=None):
-    ref = super().update(inner_aval, memory_space)
+  def update(self, inner_aval=None, memory_space=None, kind=None):
+    ref = super().update(inner_aval, memory_space, kind)
     return AbstractTMEMRef(
         ref.inner_aval, ref.memory_space, self.layout, self.collective
     )
@@ -1171,10 +1296,12 @@ class Mesh:
           "num_threads and thread_name must be either both set or both None,"
           f" got {self}"
       )
-    if self.num_threads is not None and self.num_threads > 2048 // 128:
+    max_mosaic_threads = 2048 // 128
+    if self.num_threads is not None and self.num_threads > max_mosaic_threads:
       raise ValueError(
           "Requested too many CUDA threads per block. Each Mosaic thread"
-          " corresponds to 128 CUDA threads."
+          f" corresponds to 128 CUDA threads. At most {max_mosaic_threads}"
+          f" are supported, got {self}"
       )
     object.__setattr__(self, "grid", tuple(self.grid))
     object.__setattr__(self, "grid_names", tuple(self.grid_names))
@@ -1247,6 +1374,11 @@ def _gpu_mesh_discharge_rule(
     )
   if not compiler_params:
     compiler_params = CompilerParams()
+  sa_avals = [a for a in in_avals if isinstance(a, jax_core.ShapedArray)]
+  if sa_avals:
+    raise NotImplementedError(
+        f"Cannot close over values in core_map: {sa_avals}"
+    )
   return pallas_core.default_mesh_discharge_rule(
       in_avals,
       out_avals,
@@ -1260,6 +1392,7 @@ def _gpu_mesh_discharge_rule(
       name=name,
       memory_space=GMEM,
       metadata=metadata,
+      scratch_shapes=[],
   )
 
 
@@ -1311,7 +1444,7 @@ class SomeLayout:
 
 @dataclasses.dataclass(frozen=True)
 class ParameterizedLayout(SomeLayout):
-  layout_cls: Layout
+  layout_cls: Layout | TMEMLayout
   args: Sequence[Any]
   kwargs: Any
 
@@ -1338,6 +1471,9 @@ class ReducedLayout(SomeLayout):
 class Layout(SomeLayout, enum.Enum):
   #: [m, n] matrix, where m % 64 == 0 == n % 8.
   WGMMA = enum.auto()
+  WGMMA_8BIT = enum.auto()
+  WGMMA_UPCAST_2X = enum.auto()
+  WGMMA_UPCAST_4X = enum.auto()
   WGMMA_TRANSPOSED = enum.auto()
 
   WG_SPLAT = enum.auto()
@@ -1349,6 +1485,7 @@ class Layout(SomeLayout, enum.Enum):
   TCGEN05_TRANSPOSED = enum.auto()
   TCGEN05_M64_COLLECTIVE = enum.auto()
   TCGEN05_TMEM_NATIVE = enum.auto()
+  TCGEN05_M64_COLLECTIVE_NATIVE = enum.auto()
 
   SMEM_GMEM_COPY = enum.auto()
   TMA_GATHER_INDICES = enum.auto()
@@ -1371,6 +1508,15 @@ class Layout(SomeLayout, enum.Enum):
       case Layout.WGMMA:
         check_no_args()
         return mgpu.WGMMA_LAYOUT
+      case Layout.WGMMA_8BIT:
+        check_no_args()
+        return mgpu.WGMMA_LAYOUT_8BIT
+      case Layout.WGMMA_UPCAST_2X:
+        check_no_args()
+        return mgpu.WGMMA_LAYOUT_UPCAST_2X
+      case Layout.WGMMA_UPCAST_4X:
+        check_no_args()
+        return mgpu.WGMMA_LAYOUT_UPCAST_4X
       case Layout._WGMMA_ACC_32BIT:
         check_no_args()
         return mgpu.fragmented_array.WGMMA_LAYOUT_ACC_32BIT
@@ -1392,10 +1538,12 @@ class Layout(SomeLayout, enum.Enum):
         return mgpu.TMEM_NATIVE_LAYOUT
       case Layout.TCGEN05_M64_COLLECTIVE:
         return tcgen05.fa_m64_collective_layout(*args, **kwargs)  # pytype: disable=missing-parameter
+      case Layout.TCGEN05_M64_COLLECTIVE_NATIVE:
+        return tcgen05.tmem_m64_collective_layout(*args, **kwargs).as_tiled_layout()  # pytype: disable=missing-parameter
       case Layout.SMEM_GMEM_COPY:
         normalize_args = lambda shape, dtype, swizzle: (shape, dtype, swizzle)
         shape, dtype, swizzle = normalize_args(*args, **kwargs)
-        bitwidth = dtypes.bit_width(dtype)
+        bitwidth = dtypes.itemsize_bits(dtype)
         tiling = (8, 8 * swizzle // bitwidth)
         row_tiles, col_tiles = mgpu.tile_shape(shape, tiling)[-4:-2]
         return mgpu.fragmented_array.tiled_copy_smem_gmem_layout(
@@ -1415,15 +1563,22 @@ Layout.TCGEN05_TMEM_NATIVE_ROW = Layout.TCGEN05_TMEM_NATIVE.reduce(1)
 
 class TMEMLayout(enum.Enum):
   """Layout for TMEM references."""
+  # TODO(apaszke): Remove the layout suffix.
   SCALES_LAYOUT = enum.auto()
   SPARSE_METADATA_LAYOUT = enum.auto()
+  M64_COLLECTIVE_LAYOUT = enum.auto()
 
-  def to_mgpu(self) -> tcgen05.TMEMLayout:
+  def __call__(self, *args, **kwargs) -> ParameterizedLayout:
+    return ParameterizedLayout(self, args, kwargs)
+
+  def to_mgpu(self, *args, **kwargs) -> tcgen05.TMEMLayout:
     match self:
       case TMEMLayout.SCALES_LAYOUT:
-        return tcgen05.scales_layout()
+        return tcgen05.scales_layout(*args, **kwargs)
       case TMEMLayout.SPARSE_METADATA_LAYOUT:
-        return tcgen05.sparse_meta_layout()
+        return tcgen05.sparse_meta_layout(*args, **kwargs)
+      case TMEMLayout.M64_COLLECTIVE_LAYOUT:
+        return tcgen05.tmem_m64_collective_layout(*args, **kwargs)  # pytype: disable=missing-parameter
 
 
 def TryClusterCancelResult(

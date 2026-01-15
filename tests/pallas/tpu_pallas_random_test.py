@@ -172,6 +172,23 @@ class PRNGTest(jtu.JaxTestCase):
     )(key)
     self.assertArraysEqual(result, expected_key_data)
 
+  def test_squeezed_blockspec(self):
+    @functools.partial(
+        pl.pallas_call,
+        grid=(),
+        in_specs=[
+            pl.BlockSpec((pl.squeezed,), lambda: (0,), memory_space=pltpu.SMEM)
+        ],
+        out_specs=pl.BlockSpec((8, 128)),
+        out_shape=jax.ShapeDtypeStruct((8, 128), jnp.float32),
+    )
+    def kernel(key_ref, o_ref):
+      o_ref[...] = jax_random.uniform(key_ref[...], shape=o_ref.shape)
+
+    # Just make sure this does not crash.
+    k = pltpu.to_pallas_key(jax_random.key(0, impl="rbg"))
+    kernel(k[None])
+
   def test_fold_in(self):
     # Test that folding in a value results in different random numbers.
     def body(key_ref, o_ref):
@@ -180,7 +197,7 @@ class PRNGTest(jtu.JaxTestCase):
           key, shape=o_ref[0, ...].shape, minval=0.0, maxval=1.0
       )
 
-      key = jax_random.fold_in(key, 2)
+      key = jax_random.fold_in(key, jnp.uint32(2))
       o_ref[1, ...] = jax_random.uniform(
           key, shape=o_ref[1, ...].shape, minval=0.0, maxval=1.0
       )
@@ -226,7 +243,7 @@ class PRNGTest(jtu.JaxTestCase):
     self.assertGreaterEqual(jnp.max(y), jnp.min(y))
 
 
-class BlockInvarianceTest(parameterized.TestCase):
+class BlockInvarianceTest(jtu.JaxTestCase):
 
   def setUp(self):
     if not jtu.test_device_matches(["tpu"]):
@@ -273,7 +290,7 @@ class BlockInvarianceTest(parameterized.TestCase):
     np.testing.assert_array_equal(result_16x128, result_32x256)
 
 
-class ThreefryTest(parameterized.TestCase):
+class ThreefryTest(jtu.JaxTestCase):
 
   def setUp(self):
     if not jtu.test_device_matches(["tpu"]):
@@ -308,7 +325,7 @@ class ThreefryTest(parameterized.TestCase):
       ((137, 275),),  # Non block-aligned shape
       ((4, 512, 512),),  # Greater than 2D shape
       ((34,),),  # 1D
-      (tuple(),),  # 0D
+      ((),),  # 0D
   )
   def test_threefry_kernel_matches_jax_threefry(self, shape):
     with jax.threefry_partitionable(True):
@@ -329,7 +346,11 @@ class ThreefryTest(parameterized.TestCase):
       self.skipTest("Need at least 2 devices")
     num_devices = jax.device_count()
     partition = P("x")
-    mesh = jax.make_mesh((num_devices,), ("x",))
+    mesh = jax.make_mesh(
+        (num_devices,),
+        ("x",),
+        axis_types=(jax.sharding.AxisType.Auto,),
+    )
     sharding = jax.sharding.NamedSharding(mesh, partition)
 
     with jax.threefry_partitionable(True):
@@ -352,19 +373,32 @@ class ThreefryTest(parameterized.TestCase):
     np.testing.assert_array_equal(jax_gen, pl_gen)
 
 
-class PhiloxTest(parameterized.TestCase):
+class PhiloxTest(jtu.JaxTestCase):
 
   def setUp(self):
     if not jtu.test_device_matches(["tpu"]):
       self.skipTest("Need TPU devices")
     super().setUp()
 
+  @parameterized.product(
+      x=[0x1, 0x10000, 0xabcdef],
+      y=[0x1, 0x10000, 0xabcdef],
+  )
+  def test_mul_hi_lo(self, x, y):
+    x = jnp.uint32(x)
+    y = jnp.uint32(y)
+    hi, lo = philox.mul32_hi_lo(x, y)
+    with jax.enable_x64():
+      result = (hi.astype(jnp.uint64) << 32) + lo.astype(jnp.uint64)
+      ref = x.astype(jnp.uint64) * y.astype(jnp.uint64)
+      self.assertEqual(result, ref)
+
   @parameterized.parameters(
       ((512, 512),),
       ((137, 275),),  # Non block-aligned shape
       ((4, 512, 512),),  # Greater than 2D shape
       ((34,),),  # 1D
-      (tuple(),),  # 0D
+      ((),),  # 0D
   )
   def test_generate_uniform(self, shape):
     key = jax_random.key(0, impl="pallas_philox4x32")

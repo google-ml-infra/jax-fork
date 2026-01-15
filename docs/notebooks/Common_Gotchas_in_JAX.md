@@ -7,7 +7,7 @@ jupytext:
     format_version: 0.13
     jupytext_version: 1.16.4
 kernelspec:
-  display_name: Python 3
+  display_name: jax-dev
   language: python
   name: python3
 ---
@@ -204,7 +204,7 @@ jax_array = jnp.array([10, 20])
 jax_array_new = jax_array
 jax_array_new += 10
 print(jax_array_new)  # `jax_array_new` is rebound to a new value [20, 30], but...
-print(jax_array)      # the original value is unodified as [10, 20] !
+print(jax_array)      # the original value is unmodified as [10, 20] !
 
 numpy_array = np.array([10, 20])
 numpy_array_new = numpy_array
@@ -284,6 +284,191 @@ print(new_jax_array)
 +++ {"id": "sTjJ3WuaDyqU"}
 
 For more details on indexed array updates, see the [documentation for the `.at` property](https://docs.jax.dev/en/latest/_autosummary/jax.numpy.ndarray.at.html#jax.numpy.ndarray.at).
+
++++
+
+(jax-jit-class-methods)=
+## 🔪 Using `jax.jit` with class methods
+
+Most examples of [`jax.jit`](https://docs.jax.dev/en/latest/_autosummary/jax.jit.html) concern decorating stand-alone Python functions, but decorating a method within a class introduces some complication. For example, consider the following simple class, where we've used a standard `jax.jit` annotation on a method:
+
+```{code-cell} ipython3
+import jax.numpy as jnp
+from jax import jit
+
+class CustomClass:
+  def __init__(self, x: jnp.ndarray, mul: bool):
+    self.x = x
+    self.mul = mul
+
+  @jit  # <---- How to do this correctly?
+  def calc(self, y):
+    if self.mul:
+      return self.x * y
+    return y
+```
+
+However, this approach will result in an error when you attempt to call this method:
+
+```{code-cell} ipython3
+:tags: [raises-exception]
+
+c = CustomClass(2, True)
+c.calc(3)
+```
+
+The problem is that the first argument to the function is `self`, which has type `CustomClass`, and JAX does not know how to handle this type. There are three basic strategies we might use in this case, and we'll discuss them below.
+
++++
+
+### Strategy 1: JIT-compiled helper function
+
+The most straightforward approach is to create a helper function external to the class that can be JIT-decorated in the normal way. For example:
+
+```{code-cell} ipython3
+from functools import partial
+
+class CustomClass:
+  def __init__(self, x: jnp.ndarray, mul: bool):
+    self.x = x
+    self.mul = mul
+
+  def calc(self, y):
+    return _calc(self.mul, self.x, y)
+
+@partial(jit, static_argnums=0)
+def _calc(mul, x, y):
+  if mul:
+    return x * y
+  return y
+```
+
+The result will work as expected:
+
+```{code-cell} ipython3
+c = CustomClass(2, True)
+print(c.calc(3))
+```
+
+The benefit of such an approach is that it is simple, explicit, and it avoids the need to teach JAX how to handle objects of type `CustomClass`. However, you may wish to keep all the method logic in the same place.
+
++++
+
+### Strategy 2: Marking `self` as static
+
+Another common pattern is to use `static_argnums` to mark the `self` argument as static. But this must be done with care to avoid unexpected results. You may be tempted to simply do this:
+
+```{code-cell} ipython3
+class CustomClass:
+  def __init__(self, x: jnp.ndarray, mul: bool):
+    self.x = x
+    self.mul = mul
+
+  # WARNING: this example is broken, as we'll see below. Don't copy & paste!
+  @partial(jit, static_argnums=0)
+  def calc(self, y):
+    if self.mul:
+      return self.x * y
+    return y
+```
+
+If you call the method, it will no longer raise an error:
+
+```{code-cell} ipython3
+c = CustomClass(2, True)
+print(c.calc(3))
+```
+
+However, there is a catch: if you mutate the object after the first method call, the subsequent method call may return an incorrect result:
+
+```{code-cell} ipython3
+c.mul = False
+print(c.calc(3))  # Should print 3
+```
+
+Why is this? When you mark an object as static, it will effectively be used as a dictionary key in JIT's internal compilation cache, meaning its hash (i.e. `hash(obj)`) equality (i.e. `obj1 == obj2`) and object identity (i.e. `obj1 is obj2`) will be assumed to have consistent behavior. The default `__hash__` for a custom object is its object ID, and so JAX has no way of knowing that a mutated object should trigger a re-compilation.
+
+You can partially address this by defining an appropriate `__hash__` and `__eq__` methods for your object; for example:
+
+```{code-cell} ipython3
+class CustomClass:
+  def __init__(self, x: jnp.ndarray, mul: bool):
+    self.x = x
+    self.mul = mul
+
+  @partial(jit, static_argnums=0)
+  def calc(self, y):
+    if self.mul:
+      return self.x * y
+    return y
+
+  def __hash__(self):
+    return hash((self.x, self.mul))
+
+  def __eq__(self, other):
+    return (isinstance(other, CustomClass) and
+            (self.x, self.mul) == (other.x, other.mul))
+```
+
+(see the [`object.__hash__`](https://docs.python.org/3/reference/datamodel.html#object.__hash__) documentation for more discussion of the requirements
+when overriding `__hash__`).
+
+This should work correctly with JIT and other transforms **so long as you never mutate your object**. Mutations of objects used as hash keys lead to several subtle problems, which is why for example mutable Python containers (e.g. [`dict`](https://docs.python.org/3/library/stdtypes.html#dict), [`list`](https://docs.python.org/3/library/stdtypes.html#list)) don't define `__hash__`, while their immutable counterparts (e.g. [`tuple`](https://docs.python.org/3/library/stdtypes.html#tuple)) do.
+
+If your class relies on in-place mutations (such as setting `self.attr = ...` within its methods), then your object is not really "static" and marking it as such may lead to problems. Fortunately, there's another option for this case.
+
++++
+
+### Strategy 3: Making `CustomClass` a PyTree
+
+The most flexible approach to correctly JIT-compiling a class method is to register the type as a custom PyTree object; see [Custom pytree nodes](https://docs.jax.dev/en/latest/custom_pytrees.html#pytrees-custom-pytree-nodes). This lets you specify exactly which components of the class should be treated as static and which should be
+treated as dynamic. Here's how it might look:
+
+```{code-cell} ipython3
+class CustomClass:
+  def __init__(self, x: jnp.ndarray, mul: bool):
+    self.x = x
+    self.mul = mul
+
+  @jit
+  def calc(self, y):
+    if self.mul:
+      return self.x * y
+    return y
+
+  def _tree_flatten(self):
+    children = (self.x,)  # arrays / dynamic values
+    aux_data = {'mul': self.mul}  # static values
+    return (children, aux_data)
+
+  @classmethod
+  def _tree_unflatten(cls, aux_data, children):
+    return cls(*children, **aux_data)
+
+from jax import tree_util
+tree_util.register_pytree_node(CustomClass,
+                               CustomClass._tree_flatten,
+                               CustomClass._tree_unflatten)
+```
+
+This is certainly more involved, but it solves all the issues associated with the simpler approaches used above:
+
+```{code-cell} ipython3
+c = CustomClass(2, True)
+print(c.calc(3))
+```
+
+```{code-cell} ipython3
+c.mul = False  # mutation is detected
+print(c.calc(3))
+```
+
+```{code-cell} ipython3
+c = CustomClass(jnp.array(2), True)  # non-hashable x is supported
+print(c.calc(3))
+```
+
+So long as your `tree_flatten` and `tree_unflatten` functions correctly handle all relevant attributes in the class, you should be able to use objects of this type directly as arguments to JIT-compiled functions, without any special annotations.
 
 +++ {"id": "oZ_jE2WAypdL"}
 
@@ -481,138 +666,9 @@ Similar tricks can be played in other situations where dynamically-shaped arrays
 
 +++ {"id": "DKTMw6tRZyK2"}
 
-## 🔪 NaNs
+## 🔪 Debugging NaNs and Infs
 
-+++ {"id": "ncS0NI4jZrwy"}
-
-### Debugging NaNs
-
-If you want to trace where NaNs are occurring in your functions or gradients, you can turn on the NaN-checker by:
-
-* setting the `JAX_DEBUG_NANS=True` environment variable;
-
-* adding `jax.config.update("jax_debug_nans", True)` near the top of your main file;
-
-* adding `jax.config.parse_flags_with_absl()` to your main file, then set the option using a command-line flag like `--jax_debug_nans=True`;
-
-This will cause computations to error-out immediately on production of a NaN. Switching this option on adds a nan check to every floating point type value produced by XLA. That means values are pulled back to the host and checked as ndarrays for every primitive operation not under an `@jit`. For code under an `@jit`, the output of every `@jit` function is checked and if a nan is present it will re-run the function in de-optimized op-by-op mode, effectively removing one level of `@jit` at a time.
-
-There could be tricky situations that arise, like nans that only occur under a `@jit` but don't get produced in de-optimized mode. In that case you'll see a warning message print out but your code will continue to execute.
-
-If the nans are being produced in the backward pass of a gradient evaluation, when an exception is raised several frames up in the stack trace you will be in the backward_pass function, which is essentially a simple jaxpr interpreter that walks the sequence of primitive operations in reverse. In the example below, we started an ipython repl with the command line `env JAX_DEBUG_NANS=True ipython`, then ran this:
-
-+++ {"id": "p6ZtDHPbBa_W"}
-
-```
-In [1]: import jax.numpy as jnp
-
-In [2]: jnp.divide(0., 0.)
----------------------------------------------------------------------------
-FloatingPointError                        Traceback (most recent call last)
-<ipython-input-2-f2e2c413b437> in <module>()
-----> 1 jnp.divide(0., 0.)
-
-.../jax/jax/numpy/lax_numpy.pyc in divide(x1, x2)
-    343     return floor_divide(x1, x2)
-    344   else:
---> 345     return true_divide(x1, x2)
-    346
-    347
-
-.../jax/jax/numpy/lax_numpy.pyc in true_divide(x1, x2)
-    332   x1, x2 = _promote_shapes(x1, x2)
-    333   return lax.div(lax.convert_element_type(x1, result_dtype),
---> 334                  lax.convert_element_type(x2, result_dtype))
-    335
-    336
-
-.../jax/jax/lax.pyc in div(x, y)
-    244 def div(x, y):
-    245   r"""Elementwise division: :math:`x \over y`."""
---> 246   return div_p.bind(x, y)
-    247
-    248 def rem(x, y):
-
-... stack trace ...
-
-.../jax/jax/interpreters/xla.pyc in handle_result(device_buffer)
-    103         py_val = device_buffer.to_py()
-    104         if np.any(np.isnan(py_val)):
---> 105           raise FloatingPointError("invalid value")
-    106         else:
-    107           return Array(device_buffer, *result_shape)
-
-FloatingPointError: invalid value
-```
-
-+++ {"id": "_NCnVt_GBa_W"}
-
-The nan generated was caught. By running `%debug`, we can get a post-mortem debugger. This also works with functions under `@jit`, as the example below shows.
-
-+++ {"id": "pf8RF6eiBa_W"}
-
-```
-In [4]: from jax import jit
-
-In [5]: @jit
-   ...: def f(x, y):
-   ...:     a = x * y
-   ...:     b = (x + y) / (x - y)
-   ...:     c = a + 2
-   ...:     return a + b * c
-   ...:
-
-In [6]: x = jnp.array([2., 0.])
-
-In [7]: y = jnp.array([3., 0.])
-
-In [8]: f(x, y)
-Invalid value encountered in the output of a jit function. Calling the de-optimized version.
----------------------------------------------------------------------------
-FloatingPointError                        Traceback (most recent call last)
-<ipython-input-8-811b7ddb3300> in <module>()
-----> 1 f(x, y)
-
- ... stack trace ...
-
-<ipython-input-5-619b39acbaac> in f(x, y)
-      2 def f(x, y):
-      3     a = x * y
-----> 4     b = (x + y) / (x - y)
-      5     c = a + 2
-      6     return a + b * c
-
-.../jax/jax/numpy/lax_numpy.pyc in divide(x1, x2)
-    343     return floor_divide(x1, x2)
-    344   else:
---> 345     return true_divide(x1, x2)
-    346
-    347
-
-.../jax/jax/numpy/lax_numpy.pyc in true_divide(x1, x2)
-    332   x1, x2 = _promote_shapes(x1, x2)
-    333   return lax.div(lax.convert_element_type(x1, result_dtype),
---> 334                  lax.convert_element_type(x2, result_dtype))
-    335
-    336
-
-.../jax/jax/lax.pyc in div(x, y)
-    244 def div(x, y):
-    245   r"""Elementwise division: :math:`x \over y`."""
---> 246   return div_p.bind(x, y)
-    247
-    248 def rem(x, y):
-
- ... stack trace ...
-```
-
-+++ {"id": "6ur2yArDBa_W"}
-
-When this code sees a nan in the output of an `@jit` function, it calls into the de-optimized code, so we still get a clear stack trace. And we can run a post-mortem debugger with `%debug` to inspect all the values to figure out the error.
-
-⚠️ You shouldn't have the NaN-checker on if you're not debugging, as it can introduce lots of device-host round-trips and performance regressions!
-
-⚠️ The NaN-checker doesn't work with `pmap`. To debug nans in `pmap` code, one thing to try is replacing `pmap` with `vmap`.
+Use the `jax_debug_nans` and `jax_debug_infs` flags to find the source of NaN/Inf values in functions and gradients. See {ref}`debugging-flags`.
 
 +++ {"id": "YTktlwTTMgFl"}
 

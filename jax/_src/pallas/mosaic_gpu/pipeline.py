@@ -59,8 +59,15 @@ def _get_block_size(
       raise NotImplementedError(f"Unsupported block size type: {type(bd)}")
 
 def _get_block_shape(spec: pallas_core.BlockSpec):
-  assert spec.block_shape is not None
-  return tuple(_get_block_size(bd) for bd in spec.block_shape)
+  if spec.block_shape is None:
+    raise ValueError("Block shape must be specified.")
+
+  block_shape = tuple(
+      _get_block_size(bd)
+      for bd in spec.block_shape
+      if not (bd is None or isinstance(bd, pl.Squeezed))
+  )
+  return block_shape
 
 
 map_brefs = functools.partial(
@@ -84,18 +91,27 @@ class BufferedRef:
       return self.gmem_ref
     return self.smem_ref.at[slot]
 
-  def compute_gmem_slice(self, grid_indices) -> tuple[pl.Slice, ...]:
+  def compute_gmem_slice(self, grid_indices) -> tuple[pl.Slice | jax.Array, ...]:
     index_map = self.spec.index_map
     assert index_map is not None
+    assert self.spec.block_shape is not None
     # We don't allow Python scalars here, because they are interpreted
     # differently depending on the x32/x64 mode.
     assert all(i.dtype == jnp.dtype(jnp.int32) for i in grid_indices)
-    sizes = _get_block_shape(self.spec)
+
+    def _make_block_slice(block_index: jax.Array, bd: pl.BlockDim | int | None):
+      match bd:
+        case int():
+          return pl.Slice(block_index * bd, bd)
+        case pl.Blocked(block_size):
+          return pl.Slice(block_index * block_size, block_size)
+        case None | pl.Squeezed():
+          return block_index
+        case _:
+          raise ValueError(f"Unsupported block dimension type: {bd}")
+
     return tuple(
-        pl.Slice(idx * size, size)  # type: ignore[arg-type]
-        for idx, size in zip(
-            index_map(*grid_indices), sizes  # type: ignore[arg-type]
-        )
+        map(_make_block_slice, index_map(*grid_indices), self.spec.block_shape)
     )
 
   def copy_in(self, slot, grid_indices, barrier_ref, barrier_slot=None):
@@ -165,26 +181,6 @@ def _inc_grid_by_1(
 
 def _in_smem(spec: pallas_core.BlockSpec) -> bool:
   return spec.memory_space in (None, gpu_core.SMEM)
-
-
-# ``pl.Slice`` uses a different pytree encoding, depending on whether the
-# start/size are static or dynamic. This leads to pytree structure mismatch
-# in the pipeline body. So, we define a different ``Slice`` class below.
-
-
-@dataclasses.dataclass(frozen=True)
-class _Slice:
-  start: int | jax.Array
-  size: int | jax.Array
-
-  def __eq__(self, other: _Slice) -> jax.Array:  # type: ignore
-    return lax.bitwise_and(self.start == other.start, self.size == other.size)
-
-
-jax.tree_util.register_dataclass(
-    _Slice, data_fields=["start", "size"], meta_fields=[]
-)
-
 
 def _downcast_spec(
     spec: gpu_core.BlockSpec | pallas_core.BlockSpec,
@@ -258,6 +254,8 @@ def emit_pipeline(
 
   num_steps = math.prod(grid)
   has_dynamic_grid = not isinstance(num_steps, int)
+  # Convert the grid to int32 explicitly to avoid dtype promotion errors.
+  grid = tuple(jnp.asarray(g, dtype=jnp.int32) for g in grid)
 
   # Shrink ``max_concurrent_steps`` if the total number of steps is lower to
   # reduce the size of the refs allocated in SMEM.
@@ -317,21 +315,29 @@ def emit_pipeline(
 
     # Initialize the pipeline.
     indices = (jnp.asarray(0, dtype=jnp.int32),) * len(grid)
-    fetch_indices = indices
-    for step in range(max_concurrent_steps):
+    if has_dynamic_grid:
+      prologue_steps = lax.min(max_concurrent_steps, num_steps)
+    else:
+      assert max_concurrent_steps <= num_steps
+      prologue_steps = max_concurrent_steps
+
+    def prologue(step, fetch_indices):
       for bref in in_brefs:
         bref.copy_in(step, fetch_indices, barrier_ref)
-      fetch_indices = _inc_grid_by_1(fetch_indices, grid)
-    del fetch_indices
+      return _inc_grid_by_1(fetch_indices, grid)
+    jax.lax.fori_loop(0, prologue_steps, prologue, indices, unroll=not has_dynamic_grid)
 
     # This is true if any of the outputs need to be transferred inside the loop.
     smem_out_brefs = [bref for bref in out_brefs if _in_smem(bref.spec)]
     copies_out_in_loop = not all(bref.is_index_invariant for bref in smem_out_brefs)
     needs_epilogue = any(bref.is_index_invariant for bref in smem_out_brefs)
 
+    # In the loop body, `max_concurrent_steps` may be larger than `num_steps` in
+    # the dynamic grid case. This is fine, since in that case, we will never
+    # need to fetch more data anyway.
     def loop_body(step, carry):
       slot = lax.rem(step, max_concurrent_steps)
-      indices, fetch_index_levels, last_store_slices, prev_body_carry = carry
+      indices, fetch_index_levels, last_store_indices, prev_body_carry = carry
 
       if barrier_ref is not None:
         # Wait for the current GMEM->SMEM copy to complete, if any.
@@ -355,19 +361,17 @@ def emit_pipeline(
         gpu_primitives.commit_smem()
 
       # Copy the output from SMEM to GMEM.
-      new_store_slices = last_store_slices[:]
+      new_store_indices = last_store_indices[:]
       for idx, bref in enumerate(out_brefs):
         if bref.is_index_invariant:
-          assert last_store_slices[idx] is None
+          assert last_store_indices[idx] is None
           continue
-        assert last_store_slices[idx] is not None
-        new_store_slices[idx] = tuple(
-            _Slice(s.start, s.size) for s in bref.compute_gmem_slice(indices)
-        )
+        assert last_store_indices[idx] is not None
+        new_store_indices[idx] = bref.spec.index_map(*indices)
         are_same_slices = map(
             lambda old, new: old == new,
-            last_store_slices[idx],
-            new_store_slices[idx],
+            last_store_indices[idx],
+            new_store_indices[idx],
         )
         slices_changed = ~functools.reduce(lax.bitwise_and, are_same_slices)
         is_last_step = step == num_steps - 1
@@ -409,7 +413,7 @@ def emit_pipeline(
       return (
           _inc_grid_by_1(indices, grid),
           next_fetch_indices_levels,
-          new_store_slices,
+          new_store_indices,
           next_body_carry if init_carry is not None else None,
       )
 
@@ -421,17 +425,17 @@ def emit_pipeline(
       fetch_index_levels.append(fetch_indices)
 
     # TODO(justinfu): Only store base pointer instead of all indices.
-    last_store_slices = [
+    last_store_indices = [
         None
         if bref.is_index_invariant
-        else (_Slice(-1, -1),) * len(bref.spec.block_shape)
+        else (jnp.array(-1),) * len(bref.spec.block_shape)
         for bref in out_brefs
     ]
     last_indices, _, _, final_carry = lax.fori_loop(
         0,
         num_steps,
         loop_body,
-        (indices, fetch_index_levels, last_store_slices, init_carry),
+        (indices, fetch_index_levels, last_store_indices, init_carry),
     )
 
     # Outputs invariant to the sequential axis are never written from inside the
@@ -680,7 +684,7 @@ def emit_pipeline_warp_specialized(
       slots = max_concurrent_steps if has_seq_dim else 1
       smem_allocs.append(
           gpu_core.SMEM(
-              (slots, *spec.block_shape),   # type: ignore
+              (slots, *_get_block_shape(spec)),   # type: ignore
               gmem_ref.dtype,
               transforms=getattr(spec, "transforms", ()),
           )
@@ -816,7 +820,7 @@ def emit_pipeline_warp_specialized(
       needs_epilogue = any(bref.is_index_invariant for bref in smem_out_brefs)
 
       def compute_loop_body(step, carry):
-        indices, last_store_slices, prev_body_carry = carry
+        indices, last_store_indices, prev_body_carry = carry
         slot = lax.rem(step, max_concurrent_steps)
         consumed_slot = lax.rem(step - delay_release, max_concurrent_steps)
         # Wait for the current GMEM->SMEM copies to complete.
@@ -863,19 +867,17 @@ def emit_pipeline_warp_specialized(
         if copies_out_in_loop:
           gpu_primitives.commit_smem()
 
-        new_store_slices = last_store_slices[:]
+        new_store_indices = last_store_indices[:]
         for idx, bref in enumerate(flat_out_brefs):
           if bref.is_index_invariant:
-            assert last_store_slices[idx] is None
+            assert last_store_indices[idx] is None
             continue
-          assert last_store_slices[idx] is not None
-          new_store_slices[idx] = tuple(
-              _Slice(s.start, s.size) for s in bref.compute_gmem_slice(indices)
-          )
+          assert last_store_indices[idx] is not None
+          new_store_indices[idx] = bref.spec.index_map(*indices)
           are_same_slices = map(
               lambda old, new: old == new,
-              last_store_slices[idx],
-              new_store_slices[idx],
+              last_store_indices[idx],
+              new_store_indices[idx],
           )
           slices_changed = ~functools.reduce(lax.bitwise_and, are_same_slices)
           bref.copy_out(_get_slot(slot, not bref.is_index_invariant),
@@ -883,13 +885,14 @@ def emit_pipeline_warp_specialized(
                         predicate=slices_changed)
         gpu_primitives.commit_smem_to_gmem_group()
         next_indices = _inc_grid_by_1(indices, grid)
-        return (next_indices, new_store_slices, next_body_carry)
+        return (next_indices, new_store_indices, next_body_carry)
       init_indices = (jnp.asarray(0, dtype=jnp.int32),) * len(grid)
+
       # TODO(justinfu): Only store base pointer instead of all indices.
-      last_store_slices = [
+      last_store_indices = [
           None
           if bref.is_index_invariant
-          else (_Slice(-1, -1),) * len(bref.spec.block_shape)
+          else (jnp.array(-1),) * len(bref.spec.block_shape)
           for bref in flat_out_brefs
       ]
 
@@ -900,7 +903,7 @@ def emit_pipeline_warp_specialized(
           if last_indices is not None:
             raise ValueError(
               "Cannot call pipeline more than once in `compute_context`")
-          init_loop_carry = (init_indices, last_store_slices, user_init_carry)
+          init_loop_carry = (init_indices, last_store_indices, user_init_carry)
           last_indices, _, final_body_carry = lax.fori_loop(0,
                         num_steps,
                         compute_loop_body,
@@ -913,7 +916,7 @@ def emit_pipeline_warp_specialized(
         assert compute_context is None
         last_indices, _, _ = lax.fori_loop(
             0, num_steps, compute_loop_body,
-            (init_indices, last_store_slices, None)
+            (init_indices, last_store_indices, None)
         )
 
       # Handle index_invariant outputs after the loop. They are not

@@ -24,7 +24,7 @@ from __future__ import annotations
 __all__ = ['register_jax_array_methods']
 
 import abc
-from functools import partial, wraps
+from functools import wraps
 import math
 from typing import Any
 from collections.abc import Callable, Sequence
@@ -318,6 +318,10 @@ def _reshape(self: Array, *args: Any, order: str = "C", out_sharding=None
     return lax.reshape(self, newshape, None, out_sharding=out_sharding)
   elif order == "F":
     dims = list(range(self.ndim)[::-1])
+    out_sharding = canonicalize_sharding(out_sharding, "jnp.reshape")
+    out_sharding = (
+        None if out_sharding is None else out_sharding.update(
+            spec=out_sharding.spec.update(partitions=out_sharding.spec[::-1])))
     return lax.reshape(self, newshape[::-1], dims, out_sharding=out_sharding).T
   elif order == "A":
     raise NotImplementedError("np.reshape order=A is not implemented.")
@@ -530,8 +534,8 @@ def _view(self: Array, dtype: DTypeLike | None = None, type: None = None) -> Arr
 
   dtype = dtypes.check_and_canonicalize_user_dtype(dtype, "view")
 
-  nbits_in = dtypes.bit_width(self.dtype)
-  nbits_out = dtypes.bit_width(dtype)
+  nbits_in = dtypes.itemsize_bits(self.dtype)
+  nbits_out = dtypes.itemsize_bits(dtype)
 
   if self.ndim == 0:
     if nbits_in != nbits_out:
@@ -553,9 +557,10 @@ def _view(self: Array, dtype: DTypeLike | None = None, type: None = None) -> Arr
   if lax_numpy.issubdtype(self.dtype, np.complexfloating):
     new_shape = (*self.shape[:-1], self.shape[-1] * 2)
     new_dtype = lax_numpy.finfo(self.dtype).dtype
-    self = (array_creation.zeros(new_shape, new_dtype)
-             .at[..., 0::2].set(self.real)
-             .at[..., 1::2].set(self.imag))
+    new_sharding = core.typeof(self).sharding
+    self = (array_creation.zeros(new_shape, new_dtype, out_sharding=new_sharding)
+            .at[..., 0::2].set(self.real)
+            .at[..., 1::2].set(self.imag))
     return _view(self, dtype)
 
   if dtype == bool:
@@ -639,7 +644,7 @@ def __array_module__(self, types):
     return NotImplemented
 
 
-@partial(api.jit, static_argnums=(1,2,3))
+@api.jit(static_argnums=(1,2,3))
 def _multi_slice(self: Array,
                  start_indices: tuple[tuple[int, ...]],
                  limit_indices: tuple[tuple[int, ...]],
@@ -815,7 +820,7 @@ class _IndexUpdateRef:
   def get(self, *, indices_are_sorted: bool = False, unique_indices: bool = False,
           mode: str | lax_slicing.GatherScatterMode | None = None,
           fill_value: ArrayLike | None = None,
-          out_sharding: Sharding | PartitionSpec | None = None,
+          out_sharding: NamedSharding | PartitionSpec | None = None,
           wrap_negative_indices: bool = True):
     """Equivalent to ``x[idx]``.
 
@@ -839,7 +844,7 @@ class _IndexUpdateRef:
   def set(self, values: ArrayLike, *, indices_are_sorted: bool = False,
           unique_indices: bool = False,
           mode: str | lax_slicing.GatherScatterMode | None = None,
-          out_sharding: Sharding | PartitionSpec | None = None,
+          out_sharding: NamedSharding | PartitionSpec | None = None,
           wrap_negative_indices: bool = True) -> None:
     """Pure equivalent of ``x[idx] = y``.
 
@@ -884,7 +889,7 @@ class _IndexUpdateRef:
   def add(self, values: ArrayLike, *,
           indices_are_sorted: bool = False, unique_indices: bool = False,
           mode: str | lax_slicing.GatherScatterMode | None = None,
-          out_sharding: Sharding | PartitionSpec | None = None,
+          out_sharding: NamedSharding | PartitionSpec | None = None,
           wrap_negative_indices: bool = True) -> Array:
     """Pure equivalent of ``x[idx] += y``.
 
@@ -1207,7 +1212,6 @@ def _set_array_abstract_methods(basearray):
 def register_jax_array_methods():
   """Call this function once to register methods of JAX arrays"""
   _set_shaped_array_attributes(core.ShapedArray)
-  _set_shaped_array_attributes(core.DShapedArray)
 
   _set_array_base_attributes(ArrayImpl, exclude={'__getitem__'})
   _set_tracer_aval_forwarding(core.Tracer, exclude={*_impl_only_array_methods, "at"})

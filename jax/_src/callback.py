@@ -238,6 +238,7 @@ def pure_callback_lowering(
       ctx.avals_in,
       ctx.avals_out,
       has_side_effect=False,
+      returns_token=False,
       sharding=op_sharding,
   )
   return result
@@ -514,6 +515,7 @@ def io_callback_lowering(ctx, *args, callback, sharding, ordered, **params):
         ctx.avals_in,
         ctx.avals_out,
         has_side_effect=True,
+        returns_token=True,
         sharding=op_sharding,
     )
     ctx.set_tokens_out(mlir.TokenSet({_OrderedIOEffect: token}))
@@ -526,6 +528,7 @@ def io_callback_lowering(ctx, *args, callback, sharding, ordered, **params):
         ctx.avals_in,
         ctx.avals_out,
         has_side_effect=True,
+        returns_token=False,
         sharding=op_sharding,
     )
   return result
@@ -589,21 +592,35 @@ def is_empty_shape(s: core.Shape) -> bool:
   return any(d == 0 for d in s)
 
 
+_XLA_HOST_TRANSFER_PJRT_RENDEZVOUS_HANDLER_NAME = "pjrt_rendezvous"
+
+
 def send_to_host(
     channel: int,
     token: hlo.TokenType,
     operand: Any,
-    name: str,
+    name: str | None = None,
     *,
     sharding: SdyArrayList | xc.OpSharding | None = None,
 ) -> ir.Value:
   channel_handle = hlo.ChannelHandle.get(channel, mlir.SEND_TO_HOST_TYPE)
   send_op = hlo.SendOp([operand], token, channel_handle,
                         is_host_transfer=ir.BoolAttr.get(True))
-  send_op.attributes["mhlo.frontend_attributes"] = ir.DictAttr.get(
-      dict(
-          _xla_host_transfer_handler_name=ir.StringAttr.get(str(name)),
-          _xla_host_transfer_rendezvous=ir.StringAttr.get(str(name))))
+  if mlir.USE_NEW_TPU_CALLBACK_LOWERING:
+    send_op.attributes["mhlo.frontend_attributes"] = ir.DictAttr.get(
+        dict(
+            _xla_host_transfer_handler_name=ir.StringAttr.get(
+                _XLA_HOST_TRANSFER_PJRT_RENDEZVOUS_HANDLER_NAME
+            ),
+            _xla_host_transfer_rendezvous=ir.StringAttr.get(str(channel)),
+        )
+    )
+  else:
+    assert name is not None
+    send_op.attributes["mhlo.frontend_attributes"] = ir.DictAttr.get(
+        dict(
+            _xla_host_transfer_handler_name=ir.StringAttr.get(str(name)),
+            _xla_host_transfer_rendezvous=ir.StringAttr.get(str(name))))
   if sharding is not None:
     if config.use_shardy_partitioner.value:
       # `SendOp`'s return type is a StableHLO `TokenType`. However JAX passed
@@ -625,7 +642,7 @@ def receive_from_host(
     channel: int,
     token: hlo.TokenType,
     out_aval: core.ShapedArray,
-    name: str,
+    name: str | None = None,
     *,
     sharding: SdyArrayList | xc.OpSharding | None = None,
 ) -> tuple[ir.Value, ir.Value]:
@@ -633,10 +650,21 @@ def receive_from_host(
   recv_op = hlo.RecvOp([mlir.aval_to_ir_type(out_aval),
                         hlo.TokenType.get()], token, channel_handle,
                         is_host_transfer=ir.BoolAttr.get(True))
-  recv_op.attributes["mhlo.frontend_attributes"] = ir.DictAttr.get(
-      dict(
-          _xla_host_transfer_handler_name=ir.StringAttr.get(str(name)),
-          _xla_host_transfer_rendezvous=ir.StringAttr.get(str(name))))
+  if mlir.USE_NEW_TPU_CALLBACK_LOWERING:
+    recv_op.attributes["mhlo.frontend_attributes"] = ir.DictAttr.get(
+        dict(
+            _xla_host_transfer_handler_name=ir.StringAttr.get(
+                _XLA_HOST_TRANSFER_PJRT_RENDEZVOUS_HANDLER_NAME
+            ),
+            _xla_host_transfer_rendezvous=ir.StringAttr.get(str(channel)),
+        )
+    )
+  else:
+    assert name is not None
+    recv_op.attributes["mhlo.frontend_attributes"] = ir.DictAttr.get(
+        dict(
+            _xla_host_transfer_handler_name=ir.StringAttr.get(str(name)),
+            _xla_host_transfer_rendezvous=ir.StringAttr.get(str(name))))
   if sharding is not None:
     if config.use_shardy_partitioner.value:
       assert isinstance(sharding, SdyArrayList)
@@ -677,7 +705,7 @@ _xla_shape_handlers[core.AbstractToken] = lambda _: xc.Shape.token_shape()
 
 
 def _emit_tpu_python_callback(
-    backend: xb.XlaBackend,
+    backend: xc.Client,
     ctx: mlir.LoweringRuleContext,
     callback,
     token: Any | None,
@@ -687,6 +715,7 @@ def _emit_tpu_python_callback(
     result_avals: Sequence[core.ShapedArray],
     result_shapes: Sequence[xc.Shape],
     *,
+    returns_token: bool,
     sharding: SdyArrayList | xc.OpSharding | None = None,
 ) -> tuple[Sequence[ir.Value], Any]:
   token = token or hlo.create_token()
@@ -706,25 +735,61 @@ def _emit_tpu_python_callback(
     dummy_send_aval = core.ShapedArray((1,), np.float32)
     dummy_send_val = mlir.ir_constant(np.zeros(1, np.float32))
     operand_shapes = [*operand_shapes, _aval_to_xla_shape(dummy_send_aval)]
-    token = send_to_host(send_channel, token, dummy_send_val, callback.__name__,
-                         sharding=sharding)
+    if mlir.USE_NEW_TPU_CALLBACK_LOWERING:
+      token = send_to_host(send_channel, token, dummy_send_val,
+                           sharding=sharding)
+    else:
+      token = send_to_host(send_channel, token, dummy_send_val,
+                           _wrapped_callback.__name__, sharding=sharding)
     send_channels.append(send_channel)
   else:
     for operand in operands:
       channel = ctx.module_context.new_channel()
-      token = send_to_host(channel, token, operand, callback.__name__,
-                           sharding=sharding)
+      if mlir.USE_NEW_TPU_CALLBACK_LOWERING:
+        token = send_to_host(channel, token, operand, sharding=sharding)
+      else:
+        token = send_to_host(channel, token, operand,
+                             _wrapped_callback.__name__, sharding=sharding)
       send_channels.append(channel)
 
   recv_channels = []
   outputs = []
-  for result_aval in result_avals:
+  if returns_token and not result_avals:
+    # If the caller expects a token, we need at least one result so that the
+    # token from the recv is used as an indication that the callback is
+    # complete. Without this, we would only wait for the send to finish.
+    callback_without_results = _wrapped_callback
+    def _wrapped_callback(*args):  # pylint: disable=function-redefined
+      callback_without_results(*args)
+      return 0.0,
+    dummy_recv_aval = core.ShapedArray((), np.float32)
+    result_shapes = [_aval_to_xla_shape(dummy_recv_aval)]
     channel = ctx.module_context.new_channel()
-    assert isinstance(result_aval, core.ShapedArray)
-    token, out = receive_from_host(channel, token, result_aval,
-                                   callback.__name__, sharding=sharding)
-    outputs.append(out)
+    if mlir.USE_NEW_TPU_CALLBACK_LOWERING:
+      token, _ = receive_from_host(
+          channel, token, dummy_recv_aval, sharding=sharding
+      )
+    else:
+      token, _ = receive_from_host(
+          channel, token, dummy_recv_aval, _wrapped_callback.__name__,
+          sharding=sharding
+      )
     recv_channels.append(channel)
+  else:
+    for result_aval in result_avals:
+      channel = ctx.module_context.new_channel()
+      assert isinstance(result_aval, core.ShapedArray)
+      if mlir.USE_NEW_TPU_CALLBACK_LOWERING:
+        token, out = receive_from_host(
+            channel, token, result_aval, sharding=sharding
+        )
+      else:
+        token, out = receive_from_host(
+            channel, token, result_aval, _wrapped_callback.__name__,
+            sharding=sharding
+        )
+      outputs.append(out)
+      recv_channels.append(channel)
   ifrt_callback = backend.make_python_callback_from_host_send_and_recv(
       _wrapped_callback, operand_shapes, result_shapes, send_channels,
       recv_channels, pickle_util.dumps)
@@ -741,6 +806,7 @@ def emit_python_callback(
     result_avals: Sequence[core.ShapedArray],
     *,
     has_side_effect: bool,
+    returns_token: bool = True,
     partitioned: bool = False,
     sharding: SdyArrayList | xc.OpSharding | None = None,
 ) -> tuple[Sequence[mlir.IrValues], Any, Any]:
@@ -754,6 +820,7 @@ def emit_python_callback(
     operand_avals: The abstract values of the operands.
     result_avals: The abstract values of the results.
     has_side_effect: Whether the callback has side effects.
+    returns_token: Whether the callback should return a token.
     partitioned: If True, then `callback` is called on local shards only. If
       False, then `callback` is called on all shards.
     sharding: The sharding of the callback.
@@ -774,7 +841,7 @@ def emit_python_callback(
           f"Partitioned callback not implemented on {platform} backend.")
     if result_avals:
       raise ValueError("Partitioned callback not supported with return values.")
-  backend: xb.XlaBackend = cast(xb.XlaBackend, ctx.module_context.get_backend())
+  backend: xc.Client = cast(xc.Client, ctx.module_context.get_backend())
   result_shapes = [_aval_to_xla_shape(aval) for aval in result_avals]
   operand_shapes = [_aval_to_xla_shape(aval) for aval in operand_avals]
 
@@ -820,7 +887,7 @@ def emit_python_callback(
         backend, ctx, _wrapped_callback,  token,
         operands, operand_avals, operand_shapes,
         non_empty_result_avals, non_empty_result_shapes,
-        sharding=sharding)
+        returns_token=returns_token, sharding=sharding)
     non_empty_outputs_iter = iter(non_empty_outputs)
     outputs = [
         mlir.ir_constant(np.zeros(result_aval.shape, dtype=result_aval.dtype))

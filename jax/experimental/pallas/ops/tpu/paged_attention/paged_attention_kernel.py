@@ -463,7 +463,7 @@ def paged_attention(
     raise ValueError("`page_indices` and `q` must have the same batch size")
   if lengths.dtype != jnp.int32:
     raise ValueError(
-        "The dtype of `lengths` must be int32. Got {lengths.dtype}"
+        f"The dtype of `lengths` must be int32. Got {lengths.dtype}"
     )
 
   # TODO(dinghua): get the actual cores per chip once there's an official API.
@@ -547,10 +547,10 @@ def paged_attention(
   if k_scales_pages is not None and v_scales_pages is not None:
     in_specs = [
         q_block_spec,
-        pl.BlockSpec(memory_space=pltpu.ANY),
-        pl.BlockSpec(memory_space=pltpu.ANY),
-        pl.BlockSpec(memory_space=pltpu.ANY),
-        pl.BlockSpec(memory_space=pltpu.ANY),
+        pl.BlockSpec(memory_space=pl.ANY),
+        pl.BlockSpec(memory_space=pl.ANY),
+        pl.BlockSpec(memory_space=pl.ANY),
+        pl.BlockSpec(memory_space=pl.ANY),
     ]
     scratch_shapes = (
         pltpu.VMEM(
@@ -595,9 +595,9 @@ def paged_attention(
   else:
     in_specs = [
         q_block_spec,
-        pl.BlockSpec(memory_space=pltpu.ANY),
+        pl.BlockSpec(memory_space=pl.ANY),
         None,  # type: ignore[list-item]
-        pl.BlockSpec(memory_space=pltpu.ANY),
+        pl.BlockSpec(memory_space=pl.ANY),
         None,  # type: ignore[list-item]
     ]
     scratch_shapes = (

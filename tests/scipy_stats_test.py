@@ -1104,6 +1104,103 @@ class LaxBackedScipyStatsTests(jtu.JaxTestCase):
                               tol=1e-3)
       self._CompileAndCheck(lax_fun, args_maker)
 
+  @genNamedParametersNArgs(4)
+  def testParetoPdf(self, shapes, dtypes):
+    rng = jtu.rand_positive(self.rng())
+    scipy_fun = osp_stats.pareto.pdf
+    lax_fun = lsp_stats.pareto.pdf
+
+    def args_maker():
+      x, b, loc, scale = map(rng, shapes, dtypes)
+      return [x, b, loc, scale]
+
+    with jtu.strict_promotion_if_dtypes_match(dtypes):
+      self._CheckAgainstNumpy(
+        scipy_fun, lax_fun, args_maker, check_dtypes=False, tol=1e-3
+      )
+      self._CompileAndCheck(lax_fun, args_maker)
+
+  @genNamedParametersNArgs(4)
+  def testParetoLogCdf(self, shapes, dtypes):
+    rng = jtu.rand_positive(self.rng())
+    scipy_fun = osp_stats.pareto.logcdf
+    lax_fun = lsp_stats.pareto.logcdf
+
+    def args_maker():
+      x, b, loc, scale = map(rng, shapes, dtypes)
+      return [x, b, loc, scale]
+
+    with jtu.strict_promotion_if_dtypes_match(dtypes):
+      self._CheckAgainstNumpy(
+        scipy_fun, lax_fun, args_maker, check_dtypes=False, tol=1e-3
+      )
+      self._CompileAndCheck(lax_fun, args_maker)
+
+  @genNamedParametersNArgs(4)
+  def testParetoCdf(self, shapes, dtypes):
+    rng = jtu.rand_positive(self.rng())
+    scipy_fun = osp_stats.pareto.cdf
+    lax_fun = lsp_stats.pareto.cdf
+
+    def args_maker():
+      x, b, loc, scale = map(rng, shapes, dtypes)
+      return [x, b, loc, scale]
+
+    with jtu.strict_promotion_if_dtypes_match(dtypes):
+      self._CheckAgainstNumpy(
+        scipy_fun, lax_fun, args_maker, check_dtypes=False, tol=1e-3
+      )
+      self._CompileAndCheck(lax_fun, args_maker)
+
+  @genNamedParametersNArgs(4)
+  def testParetoPpf(self, shapes, dtypes):
+    rng_positive = jtu.rand_positive(self.rng())
+    rng_uniform = jtu.rand_uniform(self.rng())
+    scipy_fun = osp_stats.pareto.ppf
+    lax_fun = lsp_stats.pareto.ppf
+
+    def args_maker():
+      q = rng_uniform(shapes[0], dtypes[0])
+      b, loc, scale = map(rng_positive, shapes[1:], dtypes[1:])
+      return [q, b, loc, scale]
+
+    with jtu.strict_promotion_if_dtypes_match(dtypes):
+      self._CheckAgainstNumpy(
+        scipy_fun, lax_fun, args_maker, check_dtypes=False, tol=1e-3
+      )
+      self._CompileAndCheck(lax_fun, args_maker)
+
+  @genNamedParametersNArgs(4)
+  def testParetoSf(self, shapes, dtypes):
+    rng = jtu.rand_positive(self.rng())
+    scipy_fun = osp_stats.pareto.sf
+    lax_fun = lsp_stats.pareto.sf
+
+    def args_maker():
+      x, b, loc, scale = map(rng, shapes, dtypes)
+      return [x, b, loc, scale]
+
+    with jtu.strict_promotion_if_dtypes_match(dtypes):
+      self._CheckAgainstNumpy(
+        scipy_fun, lax_fun, args_maker, check_dtypes=False, tol=1e-3
+      )
+      self._CompileAndCheck(lax_fun, args_maker)
+
+  @genNamedParametersNArgs(4)
+  def testParetoLogSf(self, shapes, dtypes):
+    rng = jtu.rand_positive(self.rng())
+    scipy_fun = osp_stats.pareto.logsf
+    lax_fun = lsp_stats.pareto.logsf
+
+    def args_maker():
+      x, b, loc, scale = map(rng, shapes, dtypes)
+      return [x, b, loc, scale]
+
+    with jtu.strict_promotion_if_dtypes_match(dtypes):
+      self._CheckAgainstNumpy(
+        scipy_fun, lax_fun, args_maker, check_dtypes=False, tol=1e-3
+      )
+      self._CompileAndCheck(lax_fun, args_maker)
 
   @genNamedParametersNArgs(4)
   def testTLogPdf(self, shapes, dtypes):
@@ -1972,6 +2069,69 @@ class LaxBackedScipyStatsTests(jtu.JaxTestCase):
     self._CheckAgainstNumpy(scipy_fun, lax_fun, args_maker, check_dtypes=False,
                             atol=tol)
     self._CompileAndCheck(lax_fun, args_maker, atol=tol)
+
+  @jtu.sample_product(
+    shape=[(), (5,), (3, 4)],
+    dtype=jtu.dtypes.floating,
+  )
+  def testPoissonEntropy(self, shape, dtype):
+    rng = jtu.rand_positive(self.rng())
+    scipy_fun = osp_stats.poisson.entropy
+    lax_fun = lsp_stats.poisson.entropy
+
+    args_maker = lambda: [rng(shape, dtype)]
+    tol = ({np.float32: 1e-2, np.float64: 1e-4} if jtu.test_device_matches(["tpu"])
+           else {np.float32: 2e-4, np.float64: 5e-6})
+    self._CheckAgainstNumpy(scipy_fun, lax_fun, args_maker,check_dtypes=False, tol=tol)
+    self._CompileAndCheck(lax_fun, args_maker, rtol=1e-4)
+
+  @genNamedParametersNArgs(2)
+  def testPoissonEntropyWithLoc(self, shapes, dtypes):
+    rng = jtu.rand_positive(self.rng())
+    scipy_fun = lambda mu, loc: osp_stats.poisson.entropy(mu, loc=loc)
+    lax_fun = lambda mu, loc: lsp_stats.poisson.entropy(mu, loc)
+
+    args_maker = lambda: [rng(shapes[0], dtypes[0]), rng(shapes[1], dtypes[1])]
+    tol = ({np.float32: 1e-2, np.float64: 1e-4} if jtu.test_device_matches(["tpu"])
+           else {np.float32: 2e-4, np.float64: 5e-6})
+    with jtu.strict_promotion_if_dtypes_match(dtypes):
+      self._CheckAgainstNumpy(scipy_fun, lax_fun, args_maker, check_dtypes=False,  tol=tol)
+      self._CompileAndCheck(lax_fun, args_maker, rtol=1e-4)
+
+  @jtu.sample_product(
+    dtype=jtu.dtypes.floating,
+  )
+  def testPoissonEntropyEdgeCases(self, dtype):
+    """Test edge cases: invalid mu and very small mu"""
+    tol = ({np.float32: 1e-2, np.float64: 1e-4} if jtu.test_device_matches(["tpu"])
+           else {np.float32: 2e-4, np.float64: 5e-6})
+
+    # Invalid mu (should return NaN)
+    invalid_mu = jnp.array([-1.0, 0.0, -5.0], dtype=dtype)
+    jax_result = lsp_stats.poisson.entropy(invalid_mu)
+    scipy_result = osp_stats.poisson.entropy(np.array(invalid_mu))
+    self.assertAllClose(jax_result, scipy_result, check_dtypes=False, rtol=tol)
+
+    # Very small mu
+    small_mu = jnp.array([0.01, 0.1, 0.5], dtype=dtype)
+    jax_result = lsp_stats.poisson.entropy(small_mu)
+    scipy_result = osp_stats.poisson.entropy(np.array(small_mu))
+    self.assertAllClose(jax_result, scipy_result,check_dtypes=False, rtol=tol)
+
+  @jtu.sample_product(
+    dtype=jtu.dtypes.floating,
+  )
+  def testPoissonEntropyRegimes(self, dtype):
+    """Test all three computational regimes"""
+    mu = jnp.array([2.0, 5.0, 9.0, 15.0, 50.0, 99.0, 100.0, 200.0, 500.0], dtype=dtype)
+    scipy_fun = lambda m: osp_stats.poisson.entropy(m)
+    lax_fun = lambda m: lsp_stats.poisson.entropy(m)
+    args_maker = lambda: [mu]
+
+    tol = ({np.float32: 1e-2, np.float64: 1e-4} if jtu.test_device_matches(["tpu"])
+           else {np.float32: 2e-4, np.float64: 5e-6})
+    self._CheckAgainstNumpy(scipy_fun, lax_fun, args_maker,check_dtypes=False, tol=tol)
+    self._CompileAndCheck(lax_fun, args_maker, rtol=1e-4)
 
 if __name__ == "__main__":
   absltest.main(testLoader=jtu.JaxTestLoader())

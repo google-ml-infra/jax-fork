@@ -256,7 +256,8 @@ class custom_jvp(Generic[ReturnValue]):
 
     self.defjvp(jvp)
 
-  @traceback_util.api_boundary
+  @partial(traceback_util.api_boundary,
+           repro_api_name="jax.custom_jvp.__call__")
   def __call__(self, *args: Any, **kwargs: Any) -> ReturnValue:  # pytype: disable=invalid-annotation
     debug = debug_info("custom_jvp fun", self.fun, args, kwargs,
                        static_argnums=self.nondiff_argnums)
@@ -384,15 +385,13 @@ def _flatten_jvp(f, store, primal_name, jvp_name, in_tree, maybe_out_type, *args
 
 class CustomJVPCallPrimitive(core.Primitive):
   multiple_results = True
-  skip_canonicalization = True
+
+  def bind(self, *args, **params):
+    return self._true_bind(*args, **params)
 
   def bind_with_trace(self, trace, args, params):
-    fun, jvp, *tracers = args
-    if trace.requires_low and config.vmap_primitive.value:
-      with core.set_current_trace(trace):
-        return fun.call_wrapped(*tracers)
-    else:
-      return trace.process_custom_jvp_call(self, fun, jvp, tracers, **params)
+    fun, jvp, tracers = args[0], args[1], args[2:]
+    return trace.process_custom_jvp_call(self, fun, jvp, tracers, **params)
 
   def impl(self, fun, _, *args):
     raise NotImplementedError
@@ -449,14 +448,6 @@ def _custom_jvp_vjp_call_lowering(ctx: mlir.LoweringRuleContext, *args,
   ctx.set_tokens_out(tokens)
   return out
 mlir.register_lowering(custom_jvp_call_p, _custom_jvp_vjp_call_lowering)
-
-# If a (multi)linear function is defined with a custom jvp, then
-# custom_jvp_call_ can appear in jaxprs to be transposed. Since it's already
-# been linearized, we can drop the jvp rule.
-def _custom_jvp_call_transpose(params, jaxpr, args, ct, _):
-  del params
-  return ad.backward_pass(jaxpr.jaxpr, False, jaxpr.consts, args, ct)
-ad.primitive_transposes[custom_jvp_call_p] = _custom_jvp_call_transpose
 
 def _custom_jvp_call_transpose_fancy(params, jaxpr, args, ct, _):
   del params
@@ -687,7 +678,8 @@ class custom_vjp(Generic[ReturnValue]):
       raise NotImplementedError(
           "remat optimization for custom_vjp does not support symbolic zeros")
 
-  @traceback_util.api_boundary
+  @partial(traceback_util.api_boundary,
+           repro_api_name="jax.custom_vjp.__call__")
   def __call__(self, *args: Any, **kwargs: Any) -> ReturnValue:  # pytype: disable=invalid-annotation
     debug_fun = debug_info("custom_vjp fun", self.fun, args, kwargs,
                            static_argnums=self.nondiff_argnums)
@@ -953,7 +945,7 @@ def _flatten_bwd(f: Callable,
     if ct is zero or getattr(a.to_tangent_aval(), 'dtype') == dtypes.float0:
       results.append(Zero(a.to_tangent_aval()))
     elif type(ct) is SymbolicZero:
-      if not core.typecompat(a.to_tangent_aval(), a_ := ct.aval):
+      if not core.typecompat(a.to_cotangent_aval(), a_ := ct.aval):
         msg = ("Custom VJP bwd rule produced a SymbolicZero with a shape/dtype "
                "that does not match the corresponding input tangent shape/dtype: "
                f"at output{keystr(kp)} the SymbolicZero had shape/dtype "
@@ -964,15 +956,15 @@ def _flatten_bwd(f: Callable,
         raise ValueError(msg)
       results.append(Zero(ct.aval))
     else:
-      if (not core.typecompat(a.to_tangent_aval(), a_ := core.get_aval(ct)) and
-          not _ref_typecompat(a.to_tangent_aval(), a_) and
-          not (_temporary_dtype_exception(a, a_) or
-               _temporary_shape_exception(a, a_))):
+      if (not config.disable_bwd_checks.value and
+          not core.typecompat(a.to_cotangent_aval(), a_ := core.get_aval(ct))
+          and not _ref_typecompat(a.to_cotangent_aval(), a_)
+          and not _temporary_dtype_exception(a.to_cotangent_aval(), a_)):
         msg = ("Custom VJP bwd rule must produce an output with the same "
-               "shape/dtypes as the args tuple of the primal function, but at "
+               "type as the args tuple of the primal function, but at "
                f"output{keystr(kp)} the bwd rule produced an output of "
-               f"shape/dtype {a_.str_short()} corresponding "
-               f"to an input of shape/dtype {a.str_short()}"
+               f"type {a_.str_short()} corresponding "
+               f"to an input of type {a.str_short()}"
                f"{core.aval_mismatch_extra(a, a_)}")
         raise ValueError(msg)
       results.append(ct)
@@ -980,31 +972,27 @@ def _flatten_bwd(f: Callable,
 
 def _ref_typecompat(a, a_):
   return (isinstance(a, AbstractRef) and
-          core.typecompat(a.to_tangent_aval().inner_aval, a_))
+          core.typecompat(a.to_cotangent_aval().inner_aval, a_))
 
 # TODO(mattjj): remove both these exceptions to cotangent compatibility check
 def _temporary_dtype_exception(a, a_) -> bool:
   if isinstance(a, core.ShapedArray) and isinstance(a_, core.ShapedArray):
     return (a.shape == a_.shape and
+            core.typematch(a, a_, only_shape_shd_check=True) and
             (dtypes.issubdtype(a_.dtype, dtypes.extended) or
              dtypes.issubdtype(a.dtype, dtypes.np.inexact)))
   return False
 
-# TODO(mattjj): remove both these exceptions to cotangent compatibility check
-def _temporary_shape_exception(a, a_) -> bool:
-  return config.custom_vjp_disable_shape_check.value
 
 class CustomVJPCallPrimitive(core.Primitive):
   multiple_results = True
-  skip_canonicalization = True
+
+  def bind(self, *args, **params):
+    return self._true_bind(*args, **params)
 
   def bind_with_trace(self, trace, args, params):
-    fun, fwd, bwd, *tracers = args
-    if trace.requires_low and config.vmap_primitive.value:
-      with core.set_current_trace(trace):
-        return fun.call_wrapped(*tracers)
-    else:
-      return trace.process_custom_vjp_call(self, fun, fwd, bwd, tracers, **params)
+    fun, fwd, bwd, tracers = args[0], args[1], args[2], args[3:]
+    return trace.process_custom_vjp_call(self, fun, fwd, bwd, tracers, **params)
 
   def impl(self, fun, fwd, bwd, *args):
     raise NotImplementedError

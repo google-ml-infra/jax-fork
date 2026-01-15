@@ -227,6 +227,7 @@ class _DimFactor:
           return normalized_var._evaluate(env)  # type: ignore
         err_msg = (
             f"Encountered dimension variable '{self.var}' that is not appearing in the shapes of the function arguments.\n"
+            f"The following dimension variables are appearing in the shapes of the function arguments: {list(env.keys())}.\n"
             "Please see https://docs.jax.dev/en/latest/export/shape_poly.html#dimension-variables-must-be-solvable-from-the-input-shapes for more details.")
         raise UnexpectedDimVar(err_msg)
     else:
@@ -1434,13 +1435,13 @@ def symbolic_args_specs(
     constraints: Sequence[str] = (),
     scope: SymbolicScope | None = None,
 ):
-  """Constructs a pytree of jax.ShapeDtypeSpec arguments specs for `export`.
+  """Constructs a pytree of jax.ShapeDtypeStruct arguments specs for `export`.
 
   See the documentation of :func:`jax.export.symbolic_shape` and
   the [shape polymorphism documentation](https://docs.jax.dev/en/latest/export/shape_poly.html) for details.
 
   Args:
-    args: a pytree of arguments. These can be jax.Array, or jax.ShapeDTypeSpec.
+    args: a pytree of arguments. These can be jax.Array, or jax.ShapeDtypeStruct.
       They are used to learn the pytree structure of the arguments, their dtypes,
       and to fill-in the actual shapes where the `shapes_specs` contains
       placeholders. Note that only the shape dimensions for which
@@ -1454,7 +1455,7 @@ def symbolic_args_specs(
     constraints: as for :func:`jax.export.symbolic_shape`.
     scope: as for :func:`jax.export.symbolic_shape`.
 
-  Returns: a pytree of jax.ShapeDTypeStruct matching the `args` with the shapes
+  Returns: a pytree of jax.ShapeDtypeStruct matching the `args` with the shapes
     replaced with symbolic dimensions as specified by `shapes_specs`.
   """
   polymorphic_shapes = shapes_specs

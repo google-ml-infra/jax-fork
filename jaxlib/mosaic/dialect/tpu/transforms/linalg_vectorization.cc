@@ -13,7 +13,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include <memory>
+#include "jaxlib/mosaic/dialect/tpu/transforms/linalg_vectorization.h"
+
 #include <optional>
 #include <string_view>
 #include <utility>
@@ -50,11 +51,8 @@ limitations under the License.
 
 namespace mlir::tpu {
 
-#define GEN_PASS_DECL_LINALGVECTORIZATIONPASS
-#define GEN_PASS_DEF_LINALGVECTORIZATIONPASS
-#include "jaxlib/mosaic/dialect/tpu/tpu_passes.h.inc"
-
 namespace {
+
 struct VectorizationPattern
     : public OpInterfaceRewritePattern<linalg::LinalgOp> {
   using OpInterfaceRewritePattern<linalg::LinalgOp>::OpInterfaceRewritePattern;
@@ -101,15 +99,14 @@ vector::TransferReadOp createTransferReadOp(vector::TransferReadOp op,
                                             PatternRewriter& rewriter) {
   // We know from preconditions that there are no out of bound dims.
   SmallVector<bool> in_bounds(source_ty.getRank(), true);
-  auto padding = rewriter.create<mlir::arith::ConstantOp>(
-      op->getLoc(), source_ty.getElementType(),
+  auto padding = mlir::arith::ConstantOp::create(
+      rewriter, op->getLoc(), source_ty.getElementType(),
       rewriter.getZeroAttr(source_ty.getElementType()));
-  return rewriter.create<vector::TransferReadOp>(
-      op.getLoc(),
+  return vector::TransferReadOp::create(
+      rewriter, op.getLoc(),
       VectorType::get(source_ty.getShape(), source_ty.getElementType()), source,
-      SmallVector<Value>(
-          source_ty.getRank(),
-          rewriter.create<arith::ConstantIndexOp>(op.getLoc(), 0)),
+      SmallVector<Value>(source_ty.getRank(), arith::ConstantIndexOp::create(
+                                                  rewriter, op.getLoc(), 0)),
       padding,  // Use padding with source_ty.
       AffineMapAttr::get(AffineMap::getMultiDimIdentityMap(source_ty.getRank(),
                                                            op->getContext())),
@@ -324,8 +321,9 @@ class GenericBitwidthConvert : public RewritePattern {
         continue;
       }
       has_bf16_operand = true;
-      extended_operands.push_back(rewriter.create<arith::ExtFOp>(
-          loc, VectorType::get(operand_type.getShape(), rewriter.getF32Type()),
+      extended_operands.push_back(arith::ExtFOp::create(
+          rewriter, loc,
+          VectorType::get(operand_type.getShape(), rewriter.getF32Type()),
           operand));
     }
     // If there are no bf16 operands, then we do not need to rewrite the op.
@@ -395,27 +393,27 @@ struct ContractionBitwidthConvert
     Value lhs = op.getLhs();
     Value rhs = op.getRhs();
     if (extend_operands) {
-      lhs = rewriter.create<arith::ExtFOp>(
-          op.getLoc(),
+      lhs = arith::ExtFOp::create(
+          rewriter, op.getLoc(),
           VectorType::get(op.getLhsType().getShape(), rewriter.getF32Type()),
           lhs);
-      rhs = rewriter.create<arith::ExtFOp>(
-          op.getLoc(),
+      rhs = arith::ExtFOp::create(
+          rewriter, op.getLoc(),
           VectorType::get(op.getRhsType().getShape(), rewriter.getF32Type()),
           rhs);
     }
 
     Value acc = op.getAcc();
     if (extend_acc) {
-      acc = rewriter.create<arith::ExtFOp>(
-          op.getLoc(),
+      acc = arith::ExtFOp::create(
+          rewriter, op.getLoc(),
           VectorType::get(acc_ty.getShape(), rewriter.getF32Type()),
           op.getAcc());
     }
 
-    vector::ContractionOp contraction = rewriter.create<vector::ContractionOp>(
-        op.getLoc(), lhs, rhs, acc, op.getIndexingMaps(), op.getIteratorTypes(),
-        op.getKind());
+    vector::ContractionOp contraction = vector::ContractionOp::create(
+        rewriter, op.getLoc(), lhs, rhs, acc, op.getIndexingMaps(),
+        op.getIteratorTypes(), op.getKind());
 
     if (extend_acc) {
       rewriter.replaceOpWithNewOp<arith::TruncFOp>(
@@ -453,14 +451,14 @@ struct MultiDimReductionBitwidthConvert
       return rewriter.notifyMatchFailure(op, "not vector reduction");
     }
 
-    auto reduction = rewriter.create<vector::MultiDimReductionOp>(
-        op.getLoc(),
-        rewriter.create<arith::ExtFOp>(
-            op.getLoc(),
+    auto reduction = vector::MultiDimReductionOp::create(
+        rewriter, op.getLoc(),
+        arith::ExtFOp::create(
+            rewriter, op.getLoc(),
             VectorType::get(src_ty.getShape(), rewriter.getF32Type()),
             op.getSource()),
-        rewriter.create<arith::ExtFOp>(
-            op.getLoc(),
+        arith::ExtFOp::create(
+            rewriter, op.getLoc(),
             VectorType::get(res_ty.getShape(), rewriter.getF32Type()),
             op.getAcc()),
         op.getReductionMask(), op.getKind());
@@ -469,88 +467,76 @@ struct MultiDimReductionBitwidthConvert
   }
 };
 
-struct LinalgVectorizationPass
-    : public impl::LinalgVectorizationPassBase<LinalgVectorizationPass> {
-  explicit LinalgVectorizationPass(
-      const LinalgVectorizationPassOptions& options)
-      : impl::LinalgVectorizationPassBase<LinalgVectorizationPass>(options) {}
-  void getDependentDialects(DialectRegistry& registry) const override {
-    registry.insert<vector::VectorDialect>();
-  }
-  void runOnOperation() override {
-    auto func = getOperation();
-    MLIRContext* ctx = func.getContext();
-
-    RewritePatternSet patterns(ctx);
-    patterns.add<VectorizationPattern>(ctx);
-    // Pull in patterns to shuffle broadcast/transpose ops around in order to
-    // cancel them or embed into contract ops. Embedding in the flexible
-    // contract ops will help to sustain the structure through various
-    // transformations.
-    vector::populateVectorReductionToContractPatterns(patterns);
-    vector::populateSinkVectorOpsPatterns(patterns);
-    // Pull in patterns to canonicalize transfer ops.
-    vector::populateVectorTransferPermutationMapLoweringPatterns(patterns);
-    vector::TransferReadOp::getCanonicalizationPatterns(patterns, ctx);
-    vector::TransferWriteOp::getCanonicalizationPatterns(patterns, ctx);
-    patterns.add<TransferReadOfCmpI, TransferReadOfCollapseShape,
-                 TransferReadOfConstant, TransferReadOfExpandShape,
-                 TransferReadOfSelect, TransferReadOfSplat>(ctx);
-    // Pull in patterns to convert bf16 ops to f32 ops.
-    for (::llvm::StringLiteral unary_op_name :
-         {arith::NegFOp::getOperationName(), math::TanhOp::getOperationName(),
-          math::ExpOp::getOperationName(), math::AbsFOp::getOperationName(),
-          math::SinOp::getOperationName(), math::CosOp::getOperationName(),
-          math::SqrtOp::getOperationName(), math::RsqrtOp::getOperationName(),
-          math::LogOp::getOperationName(), math::Log1pOp::getOperationName(),
-          math::RoundOp::getOperationName(),
-          math::RoundEvenOp::getOperationName()}) {
-      patterns.add<GenericBitwidthConvert>(unary_op_name, ctx,
-                                           supports_bf16_alu_instructions);
-    }
-    for (::llvm::StringLiteral binary_op_name :
-         {arith::MulFOp::getOperationName(), arith::DivFOp::getOperationName(),
-          arith::AddFOp::getOperationName(), arith::SubFOp::getOperationName(),
-          arith::MaximumFOp::getOperationName(),
-          arith::MinimumFOp::getOperationName(),
-          math::PowFOp::getOperationName()}) {
-      patterns.add<GenericBitwidthConvert>(binary_op_name, ctx,
-                                           supports_bf16_alu_instructions);
-    }
-    for (::llvm::StringLiteral ternary_op_name :
-         {arith::SelectOp::getOperationName()}) {
-      patterns.add<GenericBitwidthConvert>(ternary_op_name, ctx,
-                                           supports_bf16_alu_instructions);
-    }
-    patterns.add<ContractionBitwidthConvert>(supports_bf16_matmul, ctx);
-    patterns.add<MultiDimReductionBitwidthConvert>(ctx);
-
-    // We do not want to apply the vector patterns above to the ops that are
-    // unrelated to the original linalg op.
-    SmallVector<Operation*> linalgOps;
-    func.walk([&](Operation* op) {
-      if (dyn_cast<arith::SelectOp>(op) || dyn_cast<linalg::LinalgOp>(op) ||
-          dyn_cast<vector::TransferReadOp>(op) ||
-          dyn_cast<vector::TransferWriteOp>(op) ||
-          dyn_cast<vector::ContractionOp>(op) ||
-          dyn_cast<vector::MultiDimReductionOp>(op)) {
-        linalgOps.push_back(op);
-      }
-    });
-    if (failed(applyOpPatternsAndFold(linalgOps, std::move(patterns)))) {
-      return signalPassFailure();
-    }
-  }
-};
-
 }  // namespace
 
-std::unique_ptr<OperationPass<func::FuncOp>> createLinalgVectorizationPass(
-    bool supports_bf16_alu_instructions, bool supports_bf16_matmul) {
-  LinalgVectorizationPassOptions options;
-  options.supports_bf16_alu_instructions = supports_bf16_alu_instructions;
-  options.supports_bf16_matmul = supports_bf16_matmul;
-  return std::make_unique<LinalgVectorizationPass>(options);
+void LinalgVectorizationPass::getDependentDialects(
+    DialectRegistry& registry) const {
+  registry.insert<vector::VectorDialect>();
+}
+
+void LinalgVectorizationPass::runOnOperation() {
+  auto func = getOperation();
+  MLIRContext* ctx = func.getContext();
+
+  RewritePatternSet patterns(ctx);
+  patterns.add<VectorizationPattern>(ctx);
+  // Pull in patterns to shuffle broadcast/transpose ops around in order to
+  // cancel them or embed into contract ops. Embedding in the flexible
+  // contract ops will help to sustain the structure through various
+  // transformations.
+  vector::populateVectorReductionToContractPatterns(patterns);
+  vector::populateSinkVectorOpsPatterns(patterns);
+  // Pull in patterns to canonicalize transfer ops.
+  vector::populateVectorTransferPermutationMapLoweringPatterns(patterns);
+  vector::TransferReadOp::getCanonicalizationPatterns(patterns, ctx);
+  vector::TransferWriteOp::getCanonicalizationPatterns(patterns, ctx);
+  patterns.add<TransferReadOfCmpI, TransferReadOfCollapseShape,
+               TransferReadOfConstant, TransferReadOfExpandShape,
+               TransferReadOfSelect, TransferReadOfSplat>(ctx);
+  // Pull in patterns to convert bf16 ops to f32 ops.
+  for (::llvm::StringLiteral unary_op_name :
+       {arith::NegFOp::getOperationName(), math::TanhOp::getOperationName(),
+        math::ExpOp::getOperationName(), math::AbsFOp::getOperationName(),
+        math::SinOp::getOperationName(), math::CosOp::getOperationName(),
+        math::SqrtOp::getOperationName(), math::RsqrtOp::getOperationName(),
+        math::LogOp::getOperationName(), math::Log1pOp::getOperationName(),
+        math::RoundOp::getOperationName(),
+        math::RoundEvenOp::getOperationName()}) {
+    patterns.add<GenericBitwidthConvert>(unary_op_name, ctx,
+                                         supports_bf16_alu_instructions);
+  }
+  for (::llvm::StringLiteral binary_op_name :
+       {arith::MulFOp::getOperationName(), arith::DivFOp::getOperationName(),
+        arith::AddFOp::getOperationName(), arith::SubFOp::getOperationName(),
+        arith::MaximumFOp::getOperationName(),
+        arith::MinimumFOp::getOperationName(),
+        math::PowFOp::getOperationName()}) {
+    patterns.add<GenericBitwidthConvert>(binary_op_name, ctx,
+                                         supports_bf16_alu_instructions);
+  }
+  for (::llvm::StringLiteral ternary_op_name :
+       {arith::SelectOp::getOperationName()}) {
+    patterns.add<GenericBitwidthConvert>(ternary_op_name, ctx,
+                                         supports_bf16_alu_instructions);
+  }
+  patterns.add<ContractionBitwidthConvert>(supports_bf16_matmul, ctx);
+  patterns.add<MultiDimReductionBitwidthConvert>(ctx);
+
+  // We do not want to apply the vector patterns above to the ops that are
+  // unrelated to the original linalg op.
+  SmallVector<Operation*> linalgOps;
+  func.walk([&](Operation* op) {
+    if (dyn_cast<arith::SelectOp>(op) || dyn_cast<linalg::LinalgOp>(op) ||
+        dyn_cast<vector::TransferReadOp>(op) ||
+        dyn_cast<vector::TransferWriteOp>(op) ||
+        dyn_cast<vector::ContractionOp>(op) ||
+        dyn_cast<vector::MultiDimReductionOp>(op)) {
+      linalgOps.push_back(op);
+    }
+  });
+  if (failed(applyOpPatternsAndFold(linalgOps, std::move(patterns)))) {
+    return signalPassFailure();
+  }
 }
 
 }  // namespace mlir::tpu

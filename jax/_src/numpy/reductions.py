@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import builtins
 from collections.abc import Callable, Sequence
-from functools import partial
 import math
 import operator
 from typing import overload, Any, Literal, Protocol, Union
@@ -35,7 +34,7 @@ from jax._src.lax import lax as lax
 from jax._src.lax import other as lax_other
 from jax._src.lax import parallel as lax_parallel
 from jax._src.lax import slicing as lax_slicing
-from jax._src.typing import Array, ArrayLike, DType, DTypeLike, DeprecatedArg
+from jax._src.typing import Array, ArrayLike, DType, DTypeLike
 from jax._src.util import canonicalize_axis, canonicalize_axis_tuple, maybe_named_axis, set_module
 
 
@@ -89,7 +88,6 @@ def check_where(name: str, where: ArrayLike | None) -> Array | None:
       f"jnp.{name}: where must be None or a boolean array; got {where.dtype=}."
     )
   return where
-
 
 ReductionOp = Callable[[Any, Any], Any]
 
@@ -204,7 +202,7 @@ def _cast_to_numeric(operand: Array) -> Array:
   return promote_dtypes_numeric(operand)[0]
 
 def _require_integer(arr: Array) -> Array:
-  if not dtypes.isdtype(arr, ("bool", "integral")):
+  if not dtypes.isdtype(arr.dtype, ("bool", "integral")):
     raise ValueError(f"integer argument required; got dtype={arr.dtype}")
   return arr
 
@@ -220,7 +218,7 @@ def _ensure_optional_axes(x: Axis) -> Axis:
     force, x, "The axis argument must be known statically.")
 
 
-@partial(api.jit, static_argnames=('axis', 'dtype', 'keepdims', 'promote_integers'), inline=True)
+@api.jit(static_argnames=('axis', 'dtype', 'keepdims', 'promote_integers'), inline=True)
 def _reduce_sum(a: ArrayLike, axis: Axis = None, dtype: DTypeLike | None = None,
                 out: None = None, keepdims: bool = False,
                 initial: ArrayLike | None = None, where: ArrayLike | None = None,
@@ -308,7 +306,7 @@ def sum(a: ArrayLike, axis: Axis = None, dtype: DTypeLike | None = None,
 
 
 
-@partial(api.jit, static_argnames=('axis', 'dtype', 'keepdims', 'promote_integers'), inline=True)
+@api.jit(static_argnames=('axis', 'dtype', 'keepdims', 'promote_integers'), inline=True)
 def _reduce_prod(a: ArrayLike, axis: Axis = None, dtype: DTypeLike | None = None,
                  out: None = None, keepdims: bool = False,
                  initial: ArrayLike | None = None, where: ArrayLike | None = None,
@@ -395,7 +393,7 @@ def prod(a: ArrayLike, axis: Axis = None, dtype: DTypeLike | None = None,
                       promote_integers=promote_integers)
 
 
-@partial(api.jit, static_argnames=('axis', 'keepdims'), inline=True)
+@api.jit(static_argnames=('axis', 'keepdims'), inline=True)
 def _reduce_max(a: ArrayLike, axis: Axis = None, dtype: DTypeLike | None = None,
                 out: None = None, keepdims: bool = False,
                 initial: ArrayLike | None = None, where: ArrayLike | None = None) -> Array:
@@ -478,7 +476,7 @@ def max(a: ArrayLike, axis: Axis = None, out: None = None,
   return _reduce_max(a, axis=_ensure_optional_axes(axis), out=out,
                      keepdims=keepdims, initial=initial, where=where)
 
-@partial(api.jit, static_argnames=('axis', 'keepdims', 'dtype'), inline=True)
+@api.jit(static_argnames=('axis', 'keepdims', 'dtype'), inline=True)
 def _reduce_min(a: ArrayLike, axis: Axis = None, dtype: DTypeLike | None = None,
                 out: None = None, keepdims: bool = False,
                 initial: ArrayLike | None = None, where: ArrayLike | None = None) -> Array:
@@ -560,7 +558,7 @@ def min(a: ArrayLike, axis: Axis = None, out: None = None,
   return _reduce_min(a, axis=_ensure_optional_axes(axis), out=out,
                      keepdims=keepdims, initial=initial, where=where)
 
-@partial(api.jit, static_argnames=('axis', 'keepdims'), inline=True)
+@api.jit(static_argnames=('axis', 'keepdims'), inline=True)
 def _reduce_all(a: ArrayLike, axis: Axis = None, out: None = None,
                 keepdims: bool = False, *, where: ArrayLike | None = None) -> Array:
   return _reduction(a, "all", lax.bitwise_and, True, preproc=_cast_to_bool,
@@ -617,7 +615,7 @@ def all(a: ArrayLike, axis: Axis = None, out: None = None,
   return _reduce_all(a, axis=_ensure_optional_axes(axis), out=out,
                      keepdims=keepdims, where=where)
 
-@partial(api.jit, static_argnames=('axis', 'keepdims'), inline=True)
+@api.jit(static_argnames=('axis', 'keepdims'), inline=True)
 def _reduce_any(a: ArrayLike, axis: Axis = None, out: None = None,
                 keepdims: bool = False, *, where: ArrayLike | None = None) -> Array:
   return _reduction(a, "any", lax.bitwise_or, False, preproc=_cast_to_bool,
@@ -675,7 +673,7 @@ def any(a: ArrayLike, axis: Axis = None, out: None = None,
                      keepdims=keepdims, where=where)
 
 
-@partial(api.jit, static_argnames=('axis', 'keepdims', 'dtype'), inline=True)
+@api.jit(static_argnames=('axis', 'keepdims', 'dtype'), inline=True)
 def _reduce_bitwise_and(a: ArrayLike, axis: Axis = None, dtype: DTypeLike | None = None,
                         out: None = None, keepdims: bool = False,
                         initial: ArrayLike | None = None, where: ArrayLike | None = None) -> Array:
@@ -686,7 +684,7 @@ def _reduce_bitwise_and(a: ArrayLike, axis: Axis = None, dtype: DTypeLike | None
                     initial=initial, where_=where)
 
 
-@partial(api.jit, static_argnames=('axis', 'keepdims', 'dtype'), inline=True)
+@api.jit(static_argnames=('axis', 'keepdims', 'dtype'), inline=True)
 def _reduce_bitwise_or(a: ArrayLike, axis: Axis = None, dtype: DTypeLike | None = None,
                         out: None = None, keepdims: bool = False,
                         initial: ArrayLike | None = None, where: ArrayLike | None = None) -> Array:
@@ -695,7 +693,7 @@ def _reduce_bitwise_or(a: ArrayLike, axis: Axis = None, dtype: DTypeLike | None 
                     initial=initial, where_=where)
 
 
-@partial(api.jit, static_argnames=('axis', 'keepdims', 'dtype'), inline=True)
+@api.jit(static_argnames=('axis', 'keepdims', 'dtype'), inline=True)
 def _reduce_bitwise_xor(a: ArrayLike, axis: Axis = None, dtype: DTypeLike | None = None,
                         out: None = None, keepdims: bool = False,
                         initial: ArrayLike | None = None, where: ArrayLike | None = None) -> Array:
@@ -704,7 +702,7 @@ def _reduce_bitwise_xor(a: ArrayLike, axis: Axis = None, dtype: DTypeLike | None
                     initial=initial, where_=where)
 
 
-@partial(api.jit, static_argnames=('axis', 'keepdims', 'dtype'), inline=True)
+@api.jit(static_argnames=('axis', 'keepdims', 'dtype'), inline=True)
 def _reduce_logical_and(a: ArrayLike, axis: Axis = None, dtype: DTypeLike | None = None,
                         out: None = None, keepdims: bool = False,
                         initial: ArrayLike | None = None, where: ArrayLike | None = None) -> Array:
@@ -713,7 +711,7 @@ def _reduce_logical_and(a: ArrayLike, axis: Axis = None, dtype: DTypeLike | None
                     initial=initial, where_=where)
 
 
-@partial(api.jit, static_argnames=('axis', 'keepdims', 'dtype'), inline=True)
+@api.jit(static_argnames=('axis', 'keepdims', 'dtype'), inline=True)
 def _reduce_logical_or(a: ArrayLike, axis: Axis = None, dtype: DTypeLike | None = None,
                        out: None = None, keepdims: bool = False,
                        initial: ArrayLike | None = None, where: ArrayLike | None = None) -> Array:
@@ -722,7 +720,7 @@ def _reduce_logical_or(a: ArrayLike, axis: Axis = None, dtype: DTypeLike | None 
                     initial=initial, where_=where)
 
 
-@partial(api.jit, static_argnames=('axis', 'keepdims', 'dtype'), inline=True)
+@api.jit(static_argnames=('axis', 'keepdims', 'dtype'), inline=True)
 def _reduce_logical_xor(a: ArrayLike, axis: Axis = None, dtype: DTypeLike | None = None,
                         out: None = None, keepdims: bool = False,
                         initial: ArrayLike | None = None, where: ArrayLike | None = None) -> Array:
@@ -883,7 +881,7 @@ def _count(
     count = sum(_broadcast_to(where, np.shape(a)), axis, dtype=dtype, keepdims=keepdims)
   return count
 
-@partial(api.jit, static_argnames=('axis', 'dtype', 'keepdims', 'upcast_f16_for_computation'),
+@api.jit(static_argnames=('axis', 'dtype', 'keepdims', 'upcast_f16_for_computation'),
          inline=True)
 def _mean(a: ArrayLike, axis: Axis = None, dtype: DTypeLike | None = None,
           out: None = None, keepdims: bool = False, *,
@@ -983,7 +981,7 @@ def average(a: ArrayLike, axis: Axis = None, weights: ArrayLike | None = None,
   """
   return _average(a, _ensure_optional_axes(axis), weights, returned, keepdims)
 
-@partial(api.jit, static_argnames=('axis', 'returned', 'keepdims'), inline=True)
+@api.jit(static_argnames=('axis', 'returned', 'keepdims'), inline=True)
 def _average(a: ArrayLike, axis: Axis = None, weights: ArrayLike | None = None,
              returned: bool = False, keepdims: bool = False) -> Array | tuple[Array, Array]:
   axis = None if axis is None else canonicalize_axis_tuple(axis, np.ndim(a))
@@ -1023,7 +1021,8 @@ def _average(a: ArrayLike, axis: Axis = None, weights: ArrayLike | None = None,
 @export
 def var(a: ArrayLike, axis: Axis = None, dtype: DTypeLike | None = None,
         out: None = None, ddof: int = 0, keepdims: bool = False, *,
-        where: ArrayLike | None = None, correction: int | float | None = None) -> Array:
+        where: ArrayLike | None = None, mean: ArrayLike | None = None,
+        correction: int | float | None = None) -> Array:
   r"""Compute the variance along a given axis.
 
   JAX implementation of :func:`numpy.var`.
@@ -1039,6 +1038,11 @@ def var(a: ArrayLike, axis: Axis = None, dtype: DTypeLike | None = None,
       with size 1.
     where: optional, boolean array, default=None. The elements to be used in the
       variance. Array should be broadcast compatible to the input.
+    mean: optional, mean of the input array, computed along the given axis.
+      If provided, it will be used to compute the variance instead of
+      computing it from the input array. If specified, mean must be broadcast-compatible
+      with the input array. In the general case, this can be achieved by computing the mean with
+      ``keepdims=True`` and ``axis`` matching this function's ``axis`` argument.
     correction: int or float, default=None. Alternative name for ``ddof``.
       Both ddof and correction can't be provided simultaneously.
     out: Unused by JAX.
@@ -1102,13 +1106,13 @@ def var(a: ArrayLike, axis: Axis = None, dtype: DTypeLike | None = None,
   elif not isinstance(ddof, int) or ddof != 0:
     raise ValueError("ddof and correction can't be provided simultaneously.")
   a = ensure_arraylike("var", a)
-  return _var(a, _ensure_optional_axes(axis), dtype, out, correction, keepdims,
-              where=where)
+  return _var(a, axis=_ensure_optional_axes(axis), dtype=dtype, out=out, correction=correction, keepdims=keepdims,
+              where=where, a_mean=mean)
 
-@partial(api.jit, static_argnames=('axis', 'dtype', 'keepdims'))
-def _var(a: Array, axis: Axis = None, dtype: DTypeLike | None = None,
-         out: None = None, correction: int | float = 0, keepdims: bool = False, *,
-         where: ArrayLike | None = None) -> Array:
+@api.jit(static_argnames=('axis', 'dtype', 'keepdims'))
+def _var(a: Array, *, axis: Axis = None, dtype: DTypeLike | None = None,
+         out: None = None, correction: int | float = 0, keepdims: bool = False,
+         where: ArrayLike | None = None, a_mean: ArrayLike | None = None) -> Array:
   where = check_where("var", where)
   if dtype is not None:
     dtype = dtypes.check_and_canonicalize_user_dtype(dtype, "var")
@@ -1117,7 +1121,11 @@ def _var(a: Array, axis: Axis = None, dtype: DTypeLike | None = None,
 
   computation_dtype, dtype = _var_promote_types(a.dtype, dtype)
   a = lax.asarray(a).astype(computation_dtype)
-  a_mean = mean(a, axis, dtype=computation_dtype, keepdims=True, where=where)
+  if a_mean is None:
+    a_mean = mean(a, axis, dtype=computation_dtype, keepdims=True, where=where)
+  else:
+    a_mean = ensure_arraylike("var", a_mean).astype(computation_dtype)
+
   centered = lax.sub(a, a_mean)
   if dtypes.issubdtype(computation_dtype, np.complexfloating):
     centered = lax.real(lax.mul(centered, lax.conj(centered)))
@@ -1165,7 +1173,8 @@ def _var_promote_types(a_dtype: DTypeLike, dtype: DTypeLike | None) -> tuple[DTy
 @export
 def std(a: ArrayLike, axis: Axis = None, dtype: DTypeLike | None = None,
         out: None = None, ddof: int = 0, keepdims: bool = False, *,
-        where: ArrayLike | None = None, correction: int | float | None = None) -> Array:
+        where: ArrayLike | None = None, mean: ArrayLike | None = None,
+        correction: int | float | None = None) -> Array:
   r"""Compute the standard deviation along a given axis.
 
   JAX implementation of :func:`numpy.std`.
@@ -1182,6 +1191,11 @@ def std(a: ArrayLike, axis: Axis = None, dtype: DTypeLike | None = None,
       with size 1.
     where: optional, boolean array, default=None. The elements to be used in the
       standard deviation. Array should be broadcast compatible to the input.
+    mean: optional, mean of the input array, computed along the given axis.
+      If provided, it will be used to compute the standard deviation instead of
+      computing it from the input array. If specified, mean must be broadcast-compatible
+      with the input array. In the general case, this can be achieved by computing the mean with
+      ``keepdims=True`` and ``axis`` matching this function's ``axis`` argument.
     correction: int or float, default=None. Alternative name for ``ddof``.
       Both ddof and correction can't be provided simultaneously.
     out: Unused by JAX.
@@ -1240,13 +1254,13 @@ def std(a: ArrayLike, axis: Axis = None, dtype: DTypeLike | None = None,
   elif not isinstance(ddof, int) or ddof != 0:
     raise ValueError("ddof and correction can't be provided simultaneously.")
   a = ensure_arraylike("std", a)
-  return _std(a, _ensure_optional_axes(axis), dtype, out, correction, keepdims,
-              where=where)
+  return _std(a, axis=_ensure_optional_axes(axis), dtype=dtype, out=out, correction=correction, keepdims=keepdims,
+              where=where, mean=mean)
 
-@partial(api.jit, static_argnames=('axis', 'dtype', 'keepdims'))
-def _std(a: Array, axis: Axis = None, dtype: DTypeLike | None = None,
-         out: None = None, correction: int | float = 0, keepdims: bool = False, *,
-         where: ArrayLike | None = None) -> Array:
+@api.jit(static_argnames=('axis', 'dtype', 'keepdims'))
+def _std(a: Array, *, axis: Axis = None, dtype: DTypeLike | None = None,
+         out: None = None, correction: int | float = 0, keepdims: bool = False,
+         where: ArrayLike | None = None, mean: ArrayLike | None = None) -> Array:
   where = check_where("std", where)
   if dtype is not None:
     dtype = dtypes.check_and_canonicalize_user_dtype(dtype, "std")
@@ -1255,7 +1269,7 @@ def _std(a: Array, axis: Axis = None, dtype: DTypeLike | None = None,
   if out is not None:
     raise NotImplementedError("The 'out' argument to jnp.std is not supported.")
   return lax.sqrt(var(a, axis=axis, dtype=dtype, correction=correction,
-                      keepdims=keepdims, where=where))
+                      keepdims=keepdims, where=where, mean=mean))
 
 
 @export
@@ -1300,7 +1314,7 @@ def ptp(a: ArrayLike, axis: Axis = None, out: None = None,
   a = ensure_arraylike("ptp", a)
   return _ptp(a, _ensure_optional_axes(axis), out, keepdims)
 
-@partial(api.jit, static_argnames=('axis', 'keepdims'))
+@api.jit(static_argnames=('axis', 'keepdims'))
 def _ptp(a: Array, axis: Axis = None, out: None = None,
          keepdims: bool = False) -> Array:
   if out is not None:
@@ -1311,7 +1325,7 @@ def _ptp(a: Array, axis: Axis = None, out: None = None,
 
 
 @export
-@partial(api.jit, static_argnames=('axis', 'keepdims'))
+@api.jit(static_argnames=('axis', 'keepdims'))
 def count_nonzero(a: ArrayLike, axis: Axis = None,
                   keepdims: bool = False) -> Array:
   r"""Return the number of nonzero elements along a given axis.
@@ -1373,7 +1387,7 @@ def _nan_reduction(a: ArrayLike, name: str, jnp_reduction: Callable[..., Array],
 
 
 @export
-@partial(api.jit, static_argnames=('axis', 'keepdims'))
+@api.jit(static_argnames=('axis', 'keepdims'))
 def nanmin(a: ArrayLike, axis: Axis = None, out: None = None,
            keepdims: bool = False, initial: ArrayLike | None = None,
            where: ArrayLike | None = None) -> Array:
@@ -1456,7 +1470,7 @@ def nanmin(a: ArrayLike, axis: Axis = None, out: None = None,
 
 
 @export
-@partial(api.jit, static_argnames=('axis', 'keepdims'))
+@api.jit(static_argnames=('axis', 'keepdims'))
 def nanmax(a: ArrayLike, axis: Axis = None, out: None = None,
            keepdims: bool = False, initial: ArrayLike | None = None,
            where: ArrayLike | None = None) -> Array:
@@ -1539,7 +1553,7 @@ def nanmax(a: ArrayLike, axis: Axis = None, out: None = None,
 
 
 @export
-@partial(api.jit, static_argnames=('axis', 'dtype', 'keepdims'))
+@api.jit(static_argnames=('axis', 'dtype', 'keepdims'))
 def nansum(a: ArrayLike, axis: Axis = None, dtype: DTypeLike | None = None,
            out: None = None,
            keepdims: bool = False, initial: ArrayLike | None = None,
@@ -1625,7 +1639,7 @@ def nansum(a: ArrayLike, axis: Axis = None, dtype: DTypeLike | None = None,
 
 
 @export
-@partial(api.jit, static_argnames=('axis', 'dtype', 'keepdims'))
+@api.jit(static_argnames=('axis', 'dtype', 'keepdims'))
 def nanprod(a: ArrayLike, axis: Axis = None, dtype: DTypeLike | None = None, out: None = None,
             keepdims: bool = False, initial: ArrayLike | None = None,
             where: ArrayLike | None = None) -> Array:
@@ -1710,7 +1724,7 @@ def nanprod(a: ArrayLike, axis: Axis = None, dtype: DTypeLike | None = None, out
 
 
 @export
-@partial(api.jit, static_argnames=('axis', 'dtype', 'keepdims'))
+@api.jit(static_argnames=('axis', 'dtype', 'keepdims'))
 def nanmean(a: ArrayLike, axis: Axis = None, dtype: DTypeLike | None = None, out: None = None,
             keepdims: bool = False, where: ArrayLike | None = None) -> Array:
   r"""Return the mean of the array elements along a given axis, ignoring NaNs.
@@ -1802,10 +1816,10 @@ def nanmean(a: ArrayLike, axis: Axis = None, dtype: DTypeLike | None = None, out
 
 
 @export
-@partial(api.jit, static_argnames=('axis', 'dtype', 'keepdims'))
+@api.jit(static_argnames=('axis', 'dtype', 'keepdims'))
 def nanvar(a: ArrayLike, axis: Axis = None, dtype: DTypeLike | None = None, out: None = None,
            ddof: int = 0, keepdims: bool = False,
-           where: ArrayLike | None = None) -> Array:
+           where: ArrayLike | None = None, mean: ArrayLike | None = None) -> Array:
   r"""Compute the variance of array elements along a given axis, ignoring NaNs.
 
   JAX implementation of :func:`numpy.nanvar`.
@@ -1821,6 +1835,11 @@ def nanvar(a: ArrayLike, axis: Axis = None, dtype: DTypeLike | None = None, out:
       with size 1.
     where: optional, boolean array, default=None. The elements to be used in the
       variance. Array should be broadcast compatible to the input.
+    mean: optional, mean of the input array, computed along the given axis.
+      If provided, it will be used to compute the variance instead of
+      computing it from the input array. If specified, mean must be broadcast-compatible
+      with the input array. In the general case, this can be achieved by computing the mean with
+      ``keepdims=True`` and ``axis`` matching this function's ``axis`` argument.
     out: Unused by JAX.
 
   Returns:
@@ -1884,10 +1903,17 @@ def nanvar(a: ArrayLike, axis: Axis = None, dtype: DTypeLike | None = None, out:
     dtype = dtypes.check_and_canonicalize_user_dtype(dtype, "nanvar")
   if out is not None:
     raise NotImplementedError("The 'out' argument to jnp.nanvar is not supported.")
+  return _nanvar(a, axis=axis, dtype=dtype, out=out, ddof=ddof, keepdims=keepdims, where=where, a_mean=mean)
 
+def _nanvar(a: Array, *, axis: Axis = None, dtype: DTypeLike | None = None, out: None = None,
+           ddof: int = 0, keepdims: bool = False,
+           where: ArrayLike | None = None, a_mean: ArrayLike | None = None) -> Array:
   computation_dtype, dtype = _var_promote_types(a.dtype, dtype)
   a = lax.asarray(a).astype(computation_dtype)
-  a_mean = nanmean(a, axis, dtype=computation_dtype, keepdims=True, where=where)
+  if a_mean is None:
+    a_mean = nanmean(a, axis, dtype=computation_dtype, keepdims=True, where=where)
+  else:
+    a_mean = ensure_arraylike("nanvar", a_mean).astype(computation_dtype)
 
   centered = _where(lax._isnan(a), 0, lax.sub(a, a_mean))  # double-where trick for gradients.
   if dtypes.issubdtype(centered.dtype, np.complexfloating):
@@ -1907,10 +1933,10 @@ def nanvar(a: ArrayLike, axis: Axis = None, dtype: DTypeLike | None = None, out:
 
 
 @export
-@partial(api.jit, static_argnames=('axis', 'dtype', 'keepdims'))
+@api.jit(static_argnames=('axis', 'dtype', 'keepdims'))
 def nanstd(a: ArrayLike, axis: Axis = None, dtype: DTypeLike | None = None, out: None = None,
            ddof: int = 0, keepdims: bool = False,
-           where: ArrayLike | None = None) -> Array:
+           where: ArrayLike | None = None, mean: ArrayLike | None = None) -> Array:
   r"""Compute the standard deviation along a given axis, ignoring NaNs.
 
   JAX implementation of :func:`numpy.nanstd`.
@@ -1927,6 +1953,11 @@ def nanstd(a: ArrayLike, axis: Axis = None, dtype: DTypeLike | None = None, out:
       with size 1.
     where: optional, boolean array, default=None. The elements to be used in the
       standard deviation. Array should be broadcast compatible to the input.
+    mean: optional, mean of the input array, computed along the given axis.
+      If provided, it will be used to compute the standard deviation instead of
+      computing it from the input array. If specified, mean must be broadcast-compatible
+      with the input array. In the general case, this can be achieved by computing the mean with
+      ``keepdims=True`` and ``axis`` matching this function's ``axis`` argument.
     out: Unused by JAX.
 
   Returns:
@@ -1982,7 +2013,7 @@ def nanstd(a: ArrayLike, axis: Axis = None, dtype: DTypeLike | None = None, out:
   if out is not None:
     raise NotImplementedError("The 'out' argument to jnp.nanstd is not supported.")
   return lax.sqrt(nanvar(a, axis=axis, dtype=dtype, ddof=ddof,
-                         keepdims=keepdims, where=where))
+                         keepdims=keepdims, where=where, mean=mean))
 
 
 class CumulativeReduction(Protocol):
@@ -2036,7 +2067,7 @@ def _cumulative_reduction(
 
 
 @export
-@partial(api.jit, static_argnames=('axis', 'dtype'))
+@api.jit(static_argnames=('axis', 'dtype'))
 def cumsum(a: ArrayLike, axis: int | None = None,
            dtype: DTypeLike | None = None, out: None = None) -> Array:
   """Cumulative sum of elements along an axis.
@@ -2073,7 +2104,7 @@ def cumsum(a: ArrayLike, axis: int | None = None,
 
 
 @export
-@partial(api.jit, static_argnames=('axis', 'dtype'))
+@api.jit(static_argnames=('axis', 'dtype'))
 def cumprod(a: ArrayLike, axis: int | None = None,
             dtype: DTypeLike | None = None, out: None = None) -> Array:
   """Cumulative product of elements along an axis.
@@ -2109,7 +2140,7 @@ def cumprod(a: ArrayLike, axis: int | None = None,
 
 
 @export
-@partial(api.jit, static_argnames=('axis', 'dtype'))
+@api.jit(static_argnames=('axis', 'dtype'))
 def nancumsum(a: ArrayLike, axis: int | None = None,
               dtype: DTypeLike | None = None, out: None = None) -> Array:
   """Cumulative sum of elements along an axis, ignoring NaN values.
@@ -2159,7 +2190,7 @@ def nancumsum(a: ArrayLike, axis: int | None = None,
 
 
 @export
-@partial(api.jit, static_argnames=('axis', 'dtype'))
+@api.jit(static_argnames=('axis', 'dtype'))
 def nancumprod(a: ArrayLike, axis: int | None = None,
                dtype: DTypeLike | None = None, out: None = None) -> Array:
   """Cumulative product of elements along an axis, ignoring NaN values.
@@ -2207,7 +2238,7 @@ def nancumprod(a: ArrayLike, axis: int | None = None,
                                fill_nan=True, fill_value=1)
 
 
-@partial(api.jit, static_argnames=('axis', 'dtype'))
+@api.jit(static_argnames=('axis', 'dtype'))
 def _cumsum_with_promotion(a: ArrayLike, axis: int | None = None,
            dtype: DTypeLike | None = None, out: None = None) -> Array:
   """Utility function to compute cumsum with integer promotion."""
@@ -2340,12 +2371,11 @@ def cumulative_prod(
 
 # Quantiles
 
-# TODO(jakevdp): interpolation argument deprecated 2024-05-16
 @export
-@partial(api.jit, static_argnames=('axis', 'overwrite_input', 'interpolation', 'keepdims', 'method'))
+@api.jit(static_argnames=('axis', 'overwrite_input', 'keepdims', 'method'))
 def quantile(a: ArrayLike, q: ArrayLike, axis: int | tuple[int, ...] | None = None,
              out: None = None, overwrite_input: bool = False, method: str = "linear",
-             keepdims: bool = False, *, interpolation: DeprecatedArg = DeprecatedArg()) -> Array:
+             keepdims: bool = False) -> Array:
   """Compute the quantile of the data along the specified axis.
 
   JAX implementation of :func:`numpy.quantile`.
@@ -2387,18 +2417,14 @@ def quantile(a: ArrayLike, q: ArrayLike, axis: int | tuple[int, ...] | None = No
   if overwrite_input or out is not None:
     raise ValueError("jax.numpy.quantile does not support overwrite_input=True "
                      "or out != None")
-  # TODO(jakevdp): remove the interpolation argument in JAX v0.9.0
-  if not isinstance(interpolation, DeprecatedArg):
-    raise TypeError("quantile() argument interpolation was removed in JAX"
-                    " v0.8.0. Use method instead.")
   return _quantile(lax.asarray(a), lax.asarray(q), axis, method, keepdims, False)
 
-# TODO(jakevdp): interpolation argument deprecated 2024-05-16
+
 @export
-@partial(api.jit, static_argnames=('axis', 'overwrite_input', 'interpolation', 'keepdims', 'method'))
+@api.jit(static_argnames=('axis', 'overwrite_input', 'keepdims', 'method'))
 def nanquantile(a: ArrayLike, q: ArrayLike, axis: int | tuple[int, ...] | None = None,
                 out: None = None, overwrite_input: bool = False, method: str = "linear",
-                keepdims: bool = False, *, interpolation: DeprecatedArg = DeprecatedArg()) -> Array:
+                keepdims: bool = False) -> Array:
   """Compute the quantile of the data along the specified axis, ignoring NaNs.
 
   JAX implementation of :func:`numpy.nanquantile`.
@@ -2442,10 +2468,6 @@ def nanquantile(a: ArrayLike, q: ArrayLike, axis: int | tuple[int, ...] | None =
     msg = ("jax.numpy.nanquantile does not support overwrite_input=True or "
            "out != None")
     raise ValueError(msg)
-  # TODO(jakevdp): remove the interpolation argument in JAX v0.9.0
-  if not isinstance(interpolation, DeprecatedArg):
-    raise TypeError("nanquantile() argument interpolation was removed in JAX"
-                    " v0.8.0. Use method instead.")
   return _quantile(lax.asarray(a), lax.asarray(q), axis, method, keepdims, True)
 
 def _quantile(a: Array, q: Array, axis: int | tuple[int, ...] | None,
@@ -2572,13 +2594,12 @@ def _quantile(a: Array, q: Array, axis: int | tuple[int, ...] | None,
   return lax.convert_element_type(result, a.dtype)
 
 
-# TODO(jakevdp): interpolation argument deprecated 2024-05-16
 @export
-@partial(api.jit, static_argnames=('axis', 'overwrite_input', 'interpolation', 'keepdims', 'method'))
+@api.jit(static_argnames=('axis', 'overwrite_input', 'keepdims', 'method'))
 def percentile(a: ArrayLike, q: ArrayLike,
                axis: int | tuple[int, ...] | None = None,
                out: None = None, overwrite_input: bool = False, method: str = "linear",
-               keepdims: bool = False, *, interpolation: DeprecatedArg = DeprecatedArg()) -> Array:
+               keepdims: bool = False) -> Array:
   """Compute the percentile of the data along the specified axis.
 
   JAX implementation of :func:`numpy.percentile`.
@@ -2618,21 +2639,16 @@ def percentile(a: ArrayLike, q: ArrayLike,
   """
   a, q = ensure_arraylike("percentile", a, q)
   q, = promote_dtypes_inexact(q)
-  # TODO(jakevdp): remove the interpolation argument in JAX v0.9.0
-  if not isinstance(interpolation, DeprecatedArg):
-    raise TypeError("percentile() argument interpolation was removed in JAX"
-                    " v0.8.0. Use method instead.")
   return quantile(a, q / 100, axis=axis, out=out, overwrite_input=overwrite_input,
                   method=method, keepdims=keepdims)
 
 
-# TODO(jakevdp): interpolation argument deprecated 2024-05-16
 @export
-@partial(api.jit, static_argnames=('axis', 'overwrite_input', 'interpolation', 'keepdims', 'method'))
+@api.jit(static_argnames=('axis', 'overwrite_input', 'keepdims', 'method'))
 def nanpercentile(a: ArrayLike, q: ArrayLike,
                   axis: int | tuple[int, ...] | None = None,
                   out: None = None, overwrite_input: bool = False, method: str = "linear",
-                  keepdims: bool = False, *, interpolation: DeprecatedArg = DeprecatedArg()) -> Array:
+                  keepdims: bool = False) -> Array:
   """Compute the percentile of the data along the specified axis, ignoring NaN values.
 
   JAX implementation of :func:`numpy.nanpercentile`.
@@ -2675,16 +2691,12 @@ def nanpercentile(a: ArrayLike, q: ArrayLike,
   a, q = ensure_arraylike("nanpercentile", a, q)
   q, = promote_dtypes_inexact(q)
   q = q / 100
-  # TODO(jakevdp): remove the interpolation argument in JAX v0.9.0
-  if not isinstance(interpolation, DeprecatedArg):
-    raise TypeError("nanpercentile() argument interpolation was removed in JAX"
-                    " v0.8.0. Use method instead.")
   return nanquantile(a, q, axis=axis, out=out, overwrite_input=overwrite_input,
                      method=method, keepdims=keepdims)
 
 
 @export
-@partial(api.jit, static_argnames=('axis', 'overwrite_input', 'keepdims'))
+@api.jit(static_argnames=('axis', 'overwrite_input', 'keepdims'))
 def median(a: ArrayLike, axis: int | tuple[int, ...] | None = None,
            out: None = None, overwrite_input: bool = False,
            keepdims: bool = False) -> Array:
@@ -2736,7 +2748,7 @@ def median(a: ArrayLike, axis: int | tuple[int, ...] | None = None,
 
 
 @export
-@partial(api.jit, static_argnames=('axis', 'overwrite_input', 'keepdims'))
+@api.jit(static_argnames=('axis', 'overwrite_input', 'keepdims'))
 def nanmedian(a: ArrayLike, axis: int | tuple[int, ...] | None = None,
               out: None = None, overwrite_input: bool = False,
               keepdims: bool = False) -> Array:

@@ -446,8 +446,13 @@ jax.scipy.stats.pareto
 .. autosummary::
   :toctree: _autosummary
 
+   logcdf
    logpdf
+   logsf
+   cdf
    pdf
+   ppf
+   sf
 
 jax.scipy.stats.poisson
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -458,6 +463,7 @@ jax.scipy.stats.poisson
    logpmf
    pmf
    cdf
+   entropy
 
 jax.scipy.stats.t
 ~~~~~~~~~~~~~~~~~
