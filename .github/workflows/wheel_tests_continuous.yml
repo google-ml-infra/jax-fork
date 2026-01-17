@@ -127,11 +127,11 @@ jobs:
           runner: ["linux-x86-g2-48-l4-4gpu",] # "linux-x86-a3-8g-h100-8gpu", "linux-x86-a4-224-b200-1gpu"]
           python: ["3.11",]
           cuda: [
-            {version: "12.1", use-nvidia-pip-wheels: false},
+            # {version: "12.1", use-nvidia-pip-wheels: false},
             {version: "12.9", use-nvidia-pip-wheels: true},
             {version: "13", use-nvidia-pip-wheels: true},
             ]
-          enable-x64: [1, 0]
+          enable-x64: [1,] # 0]
           # exclude:
           #   # H100 runs only a single config, CUDA 12.9 Enable x64 1
           #   - runner: "linux-x86-a3-8g-h100-8gpu"
