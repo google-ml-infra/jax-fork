@@ -16,6 +16,6 @@ jobs:
     name: Bisect Test Workflow
 
   bisect-wheel-test-continuous:
-    if: ${{ inputs.workflow-to-debug == 'wheel_test_continous.yml' }}
+    if: ${{ inputs.workflow-to-debug == 'wheel_tests_continuous.yml' }}
     uses: ./.github/workflows/wheel_tests_continuous.yml
     name: Bisect Wheel Tests
