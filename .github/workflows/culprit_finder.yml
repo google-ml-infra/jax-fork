@@ -17,9 +17,6 @@ on:
         required: false
         default: '{"TEST": "my-cli-test"}'
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
-
 permissions: {}
 
 jobs:
