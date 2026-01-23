@@ -31,6 +31,13 @@ on:
   schedule:
     - cron: "0 0 * * *" # Run once per day
   workflow_dispatch: # allows triggering the workflow run manually
+  workflow_call:
+    inputs:
+      json_vars:
+        type: string
+        description: 'A JSON string of key-value pairs that will be passed as environment variables to the workflow. (e.g., {"NAME": "test", "VERSION": "1.2.3"})'
+        required: false
+        default: ''
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
