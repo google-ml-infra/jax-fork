@@ -9,12 +9,13 @@ on:
         default: ""
         required: true
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
-
-
 jobs:
   bisect-test-workflow:
     if: ${{ inputs.workflow-to-debug == 'hello_world.yml' }}
     uses: ./.github/workflows/hello_world.yml
     name: Bisect Test Workflow
+
+  bisect-wheel-test-continuous:
+    if: ${{ inputs.workflow-to-debug == 'wheel_test_continous.yml' }}
+    uses: ./.github/workflows/wheel_tests_continuous.yml
+    name: Bisect Wheel Tests
