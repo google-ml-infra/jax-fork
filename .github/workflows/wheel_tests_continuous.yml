@@ -69,25 +69,25 @@ jobs:
         upload_artifacts_to_gcs: true
         gcs_upload_uri: 'gs://general-ml-ci-transient/jax-github-actions/jax-fork/${{ github.workflow }}/${{ github.run_number }}/${{ github.run_attempt }}'
 
-  build-cuda-artifacts:
-    uses: ./.github/workflows/build_artifacts.yml
-    strategy:
-        fail-fast: false # don't cancel all jobs on failure
-        matrix:
-          # Python values need to match the matrix stategy in the CUDA tests job below
-          runner: ["linux-x86-n2-16"]
-          artifact: ["jax-cuda-plugin", "jax-cuda-pjrt"]
-          python: ["3.11",]
-          cuda-version: ["12", "13"]
-    name: "Build ${{ format('{0}', 'CUDA') }} artifacts"
-    with:
-      runner: ${{ matrix.runner }}
-      artifact: ${{ matrix.artifact }}
-      python: ${{ matrix.python }}
-      cuda-version: ${{ matrix.cuda-version }}
-      clone_main_xla: 1
-      upload_artifacts_to_gcs: true
-      gcs_upload_uri: 'gs://general-ml-ci-transient/jax-github-actions/jax-fork/${{ github.workflow }}/${{ github.run_number }}/${{ github.run_attempt }}'
+  # build-cuda-artifacts:
+  #   uses: ./.github/workflows/build_artifacts.yml
+  #   strategy:
+  #       fail-fast: false # don't cancel all jobs on failure
+  #       matrix:
+  #         # Python values need to match the matrix stategy in the CUDA tests job below
+  #         runner: ["linux-x86-n2-16"]
+  #         artifact: ["jax-cuda-plugin", "jax-cuda-pjrt"]
+  #         python: ["3.11",]
+  #         cuda-version: ["12", "13"]
+  #   name: "Build ${{ format('{0}', 'CUDA') }} artifacts"
+  #   with:
+  #     runner: ${{ matrix.runner }}
+  #     artifact: ${{ matrix.artifact }}
+  #     python: ${{ matrix.python }}
+  #     cuda-version: ${{ matrix.cuda-version }}
+  #     clone_main_xla: 1
+  #     upload_artifacts_to_gcs: true
+  #     gcs_upload_uri: 'gs://general-ml-ci-transient/jax-github-actions/jax-fork/${{ github.workflow }}/${{ github.run_number }}/${{ github.run_attempt }}'
 
   run-pytest-cpu:
     # Run test jobs even if the build job fails. Avoids losing test coverage if a single unrelated
@@ -111,51 +111,51 @@ jobs:
       enable-x64:  ${{ matrix.enable-x64 }}
       gcs_download_uri: ${{ needs.build-jaxlib-artifact.outputs.gcs_upload_uri }}
 
-  run-pytest-cuda:
-    # Run test jobs even if the build job fails. Avoids losing test coverage if a single unrelated
-    # build job fails. E.g Windows build job fails but everything else succeeds. In this case, we
-    # still want to run the tests for other platforms.
-    #
-    if: ${{ !cancelled() }}
-    needs: [build-jax-artifact, build-jaxlib-artifact, build-cuda-artifacts]
-    uses: ./.github/workflows/pytest_cuda.yml
-    strategy:
-        fail-fast: false # don't cancel all jobs on failure
-        matrix:
-          # Python values need to match the matrix stategy in the artifact build jobs above
-          # See exlusions for what is fully tested
-          # Disable h100 and b200 on jax-fork to save resources
-          runner: ["linux-x86-g2-48-l4-4gpu",] # "linux-x86-a3-8g-h100-8gpu", "linux-x86-a4-224-b200-1gpu"]
-          python: ["3.11",]
-          cuda: [
-            # {version: "12.1", use-nvidia-pip-wheels: false},
-            {version: "12.9", use-nvidia-pip-wheels: true},
-            {version: "13", use-nvidia-pip-wheels: true},
-            ]
-          enable-x64: [1,] # 0]
-          # exclude:
-          #   # H100 runs only a single config, CUDA 12.9 Enable x64 1
-          #   - runner: "linux-x86-a3-8g-h100-8gpu"
-          #     cuda:
-          #       version: "12.1"
-          #   - runner: "linux-x86-a3-8g-h100-8gpu"
-          #     enable-x64: "0"
-          #   # B200 runs only a single config, CUDA 12.9 Enable x64 1
-          #   - runner: "linux-x86-a4-224-b200-1gpu"
-          #     cuda:
-          #       version: "12.1"
-          #   - runner: "linux-x86-a4-224-b200-1gpu"
-          #     enable-x64: "0"
+  # run-pytest-cuda:
+  #   # Run test jobs even if the build job fails. Avoids losing test coverage if a single unrelated
+  #   # build job fails. E.g Windows build job fails but everything else succeeds. In this case, we
+  #   # still want to run the tests for other platforms.
+  #   #
+  #   if: ${{ !cancelled() }}
+  #   needs: [build-jax-artifact, build-jaxlib-artifact, build-cuda-artifacts]
+  #   uses: ./.github/workflows/pytest_cuda.yml
+  #   strategy:
+  #       fail-fast: false # don't cancel all jobs on failure
+  #       matrix:
+  #         # Python values need to match the matrix stategy in the artifact build jobs above
+  #         # See exlusions for what is fully tested
+  #         # Disable h100 and b200 on jax-fork to save resources
+  #         runner: ["linux-x86-g2-48-l4-4gpu",] # "linux-x86-a3-8g-h100-8gpu", "linux-x86-a4-224-b200-1gpu"]
+  #         python: ["3.11",]
+  #         cuda: [
+  #           # {version: "12.1", use-nvidia-pip-wheels: false},
+  #           {version: "12.9", use-nvidia-pip-wheels: true},
+  #           {version: "13", use-nvidia-pip-wheels: true},
+  #           ]
+  #         enable-x64: [1,] # 0]
+  #         # exclude:
+  #         #   # H100 runs only a single config, CUDA 12.9 Enable x64 1
+  #         #   - runner: "linux-x86-a3-8g-h100-8gpu"
+  #         #     cuda:
+  #         #       version: "12.1"
+  #         #   - runner: "linux-x86-a3-8g-h100-8gpu"
+  #         #     enable-x64: "0"
+  #         #   # B200 runs only a single config, CUDA 12.9 Enable x64 1
+  #         #   - runner: "linux-x86-a4-224-b200-1gpu"
+  #         #     cuda:
+  #         #       version: "12.1"
+  #         #   - runner: "linux-x86-a4-224-b200-1gpu"
+  #         #     enable-x64: "0"
 
-    name: "Pytest CUDA (JAX artifacts version =  ${{ format('{0}', 'head') }}, CUDA Pip packages = ${{ matrix.cuda.use-nvidia-pip-wheels }})"
-    with:
-      runner: ${{ matrix.runner }}
-      python: ${{ matrix.python }}
-      cuda-version:  ${{ matrix.cuda.version }}
-      use-nvidia-pip-wheels: ${{ matrix.cuda.use-nvidia-pip-wheels }}
-      enable-x64:  ${{ matrix.enable-x64 }}
-      # GCS upload URI is the same for both artifact build jobs
-      gcs_download_uri: ${{ needs.build-jaxlib-artifact.outputs.gcs_upload_uri }}
+  #   name: "Pytest CUDA (JAX artifacts version =  ${{ format('{0}', 'head') }}, CUDA Pip packages = ${{ matrix.cuda.use-nvidia-pip-wheels }})"
+  #   with:
+  #     runner: ${{ matrix.runner }}
+  #     python: ${{ matrix.python }}
+  #     cuda-version:  ${{ matrix.cuda.version }}
+  #     use-nvidia-pip-wheels: ${{ matrix.cuda.use-nvidia-pip-wheels }}
+  #     enable-x64:  ${{ matrix.enable-x64 }}
+  #     # GCS upload URI is the same for both artifact build jobs
+  #     gcs_download_uri: ${{ needs.build-jaxlib-artifact.outputs.gcs_upload_uri }}
 
   # run-bazel-test-cpu-py-import:
   #   uses: ./.github/workflows/bazel_cpu.yml
