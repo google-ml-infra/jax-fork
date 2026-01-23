@@ -30,3 +30,9 @@ jobs:
     name: Bisect Hello World
     with:
       json_vars: ${{ inputs.json_vars }}
+  
+  bisect-wheel-continuous:
+    if: ${{ inputs.workflow-to-debug == 'wheel_tests_continuous.yml' }}
+    uses: ./.github/workflows/wheel_tests_continuous.yml
+    
+    name: Bisect Wheel Test Continuous
