@@ -220,7 +220,7 @@ def iota_tensor(m, n, dtype, layout=mgpu.WGMMA_LAYOUT):
 
 class TestCase(parameterized.TestCase):
 
-  def setUp(self):
+  def setUp(self, *, artificial_shared_memory_limit=jtu._SMEM_SIZE_BOUND_FOR_TESTS):
     if not HAS_MOSAIC_GPU:
       self.skipTest("jaxlib built without Mosaic GPU")
     if (not jtu.test_device_matches(["cuda"]) or
@@ -233,6 +233,7 @@ class TestCase(parameterized.TestCase):
     self.enter_context(config.traceback_filtering("off"))
     self.enter_context(self.context)
     self.enter_context(ir.Location.unknown())
+    self.enter_context(core.artificial_shared_memory_limit(artificial_shared_memory_limit))
 
   @contextlib.contextmanager
   def capture_stdout(self):
@@ -250,7 +251,8 @@ class Sm90ATestCase(TestCase, jtu.CudaArchSpecificTest):
 
   def setUp(self):
       self.skip_unless_sm90a()
-      super().setUp()
+      # No artificially lowered limit for arch-specific tests
+      super().setUp(artificial_shared_memory_limit=None)
 
 
 class TestUtilTest(TestCase):
@@ -598,6 +600,33 @@ class WGMMALayoutTest(TestCase):
     np.testing.assert_array_equal(iota, expected)
 
   @parameterized.product(
+      dtype=[jnp.float32, jnp.float16],
+      swizzle=(32, 64, 128),
+  )
+  def test_store_tiled_with_tiling_rank(self, dtype, swizzle):
+    mlir_dtype = utils.dtype_to_ir_type(dtype)
+    if bytewidth(mlir_dtype) > 2 and swizzle == 32:
+      self.skipTest("Not implemented")
+    col_tiling = swizzle // bytewidth(mlir_dtype)
+    m = 64
+    n = col_tiling * 3
+    tiling = (64, col_tiling)
+    def kernel(ctx, out, smem):
+      del ctx
+      assert smem.type.rank == 5
+      iota_tensor(2 * m, n, dtype).reshape((2, m, n)).store_tiled(smem, swizzle=swizzle, tiling_rank=2)
+      copy(smem, out, swizzle=swizzle)
+    expected = (
+        np.arange(2 * m * n, dtype=dtype)
+        .reshape(2, m // tiling[0], tiling[0], n // tiling[1], tiling[1])
+        .transpose(0, 1, 3, 2, 4)
+    )
+    iota = mgpu.as_gpu_kernel(
+        kernel, (1, 1, 1), (128, 1, 1), (), expected, expected
+    )()
+    np.testing.assert_array_equal(iota, expected)
+
+  @parameterized.product(
       jax_dtype_to=(
           jnp.int8, jnp.int16, jnp.int32, jnp.bfloat16, jnp.float8_e4m3fn,
       ),
@@ -633,56 +662,6 @@ class WGMMALayoutTest(TestCase):
     f = mgpu.as_gpu_kernel(kernel, (1, 1, 1), (128, 1, 1), x, y, (x, y))
     np.testing.assert_array_equal(f(x), y)
 
-  @parameterized.parameters(
-      (jnp.float32, jnp.float8_e4m3fn),
-      (jnp.bfloat16, jnp.float8_e4m3fn)
-  )
-  def test_f8_conversions(self, jax_dtype_from, jax_dtype_to):
-    mlir_dtype_to = utils.dtype_to_ir_type(jax_dtype_to)
-    def kernel(ctx, inp, out, smem):
-      del ctx
-      smem_from, smem_to = smem
-      copy(inp, smem_from, swizzle=128)
-      t = mgpu.FragmentedArray.load_tiled(
-          smem_from,
-          swizzle=128,
-          is_signed=None,
-          layout=fa.WGMMA_LAYOUT,
-      )
-      t = t.astype(mlir_dtype_to, is_signed=utils.is_signed(jax_dtype_to))
-      t.store_tiled(smem_to, swizzle=128)
-      copy(smem_to, out, swizzle=128)
-
-    # These generative shenanigans are to ensure that we don't generate values
-    # that are too large for the target type. That is because the saturation
-    # behavior of the conversion is different between XLA and Mosaic GPU here
-    # (to use the NVIDIA internal, we allow Mosaic GPU to use the .satfinite
-    # modifier, which saturates to the largest finite value---while XLA would
-    # give us NaNs in this case).
-    max_finite_val = 0b111_1110
-
-    expected = jax.lax.bitcast_convert_type(
-        jax.random.randint(
-            jax.random.key(42),
-            (1, 1, 64, 128),
-            -max_finite_val,
-            max_finite_val + 1,
-            dtype=jnp.uint8,
-        ),
-        jax_dtype_to,
-    )
-    x = expected.astype(jax_dtype_from)
-
-    res = mgpu.as_gpu_kernel(
-        kernel,
-        (1, 1, 1),
-        (128, 1, 1),
-        x,
-        expected,
-        (x, expected),
-    )(x)
-    np.testing.assert_array_equal(res, expected)
-
   @parameterized.product(
       jax_dtype_from_to=(
           (jnp.int8, jnp.bfloat16),
@@ -699,13 +678,19 @@ class WGMMALayoutTest(TestCase):
           ("WGMMA_LAYOUT_UPCAST_4X", "WGMMA_LAYOUT_UPCAST_4X"),
           ("WGMMA_LAYOUT_UPCAST_4X", "WGMMA_LAYOUT_UPCAST_2X"),
           ("WGMMA_LAYOUT_UPCAST_4X", "WGMMA_LAYOUT"),
+          ("TMEM_NATIVE_LAYOUT_8", "TMEM_NATIVE_LAYOUT_8"),
       ),
   )
-  @jtu.skip_if_mosaic_gpu_exceeds_shared_memory(device_patterns="RTX PRO 6000 Blackwell")
   def test_optimized_conversion(self, jax_dtype_from_to, layout_descs):
     layout_desc_from, layout_desc_to = layout_descs
-    layout_from: fa.TiledLayout = getattr(fa, layout_desc_from)
-    layout_to: fa.TiledLayout = getattr(fa, layout_desc_to)
+    if layout_desc_from == "TMEM_NATIVE_LAYOUT_8":
+      layout_from = fa.tmem_native_layout(8)
+    else:
+      layout_from: fa.TiledLayout = getattr(fa, layout_desc_from)
+    if layout_desc_to == "TMEM_NATIVE_LAYOUT_8":
+      layout_to = fa.tmem_native_layout(8)
+    else:
+      layout_to: fa.TiledLayout = getattr(fa, layout_desc_to)
     jax_dtype_from, jax_dtype_to = jax_dtype_from_to
     mlir_dtype_from = utils.dtype_to_ir_type(jax_dtype_from)
     mlir_dtype_to = utils.dtype_to_ir_type(jax_dtype_to)
@@ -1214,13 +1199,15 @@ class WGMMATest(TestCase):
     np.testing.assert_allclose(z, ref, rtol=1e-3, atol=0)
 
 
-class TCGen05Test(TestCase):
+class TCGen05Test(TestCase, jtu.CudaArchSpecificTest):
 
   def setUp(self):
-    super().setUp()
-    capabilities = ("10.0", "10.1")
-    if not any(jtu.is_cuda_compute_capability_equal(sm) for sm in capabilities):
-      self.skipTest("Only works on GPU with capability sm_100a or sm_101a")
+    self.skip_unless_tcgen05()
+    if jtu.is_cuda_compute_capability_equal("10.3"):
+      # nvbug/5809460: spurious LLVM/MLIR errors with tcgen05+sm_103a
+      self.skipTest("Mosaic GPU tcgen05 tests do not pass on sm_103a")
+    # No artificially lowered limit for arch-specific tests
+    super().setUp(artificial_shared_memory_limit=None)
 
   @parameterized.product(
       jax_dtype_packing=[(jnp.float32, 1), (jnp.float16, 1), (jnp.float16, 2), (jnp.float8_e5m2, 4)],
@@ -3442,6 +3429,64 @@ class FragmentedArrayTest(TestCase):
     rhs = 0 if rhs_is_literal else iota + 1
     np.testing.assert_array_equal(result, op(iota, rhs).astype(jnp.int8))
 
+  @parameterized.product(
+      # TODO(apaszke): Add float16
+      jax_dtype_from=(jnp.float32, jnp.bfloat16, jnp.float8_e5m2, jnp.float8_e4m3fn, jnp.float8_e8m0fnu),
+      jax_dtype_to=(jnp.float32, jnp.bfloat16, jnp.float8_e5m2, jnp.float8_e4m3fn, jnp.float8_e8m0fnu),
+      vec_len=(1, 2, 4, 8),
+  )
+  def test_conversion_f8_(self, jax_dtype_from, jax_dtype_to, vec_len):
+    from_bitwidth = jnp.finfo(jax_dtype_from).bits
+    to_bitwidth = jnp.finfo(jax_dtype_to).bits
+    if from_bitwidth > 8 and to_bitwidth > 8:
+      self.skipTest("At least one of the types should be 8-bit")
+    if jax_dtype_from == jax_dtype_to:
+      self.skipTest("Identical types, so nothing to test")
+    if jnp.float8_e8m0fnu in {
+        jax_dtype_from,
+        jax_dtype_to,
+    } and not jtu.is_cuda_compute_capability_at_least("10.0"):
+      self.skipTest("f8e8m0fnu not supported on pre-Blackwell GPUs")
+    if from_bitwidth == to_bitwidth == 8 and {jax_dtype_from, jax_dtype_to} != {
+        jnp.float8_e4m3fn, jnp.float8_e5m2,
+    }:
+      self.skipTest("An unimplemented f8 <-> f8 conversion")
+    unimplemented = {
+        frozenset((jnp.float8_e4m3fn, jnp.bfloat16)),
+        frozenset((jnp.float8_e5m2, jnp.bfloat16)),
+        frozenset((jnp.float8_e8m0fnu, jnp.float16)),
+    }
+    if {jax_dtype_from, jax_dtype_to} in unimplemented:
+      self.skipTest("Unimplemented")
+    layout = fa.tmem_native_layout(vec_len)
+    mlir_dtype_to = utils.dtype_to_ir_type(jax_dtype_to)
+    m = 128
+    n = 256
+    def kernel(ctx, inp, out, smem):
+      del ctx, smem
+      t = mgpu.FragmentedArray.load_untiled(inp, layout=layout, optimized=False)
+      t = t.astype(mlir_dtype_to)
+      t.store_untiled(out, optimized=False)
+
+    # For now we only sample the values representable in the narrow type,
+    # because XLA and Mosaic disagree about the rounding.
+    narrow_type = jax_dtype_from if from_bitwidth < to_bitwidth else jax_dtype_to
+    int_sample_dtype = getattr(jnp, "int" + str(jnp.finfo(narrow_type).bits))
+    sample_iinfo = jnp.iinfo(int_sample_dtype)
+    bits = self.prng.integers(
+        low=sample_iinfo.min, high=sample_iinfo.max, size=(m, n), dtype=np.int32
+    ).astype(int_sample_dtype)
+    values = jax.lax.bitcast_convert_type(bits, narrow_type)
+    # A bunch of conversions are only supported for finite values.
+    values = values.at[jnp.isinf(values)].set(jnp.finfo(narrow_type).max)
+    values = values.astype(jax_dtype_from)
+
+    expected = values.astype(jax_dtype_to)
+    res = mgpu.as_gpu_kernel(
+        kernel, (1, 1, 1), (128, 1, 1), values, expected, ()
+    )(values)
+    self.assertTrue(np.array_equal(res, expected, equal_nan=True))
+
   def test_foreach_wgmma_row_array(self):
     def kernel(ctx, out, smem):
       del ctx, smem
@@ -3504,20 +3549,23 @@ class FragmentedArrayTest(TestCase):
     np.testing.assert_array_equal(result, expected)
 
   @parameterized.product(
-      op=[operator.and_, operator.or_, operator.xor],
-      dtype=[jnp.uint32],
+      op=[operator.and_, operator.or_, operator.xor, operator.lshift, operator.rshift],
+      dtype=[jnp.uint32, jnp.uint8],
   )
   def test_bitwise(self, op, dtype, m=64, n=8):
+    is_shift = op in {operator.lshift, operator.rshift}
     def kernel(ctx, dst, _):
       iota = iota_tensor(m, n, dtype)
-      op(iota, iota + 1).store_untiled(dst, optimized=False)
+      rhs = iota & 0xf if is_shift else iota << 2
+      op(iota, rhs).store_untiled(dst, optimized=False)
 
     out_shape = jax.ShapeDtypeStruct((m, n), dtype)
     result = mgpu.as_gpu_kernel(
         kernel, (1, 1, 1), (128, 1, 1), (), out_shape, ()
     )()
     iota = np.arange(m * n, dtype=dtype).reshape(m, n)
-    np.testing.assert_array_equal(result, op(iota, iota + 1))
+    rhs = iota & 0xf if is_shift else iota << 2
+    np.testing.assert_array_equal(result, op(iota, rhs))
 
   @parameterized.product(
       ops=(
@@ -3775,44 +3823,44 @@ class FragmentedArrayTest(TestCase):
   )
   @jtu.thread_unsafe_test()
   def test_max(self, vec_size, dtype):
-      def kernel(ctx, src, src2, dst, _):
-        is_signed = utils.is_signed(dtype)
-        src = fa.FragmentedArray.load_strided(src, vec_size=vec_size, is_signed=is_signed)
-        src2 = fa.FragmentedArray.load_strided(src2, vec_size=vec_size, is_signed=is_signed)
-        src.max(src2).store_untiled(dst)
-      x = self.prng.uniform(-1, 1, (12 * 128,)).astype(dtype)
-      y = self.prng.uniform(-1, 1, (12 * 128,)).astype(dtype)
-      f = mgpu.as_gpu_kernel(
+    def kernel(ctx, src, src2, dst, _):
+      is_signed = utils.is_signed(dtype)
+      src = fa.FragmentedArray.load_strided(src, vec_size=vec_size, is_signed=is_signed)
+      src2 = fa.FragmentedArray.load_strided(src2, vec_size=vec_size, is_signed=is_signed)
+      src.max(src2).store_untiled(dst)
+    x = self.prng.uniform(-1, 1, (12 * 128,)).astype(dtype)
+    y = self.prng.uniform(-1, 1, (12 * 128,)).astype(dtype)
+    f = mgpu.as_gpu_kernel(
           kernel, (1, 1, 1), (128, 1, 1), (x, y), x, ()
       )
-      with jtu.set_env(MOSAIC_GPU_DUMP_PTX="1"), self.capture_stdout() as ptx:
-        z = f(x, y).block_until_ready()
-      if dtype == jnp.float32:
-        dtype_short = "f32"
-      elif dtype == jnp.float16:
-        dtype_short = "f16"
-      elif dtype == jnp.bfloat16:
-        dtype_short = "bf16"
-      elif jnp.issubdtype(dtype, jnp.signedinteger):
-        dtype_short = f"s{dtypes.itemsize_bits(dtype)}"
-      elif jnp.issubdtype(dtype, jnp.unsignedinteger):
-        dtype_short = f"u{dtypes.itemsize_bits(dtype)}"
-      else:
-        raise NotImplementedError(f"Unsupported dtype: {dtype}")
-      ptx = ptx()
-      nan_modifier = ".NaN" if jnp.issubdtype(dtype, jnp.floating) else ""
-      instr = f"max{nan_modifier}.{dtype_short} "
-      instr_double = f"max{nan_modifier}.{dtype_short}x2 "
-      single_converts = ptx.count(instr)
-      double_converts = ptx.count(instr_double)
-      self.assertEqual(128 * (single_converts + 2 * double_converts), 12 * 128)
-      if vec_size % 2:
-        self.assertGreater(single_converts, 0)
-      elif dtypes.itemsize_bits(dtype) < 32:
-        # This, together with the assertion above, implies that all converts
-        # happened through doubled operations.
-        self.assertEqual(single_converts, 0)
-      np.testing.assert_array_equal(z, np.maximum(x, y))
+    with jtu.set_env(MOSAIC_GPU_DUMP_PTX="1"), self.capture_stdout() as ptx:
+      z = f(x, y).block_until_ready()
+    if dtype == jnp.float32:
+      dtype_short = "f32"
+    elif dtype == jnp.float16:
+      dtype_short = "f16"
+    elif dtype == jnp.bfloat16:
+      dtype_short = "bf16"
+    elif jnp.issubdtype(dtype, jnp.signedinteger):
+      dtype_short = f"s{dtypes.itemsize_bits(dtype)}"
+    elif jnp.issubdtype(dtype, jnp.unsignedinteger):
+      dtype_short = f"u{dtypes.itemsize_bits(dtype)}"
+    else:
+      raise NotImplementedError(f"Unsupported dtype: {dtype}")
+    ptx = ptx()
+    nan_modifier = ".NaN" if jnp.issubdtype(dtype, jnp.floating) else ""
+    instr = f"max{nan_modifier}.{dtype_short} "
+    instr_double = f"max{nan_modifier}.{dtype_short}x2 "
+    single_converts = ptx.count(instr)
+    double_converts = ptx.count(instr_double)
+    self.assertEqual(128 * (single_converts + 2 * double_converts), 12 * 128)
+    if vec_size % 2:
+      self.assertGreater(single_converts, 0)
+    elif dtypes.itemsize_bits(dtype) < 32:
+      # This, together with the assertion above, implies that all converts
+      # happened through doubled operations.
+      self.assertEqual(single_converts, 0)
+    np.testing.assert_array_equal(z, np.maximum(x, y))
 
   def test_splat_layout(self):
     m, n = 64, 8
@@ -3865,8 +3913,6 @@ class FragmentedArrayTest(TestCase):
     np.testing.assert_allclose(result, np.full((128, 32), 3.14, np.float32))
 
   @parameterized.product(in_shape=((128, 128), (128, 64), (64, 128)))
-  @jtu.skip_if_mosaic_gpu_exceeds_shared_memory(
-    device_patterns=("RTX PRO 6000 Blackwell", "GB10$"))
   def test_strided_load_store(self, in_shape):
     def kernel(ctx, *args):
       gmem_input, gmem_output, (smem_input, smem_output) = args
@@ -3875,7 +3921,7 @@ class FragmentedArrayTest(TestCase):
       t.store_untiled(smem_output)
       copy(smem_output, gmem_output)
 
-    inp = out = self.prng.uniform(-1, 1, in_shape).astype(jnp.float32)
+    inp = out = self.prng.uniform(-1, 1, in_shape).astype(jnp.float16)
     result = mgpu.as_gpu_kernel(
         kernel, (1, 1, 1), (128, 1, 1), (inp,), out, [inp, out],
     )(inp)
@@ -4168,14 +4214,14 @@ class FragmentedArrayTest(TestCase):
     m, n = 128, 128
     def kernel(ctx, dst, _):
       i8 = ir.IntegerType.get_signless(8)
-      iota = iota_tensor(m, n, jnp.uint8)
+      iota = iota_tensor(m, n, jnp.uint16)
       (iota > 10).astype(i8, is_signed=False).store_untiled(dst, optimized=False)
 
     out_shape = jax.ShapeDtypeStruct((m, n), jnp.int8)
     result = mgpu.as_gpu_kernel(
         kernel, (1, 1, 1), (128, 1, 1), (), out_shape, ()
     )()
-    iota = np.arange(m * n, dtype=jnp.uint8).reshape(m, n)
+    iota = np.arange(m * n, dtype=jnp.uint16).reshape(m, n)
     np.testing.assert_array_equal(result, (iota > 10).astype(jnp.uint8))
 
   @parameterized.product(dtype=(jnp.bfloat16, jnp.float16))
@@ -4493,8 +4539,6 @@ class LayoutTest(TestCase):
           (fa.TCGEN05_LAYOUT, fa.TCGEN05_TRANSPOSED_LAYOUT),
       ],
   )
-  @jtu.skip_if_mosaic_gpu_exceeds_shared_memory(
-    device_patterns=("RTX PRO 6000 Blackwell", "GB10$"))
   def test_transpose_tiled(self, dtype, swizzle, layouts):
     mlir_dtype = utils.dtype_to_ir_type(dtype)
     bw = bytewidth(mlir_dtype)
@@ -4505,6 +4549,10 @@ class LayoutTest(TestCase):
       m, n = 256, 96
     else:
       raise ValueError(f"Unsupported bitwidth: {bw}")
+    if jax.local_devices()[0].shared_memory_per_block_optin == 99 * 1024:
+      # Only reduce if needed to fit inside SMEM so as to keep >1 row tile
+      # in TCGEN05 tilings on relevant hardware.
+      m = 128
     tiling = (8, col_tiling)
     if col_tiling < 8:
       self.skipTest("Swizzle too small")
@@ -4532,10 +4580,10 @@ class LayoutTest(TestCase):
         .T.reshape(n // tiling[0], tiling[0], m // tiling[1], tiling[1])
         .transpose(0, 2, 1, 3)
     )
-
-    y = mgpu.as_gpu_kernel(
-        kernel, (1, 1, 1), (128, 1, 1), x, y_ref, [x, y_ref, mgpu.TMABarrier()],
-    )(x)
+    with core.artificial_shared_memory_limit(None):
+      y = mgpu.as_gpu_kernel(
+          kernel, (1, 1, 1), (128, 1, 1), x, y_ref, [x, y_ref, mgpu.TMABarrier()],
+      )(x)
     np.testing.assert_array_equal(y, y_ref)
 
   @parameterized.parameters(
@@ -4546,7 +4594,6 @@ class LayoutTest(TestCase):
       (fa.WGMMA_LAYOUT_UPCAST_4X, fa.WGMMA_LAYOUT, jnp.int4, jnp.int4, 2),
   )
   @jtu.thread_unsafe_test()  # Modifies ``os.environ``.
-  @jtu.skip_if_mosaic_gpu_exceeds_shared_memory(device_patterns="RTX PRO 6000 Blackwell")
   def test_upcast_to_wgmma(
       self, start_layout, end_layout, in_dtype, cast_dtype, shfl_per_reg
   ):
@@ -5171,6 +5218,7 @@ class MosaicGpuDialectTest(TestCase, jtu.JaxTestCase):
 
       # Registers -> SMEM
       mgpu_dialect.vector_store(cast, smem)
+      utils.commit_shared()
 
       # SMEM -> GMEM
       zero_i32 = arith.constant(ir.IntegerType.get_signless(32), 0)
@@ -5896,13 +5944,16 @@ class MosaicGpuDialectSm90ATest(Sm90ATestCase, jtu.JaxTestCase):
     )
 
 
-class MosaicGpuDialectTCGen05Test(TestCase, jtu.JaxTestCase):
+class MosaicGpuDialectTCGen05Test(TestCase, jtu.JaxTestCase, jtu.CudaArchSpecificTest):
 
   def setUp(self):
-    super().setUp()
-    capabilities = ("10.0", "10.1")
-    if not any(jtu.is_cuda_compute_capability_equal(sm) for sm in capabilities):
-      self.skipTest("Only works on GPU with capability sm_100a or sm_101a")
+    self.skip_unless_tcgen05()
+    if jtu.is_cuda_compute_capability_equal("10.3"):
+      # nvbug/5809460: spurious LLVM/MLIR errors with tcgen05+sm_103a
+      self.skipTest("Mosaic GPU tcgen05 tests do not pass on sm_103a")
+    # No artificially lowered limit for arch-specific tests
+    super().setUp(artificial_shared_memory_limit=None)
+
 
   @parameterized.named_parameters(
       ("unpacked", (128, 77), jnp.bfloat16, 1, False),
@@ -6475,6 +6526,27 @@ class UtilsTest(TestCase):
     # SASS doesn't seem to include the assertion message, so we are just
     # checking that __assertfail appears in the symbol table for the kernel.
     self.assertIn("__assertfail", sass())
+
+
+class EndToEndTest(TestCase):
+
+  def test_kernel_arguments(self):
+    dtype = jnp.float32
+    swizzle = 128
+    bw = bitwidth(dtype_to_ir_type(dtype))
+    shape = (128, 8 * swizzle // bw)
+    i1 = ir.IntegerType.get_signless(1)
+    def kernel(ctx, src, dst, smem):
+      tmp, barrier = smem
+      ctx.async_copy(src_ref=src, dst_ref=tmp, swizzle=swizzle, barrier=barrier)
+      barrier.wait_parity(c(0, i1))
+      copy(tmp, dst, swizzle=swizzle)
+    x = np.arange(np.prod(shape), dtype=dtype).reshape(shape)
+    smem = (x, mgpu.TMABarrier())
+    with jtu.set_env(MOSAIC_GPU_DUMP_PTX="1"), self.capture_stdout() as ptx:
+      y = mgpu.as_gpu_kernel(kernel, (1, 1, 1), (128, 1, 1), x, x, smem)(x)
+      np.testing.assert_array_equal(y, x)
+    self.assertEqual(ptx().count("\t.param"), 2)
 
 
 class SerializationTest(absltest.TestCase):

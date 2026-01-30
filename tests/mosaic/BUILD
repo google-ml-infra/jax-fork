@@ -47,7 +47,7 @@ jax_multiplatform_test(
         "gpu_h100",
         "gpu_b200",
     ],
-    env = {"XLA_FLAGS": "--xla_gpu_autotune_level=0"},
+    env = {"XLA_FLAGS": "--xla_gpu_autotune_level=0 --xla_gpu_enable_triton_gemm=0"},
     shard_count = 8,
     tags = [
         "noasan",  # Times out.
@@ -70,9 +70,10 @@ jax_multiplatform_test(
         "gpu_h100",
         "gpu_b200",
     ],
-    env = {"XLA_FLAGS": "--xla_gpu_autotune_level=0"},
+    env = {"XLA_FLAGS": "--xla_gpu_autotune_level=0 --xla_gpu_enable_triton_gemm=0"},
     tags = [
         "noasan",  # ASAN is unsupported.
+        "notap",  # TODO(b/477964663): Broken by PyTorch 2.10.0 upgrade.
     ],
     deps = if_cuda_is_configured([
         "//jax/experimental:mosaic_gpu",
@@ -91,7 +92,7 @@ jax_multiplatform_test(
         "gpu_h100x2",
         "gpu_b200x2",
     ],
-    env = {"XLA_FLAGS": "--xla_gpu_autotune_level=0"},
+    env = {"XLA_FLAGS": "--xla_gpu_autotune_level=0 --xla_gpu_enable_triton_gemm=0"},
     tags = ["multiaccelerator"],
     deps = if_cuda_is_configured([
         "//jax/experimental:mosaic_gpu",
@@ -113,7 +114,7 @@ jax_multiplatform_test(
         "gpu_h100x2",
         "gpu_b200x2",
     ],
-    env = {"XLA_FLAGS": "--xla_gpu_autotune_level=0 --xla_gpu_experimental_enable_nvshmem=true"},
+    env = {"XLA_FLAGS": "--xla_gpu_autotune_level=0 --xla_gpu_enable_triton_gemm=0 --xla_gpu_experimental_enable_nvshmem=true"},
     tags = ["multiaccelerator"],
     deps = [
         "//jax/_src:test_multiprocess",

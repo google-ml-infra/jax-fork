@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial
 import itertools as it
@@ -41,6 +42,8 @@ from jax._src.hijax import (
     HiPrimitive, HiType, Box, new_box, box_set, box_get, box_effect,
     register_hitype, ShapedArray, Ty, custom_vjp3)
 from jax.experimental.hijax import VJPHiPrimitive
+
+jtu.request_cpu_devices(2)
 
 config.parse_flags_with_absl()
 
@@ -392,6 +395,42 @@ def immutbox_get(box):
   return jax.tree.unflatten(box_ty.treedef, leaves)
 
 register_hitype(ImmutBox, immutbox_to_aval)
+
+
+class Square(VJPHiPrimitive):
+  """Simple parameterless hijax primitive for use in tests."""
+  _jvp_execution_count = 0
+
+  def __init__(self, in_aval):
+    self.in_avals = (in_aval,)
+    self.out_aval = in_aval
+    self.params = {}
+    super().__init__()
+
+  @classmethod
+  @contextmanager
+  def assert_jvp_rule_called_once(cls):
+    initial_count = cls._jvp_execution_count
+    yield
+    assert cls._jvp_execution_count == initial_count + 1
+
+  def expand(self, x):
+    return x ** 2
+
+  def jvp(self, primals, tangents):
+    self.__class__._jvp_execution_count += 1
+    (x,), (t,) = primals, tangents
+    return self(x), t * 2.0 * x
+
+  def vjp_fwd(self, nzs_in, x):
+    return (self(x), x)
+
+  def vjp_bwd_retval(self, res, t):
+    return (t * 2.0 * res,)
+
+def square(x):
+  """Bind a hijax primtive that returns the square of x."""
+  return Square(jax.typeof(x))(x)
 
 
 class HijaxTest(jtu.JaxTestCase):
@@ -916,6 +955,33 @@ class HijaxTest(jtu.JaxTestCase):
 
     nzs_in_ = (False, True)
     self.assertAllClose(jax.grad(mul, 1)(2., 3.), 2., check_dtypes=False)
+
+  @jtu.with_explicit_mesh((2,), ('data',))
+  def test_hijax_primitive_under_shard_map(self, mesh):
+    g = jax.shard_map(square, in_specs=(jax.P('data'),), out_specs=jax.P('data'))
+    x = jnp.arange(10)
+    g(x)
+    jax.jit(g)(x)
+
+  def test_hijax_cond_platform_dependent(self):
+    x = jnp.arange(10)
+    result = jax.jit(partial(jax.lax.platform_dependent, cpu=square, default=square))(x)
+    self.assertArraysAllClose(result, x ** 2)
+
+  def test_hijax_primitive_under_remat(self):
+    x = jnp.arange(10)
+    expected = x ** 2
+    with self.subTest("no jit"):
+      self.assertArraysAllClose(jax.remat(square)(x), expected)
+    with self.subTest("jit"):
+      self.assertArraysAllClose(jax.jit(jax.remat(square))(x), expected)
+
+    x = jnp.float32(2.0)
+    expected_grad = jnp.float32(4.0)
+    with self.subTest("jit-of-grad"):
+      with Square.assert_jvp_rule_called_once():
+        actual_grad = jax.jit(jax.grad(jax.remat(square)))(x)
+      self.assertArraysAllClose(actual_grad, expected_grad)
 
 
 class BoxTest(jtu.JaxTestCase):

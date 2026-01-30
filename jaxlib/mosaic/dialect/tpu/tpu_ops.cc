@@ -152,13 +152,10 @@ OpFoldResult BitcastVregOp::fold(FoldAdaptor adaptor) {
   if (getType() == getInput().getType()) {
     return getInput();
   }
-  // Bitcast from X -> Y -> ... -> Z -> X is a no-op.
-  Value input = getInput();
-  while (auto op = dyn_cast<BitcastVregOp>(input.getDefiningOp())) {
-    input = op.getInput();
-    if (getType() == input.getType()) {
-      return input;
-    }
+  // Simplify bitcast chain of X -> Y -> Z to X -> Z.
+  if (auto defining_op = getInput().getDefiningOp<BitcastVregOp>()) {
+    getInputMutable().assign(defining_op.getInput());
+    return getResult();
   }
   return nullptr;
 }
@@ -1322,11 +1319,10 @@ LogicalResult SemaphoreSignalOp::verify() {
                           stringifyCoreType(issuing_core_type)));
     }
   }
-  if ((issuing_core_type == CoreType::kTc &&
-       target_core_type == CoreType::kScScalarSubcore) ||
-      (issuing_core_type == CoreType::kScScalarSubcore &&
-       target_core_type == CoreType::kTc)) {
-    return emitOpError("Signalling between TC and SC is not implemented");
+  if (issuing_core_type != CoreType::kScVectorSubcore &&
+      target_core_type == CoreType::kScVectorSubcore) {
+    return emitOpError(
+        "Signalling remote SC vectore subcore is not implemented");
   }
   return success();
 }
@@ -1511,10 +1507,10 @@ bool hasHbmOrVmemSharedMemorySpace(MemRefType ty) {
   return HasMemorySpace(ty, MemorySpace::kHbm) ||
          HasMemorySpace(ty, MemorySpace::kVmemShared);
 }
+}  // namespace
 
-FailureOr<bool> isGather(Operation &op, Value source, Value target) {
-  const MemRefType source_ty = getMemRefType(source);
-  const MemRefType target_ty = getMemRefType(target);
+FailureOr<bool> isGather(Operation& op, MemRefType source_ty,
+                         MemRefType target_ty) {
   if (hasHbmOrVmemSharedMemorySpace(source_ty) &&
       HasMemorySpace(target_ty, MemorySpace::kVmem)) {
     return true;
@@ -1527,10 +1523,11 @@ FailureOr<bool> isGather(Operation &op, Value source, Value target) {
       "The transfer must be between HBM and VMEM, or between VMEM_SHARED and "
       "VMEM");
 }
-}  // namespace
 
 FailureOr<bool> EnqueueIndirectDMAOp::isGather() {
-  return mlir::tpu::isGather(*getOperation(), getSource(), getTarget());
+  const MemRefType source_ty = getMemRefType(getSource());
+  const MemRefType target_ty = getMemRefType(getTarget());
+  return mlir::tpu::isGather(*getOperation(), source_ty, target_ty);
 }
 
 LogicalResult EnqueueIndirectDMAOp::verify() {
@@ -1616,7 +1613,9 @@ LogicalResult WaitDMA2Op::canonicalize(WaitDMA2Op op,
 }
 
 FailureOr<bool> WaitIndirectDMAOp::isGather() {
-  return mlir::tpu::isGather(*getOperation(), getSrc(), getDst());
+  const MemRefType source_ty = getMemRefType(getSrc());
+  const MemRefType target_ty = getMemRefType(getDst());
+  return mlir::tpu::isGather(*getOperation(), source_ty, target_ty);
 }
 
 LogicalResult WaitIndirectDMAOp::verify() {
@@ -1851,6 +1850,11 @@ LogicalResult LogBufferOp::verify() {
   return success();
 }
 
+LogicalResult LogBufferOp::canonicalize(LogBufferOp op,
+                                        PatternRewriter& rewriter) {
+  return propagateTiledLayoutToConsumer(op, rewriter);
+}
+
 LogicalResult ReciprocalOp::verify() {
   if (!getType().getElementType().isF32()) {
     return emitOpError("Not implemented: Reciprocal op for non-f32 dtypes");
@@ -1877,7 +1881,7 @@ LogicalResult UnpackSubelementsOp::canonicalize(UnpackSubelementsOp op,
   }
   if (!op.getSignExtended()) {
     // Unpack of pack with the same format is reversible if not sign extended.
-    if (auto pack = dyn_cast<PackSubelementsOp>(op.getSource().getDefiningOp());
+    if (auto pack = op.getSource().getDefiningOp<PackSubelementsOp>();
         pack && pack.getPackFormat() == op.getPackFormat() &&
         pack.getSources().front().getType() == op.getType()) {
       Value source = pack.getPaddedSources(

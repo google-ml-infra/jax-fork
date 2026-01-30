@@ -332,8 +332,11 @@ extern "C" int PyArray_tp_traverse(PyObject* self, visitproc visit, void* arg) {
   return 0;
 }
 
-// dynamic_attr: Allow the GC to clear the dictionary.
-extern "C" int PyArray_tp_clear(PyObject* self) {
+extern "C" void PyArray_tp_finalize(PyObject* self) {
+  // This method assumes that `PyObject_CallFinalizerFromDealloc` is not called
+  // from `PyArray_tp_dealloc`. If this assumption is violated, then the garbage
+  // collector guard would trigger for an array deallocated via reference
+  // counting.
   switch (auto guard_level = GetGarbageCollectArrayGuard(); guard_level) {
     case GarbageCollectionGuardLevel::kAllow:
       break;
@@ -361,13 +364,28 @@ extern "C" int PyArray_tp_clear(PyObject* self) {
       if (guard_level == GarbageCollectionGuardLevel::kFatal) {
         Py_FatalError(error_msg.c_str());
       } else {
+#if PY_VERSION_HEX < 0x030C0000
+        PyObject *err_type, *err_value, *err_traceback;
+        PyErr_Fetch(&err_type, &err_value, &err_traceback);
+#else
+        PyObject* exc = PyErr_GetRaisedException();
+#endif
         PyErr_SetString(PyExc_RuntimeError, error_msg.c_str());
         PyErr_Print();
         PyErr_Clear();
+#if PY_VERSION_HEX < 0x030C0000
+        PyErr_Restore(err_type, err_value, err_traceback);
+#else
+        PyErr_SetRaisedException(exc);
+#endif
       }
       break;
     }
   }
+}
+
+// dynamic_attr: Allow the GC to clear the dictionary.
+extern "C" int PyArray_tp_clear(PyObject* self) {
 #if PY_VERSION_HEX < 0x030C0000
   PyObject*& dict = *_PyObject_GetDictPtr(self);
   Py_CLEAR(dict);
@@ -1376,20 +1394,12 @@ absl::StatusOr<PyArray> PyArray::BatchedDevicePut(
   GlobalPyRefManager()->CollectGarbage();
 
   PyUserContextScope user_context_scope;
-  auto n_devices = dst_devices.size();
 
   DevicePutOptions options;
   options.squash_64bit_types = !jax_enable_x64;
   options.allow_zero_copy =
       (!force_copy && (host_buffer_semantics ==
                        ifrt::Client::HostBufferSemantics::kImmutableZeroCopy));
-
-  std::vector<ifrt::ArrayRef> ifrt_arrays;
-
-  absl::InlinedVector<ifrt::Device*, 1> devices;
-  devices.reserve(n_devices);
-  std::vector<xla::ifrt::Shape> shapes;
-  shapes.reserve(n_devices);
 
   std::vector<nb::handle> args;
   args.reserve(xs.size());
@@ -1409,10 +1419,19 @@ absl::StatusOr<PyArray> PyArray::BatchedDevicePut(
   TF_ASSIGN_OR_RETURN(nb_class_ptr<PyDeviceList> py_device_list,
                       GetPyDeviceList(sharding));
 
+  std::vector<xla::ifrt::Device*> ifrt_devices;
+  ifrt_devices.reserve(dst_devices.size());
+  for (const PyDevice* device : dst_devices) {
+    ifrt_devices.push_back(device->device());
+  }
+  ifrt::Client* ifrt_client = py_device_list->py_client()->ifrt_client();
+  TF_ASSIGN_OR_RETURN(
+      xla::ifrt::DeviceListRef ifrt_device_list,
+      ifrt_client->MakeDeviceList(ifrt_devices));
   TF_ASSIGN_OR_RETURN(
       DevicePutResult device_put_result,
-      DevicePutWithSharding(args, py_device_list->py_client()->ifrt_client(),
-                            dtype, shape, sharding, options));
+      DevicePutWithSharding(args, ifrt_device_list, ifrt_client, dtype, shape,
+                            sharding, options));
 
   return PyArray(aval, weak_type, dtype, std::move(shape), std::move(sharding),
                  py_device_list->py_client(),
@@ -2078,6 +2097,7 @@ PyMemberDef array_impl_members[] = {
 
 PyType_Slot array_impl_slots[] = {
     {Py_tp_new, reinterpret_cast<void*>(PyArray_tp_new)},
+    {Py_tp_finalize, reinterpret_cast<void*>(PyArray_tp_finalize)},
     {Py_tp_dealloc, reinterpret_cast<void*>(PyArray_tp_dealloc)},
     {Py_tp_members, reinterpret_cast<void*>(array_impl_members)},
     {Py_tp_traverse, reinterpret_cast<void*>(PyArray_tp_traverse)},
@@ -2201,18 +2221,11 @@ absl::Status PyArray::Register(nb::module_& m) {
         if (tracer_class.ptr() && self.ptr() == base_type.ptr() &&
             PyObject_TypeCheck(x.ptr(), reinterpret_cast<PyTypeObject*>(
                                             tracer_class.ptr())) != 0) {
-          // TODO(phawkins): we would like to change this to use the logic below
-          // but it is a somewhat breaking change. Let us defer it to a future
-          // PR.
-          return true;
-          // auto is_traced_array_fn =
-          //     nb::getattr(x, "_is_traced_array", nb::none());
-          // if (!is_traced_array_fn.is_none()) {
-          //   try {
-          //     return nb::cast<bool>(is_traced_array_fn());
-          //   } catch (...) {
-          //   }
-          // }
+          auto is_traced_array_fn =
+              nb::getattr(x, "_is_traced_array", nb::none());
+          if (!is_traced_array_fn.is_none()) {
+            return nb::cast<bool>(is_traced_array_fn());
+          }
         }
         return false;
       },
@@ -2259,6 +2272,28 @@ absl::Status PyArray::Register(nb::module_& m) {
       nb::arg("committed"), nb::arg("_skip_checks") = false);
   type.attr("delete") = nb::cpp_function(
       [](PyArray& self) { xla::ThrowIfError(self.Delete()); }, nb::is_method());
+  type.attr("_rewrap_with_aval_and_sharding") = nb::cpp_function(
+      // NOTE(dsuo): Zero-copy metadata rewrapping. Returns a new PyArray with
+      // new aval and sharding metadata that shares the same underlying ifrt
+      // array, avoiding memory copies when only the logical view changes.
+      [](PyArray self, nb::object aval, nb::object sharding) -> PyArray {
+        xla::ifrt::Array* ifrt_array_ptr = self.ifrt_array();
+        if (ifrt_array_ptr == nullptr) {
+          throw nb::value_error(
+              "_rewrap_with_aval_and_sharding() called on deleted or donated "
+              "buffer");
+        }
+        // Create a new PyArray that shares the same ifrt array.
+        bool weak_type = nb::cast<bool>(aval.attr("weak_type"));
+        xla::nb_dtype dtype = nb::cast<xla::nb_dtype>(aval.attr("dtype"));
+        std::vector<int64_t> shape =
+            nb::cast<std::vector<int64_t>>(aval.attr("shape"));
+        return PyArray(std::move(aval), weak_type, dtype, std::move(shape),
+                       std::move(sharding), self.py_client(),
+                       tsl::FormRef(ifrt_array_ptr), /*committed=*/true,
+                       /*skip_checks=*/true);
+      },
+      nb::is_method(), nb::arg("aval"), nb::arg("sharding"));
   type.attr("_sharding") = xla::nb_property_readonly(&PyArray::sharding);
   type.attr("aval") = xla::nb_property(&PyArray::aval, &PyArray::set_aval);
   type.attr("_arrays") =

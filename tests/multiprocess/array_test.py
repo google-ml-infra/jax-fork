@@ -23,6 +23,7 @@ from jax._src import array
 from jax._src import sharding_impls
 from jax._src import test_multiprocess as jt_multiprocess
 from jax._src import test_util as jtu
+from jax._src.lib import jaxlib_extension_version
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 import numpy as np
@@ -588,13 +589,14 @@ class NonaddressableArrayTestMultiHost(jt_multiprocess.MultiProcessTest):
       np.testing.assert_array_equal(shard.data, inp[shard.index])
     self.assertEqual(out.sharding, jax.sharding.SingleDeviceSharding(d))
 
-  def test_device_put_committed_array_error(self):
-    inp = jax.device_put(jnp.arange(16).reshape(8, 2), jax.local_devices()[0])
+  def test_device_put_to_device_error(self):
+    mesh = jax.make_mesh((jax.device_count(),), ("x",), devices=jax.devices(),
+                         axis_types=(jax.sharding.AxisType.Explicit,))
+    s = jax.sharding.NamedSharding(mesh, P("x",))
+    inp = jax.device_put(jnp.arange(16).reshape(8, 2), s)
 
-    # device_put of a committed array to a nonaddressable sharding should raise
-    # an error (until cross-host transfers are supported).
-    with self.assertRaisesRegex(RuntimeError,
-                                "Cannot copy array to non-addressable device"):
+    with self.assertRaisesRegex(ValueError,
+                                "must be a fully addressable array or"):
       nonlocal_pid = (jax.process_index() + 1) % jax.process_count()
       jax.device_put(inp, jax.local_devices(process_index=nonlocal_pid)[0])
 
@@ -941,9 +943,13 @@ class CrossHostTransferTest(jt_multiprocess.MultiProcessTest):
         ValueError, "does not support cross-host device transfers"):
       jax.device_put(y, dst_sharding)
 
+  @parameterized.named_parameters(
+      ("numpy", np.arange),
+      ("uncommitted", jnp.arange),
+  )
   @jtu.skip_on_devices("cpu")
-  def test_cross_host_transfer_single_device_sharding(self):
-    x = np.arange(64).reshape(8, 8)
+  def test_cross_host_transfer_single_device_sharding(self, arange_fn):
+    x = arange_fn(64).reshape(8, 8)
     src_pid = 0
     dst_pid = 1
     src_sharding = jax.sharding.SingleDeviceSharding(
@@ -958,9 +964,13 @@ class CrossHostTransferTest(jt_multiprocess.MultiProcessTest):
     else:
       self.assertEmpty(z.addressable_shards)
 
+  @parameterized.named_parameters(
+      ("numpy", np.arange),
+      ("uncommitted", jnp.arange),
+  )
   @jtu.skip_on_devices("cpu")
-  def test_cross_host_transfer_named_sharding(self):
-    x = np.arange(64).reshape(8, 8)
+  def test_cross_host_transfer_named_sharding(self, arange_fn):
+    x = arange_fn(64).reshape(8, 8)
     n_local = jax.local_device_count()
     src_pid = 0
     dst_pid = 1
@@ -1002,12 +1012,18 @@ class CrossHostTransferTest(jt_multiprocess.MultiProcessTest):
     for shard in z.addressable_shards:
       np.testing.assert_array_equal(shard.data, x[shard.index])
 
+  @parameterized.named_parameters(
+      ("numpy", np.arange),
+      ("uncommitted", jnp.arange),
+  )
   @jtu.skip_on_devices("cpu")
-  def test_cross_host_transfer_batched(self):
+  def test_cross_host_transfer_batched(self, arange_fn):
+    if jaxlib_extension_version < 400 and arange_fn == np.arange:
+      self.skipTest("This functionality is not yet supported in jaxlib.")
     num_arrays = 3
     xs = []
     for i in range(1, num_arrays + 1):
-      xs.append(jnp.arange(64 * i).reshape(8, 8 * i))
+      xs.append(arange_fn(64 * i).reshape(8, 8 * i))
       # TODO(emilyaf): Smaller sizes fail on TPU because the dst buffer size
       # returned by TransferSizeUtil::ShapeSizeCompact is larger than the src
       # buffer size. Investigate this further.
@@ -1074,6 +1090,57 @@ class CrossHostTransferTest(jt_multiprocess.MultiProcessTest):
         ValueError, ("For a cross-host reshard in multi-controller JAX|"
                      "device_put's second argument must be a Device")):
       jax.device_put(y, cpu_sharding)
+
+  @jtu.skip_on_devices("cpu")
+  def test_device_put_with_mixed_local_and_remote_transfers(self):
+    if jaxlib_extension_version < 398:
+      self.skipTest("This functionality is not yet supported in jaxlib.")
+    if jax.local_device_count() < 2:
+      self.skipTest("Need at least 2 local devices for this test.")
+
+    x = jnp.arange(64).reshape(8, 8)
+    src_sharding = jax.sharding.NamedSharding(
+        jax.make_mesh((jax.local_device_count(),), ("x",),
+                      devices=jax.local_devices(process_index=0),
+                      axis_types=(jax.sharding.AxisType.Explicit,)),
+        P("x"))
+
+    # Half of the shards require cross-host transfers and half require local
+    # transfers.
+    dst_devices = (
+        jax.local_devices(process_index=1)[:jax.local_device_count() // 2]
+        + jax.local_devices(process_index=0)[:jax.local_device_count() // 2])
+    dst_sharding = jax.sharding.NamedSharding(
+        jax.make_mesh((jax.local_device_count(),), ("x",), devices=dst_devices,
+                      axis_types=(jax.sharding.AxisType.Explicit,)),
+        P("x"))
+    y = jax.device_put(x, src_sharding)
+    z = jax.device_put(y, dst_sharding)
+    if jax.process_index() in (0, 1):
+      self.assertLen(z.addressable_shards, jax.local_device_count() // 2)
+    for shard in z.addressable_shards:
+      np.testing.assert_array_equal(shard.data, x[shard.index])
+
+  @parameterized.named_parameters(
+      ("numpy", np.arange),
+      ("uncommitted", jnp.arange),
+  )
+  @jtu.skip_on_devices("cpu")
+  def test_device_put_to_device(self, arange_fn):
+    if jaxlib_extension_version < 400:
+      self.skipTest("This functionality is not yet supported in jaxlib.")
+    x = arange_fn(64).reshape(8, 8)
+    src_pid = 0
+    dst_pid = 1
+    src_device = jax.local_devices(process_index=src_pid)[0]
+    dst_device = jax.local_devices(process_index=dst_pid)[0]
+    y = jax.device_put(x, src_device)
+    z = jax.device_put(y, dst_device)
+    if jax.process_index() == dst_pid:
+      self.assertLen(z.addressable_shards, 1)
+      np.testing.assert_array_equal(z.addressable_shards[0].data, x)
+    else:
+      self.assertEmpty(z.addressable_shards)
 
 
 if __name__ == "__main__":

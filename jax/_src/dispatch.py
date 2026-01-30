@@ -505,10 +505,12 @@ def _device_put_sharding_impl(
 
   # Only `Device` exists below. `Sharding` instance is handled above.
   if x_is_jax_array:
-    if not x_is_fully_addressable:
+    if not x_is_fully_addressable and not is_single_device_sharding(x_sharding):
       raise ValueError(
-          "device_put's first argument must be a fully addressable array, but "
-          f"got value with devices {x.devices()}")
+          "When the second argument to `device_put` is a Device, the first "
+          "argument must be a fully addressable array or a non-addressable "
+          "array with a single device sharding. Got value with devices "
+          f"{x.devices()}")
     if device is None:
       if copy == ArrayCopySemantics.REUSE_INPUT:
         return x
@@ -516,11 +518,19 @@ def _device_put_sharding_impl(
         return _DeferredShardArg(x, x_sharding, aval, x.committed, copy)
     elif is_single_device_sharding(x_sharding):
       device = x_sharding._device_assignment[0] if device is None else device
+      sharding = SingleDeviceSharding(device)
+      if not x._committed and not sharding.has_addressable_devices:
+        # For uncommitted arrays in McJAX, each process has a local copy of the
+        # array. If the destination sharding is not addressable, no data
+        # transfer is needed, since the data was transferred in the process
+        # in which the sharding is addressable.
+        shards, devices = [], []
+      else:
+        shards, devices = [x], [device]
       if copy == ArrayCopySemantics.ALWAYS_COPY:
-        return xc.batched_device_put(aval, SingleDeviceSharding(device), [x],
-                                     [device], True, True)
-      return pxla.batched_device_put(aval, SingleDeviceSharding(device), [x],
-                                     [device])
+        return xc.batched_device_put(aval, sharding, shards, devices, True,
+                                     True)
+      return pxla.batched_device_put(aval, sharding, shards, devices)
 
   sh = SingleDeviceSharding(pxla.get_default_device()
                             if device is None else device)

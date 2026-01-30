@@ -38,6 +38,8 @@ from jax._src import state
 from jax._src.traceback_util import api_boundary
 from jax._src import tree_util
 from jax._src import typing as jax_typing
+from jax._src.lib import jaxlib_extension_version
+from jax._src.lib import xla_client
 from jax._src.mesh import get_abstract_mesh
 from jax._src.frozen_dict import FrozenDict
 from jax._src.interpreters import ad
@@ -553,6 +555,15 @@ def _pallas_call_batching_rule(
     metadata: FrozenDict[str, str] | None = None,
     name: str | None = None,
 ):
+  if all(bdim is None for bdim in dims):
+    out = pallas_call_p.bind(
+        *args, jaxpr=jaxpr, grid_mapping=grid_mapping, mesh=mesh,
+        input_output_aliases=input_output_aliases, debug=debug,
+        interpret=interpret, compiler_params=compiler_params,
+        cost_estimate=cost_estimate, out_avals=out_avals,
+        backend=backend, metadata=metadata, name=name)
+    return out, (None,) * len(out)
+
   if mesh is not None:
     raise NotImplementedError(
         "pallas_call with a mesh does not support batching"
@@ -587,8 +598,8 @@ def _pallas_call_batching_rule(
           backend=backend, metadata=metadata, name=name)
       return [jnp.expand_dims(x, 0) for x in out]
     if ema:
-      temp_f = remove_explicit(ema)(shard_map(
-          temp_f, out_specs=P(ema), axis_names=set(ema)))
+      with jax_core.remove_explicit_mesh_axis_names(ema):
+        temp_f = shard_map(temp_f, out_specs=P(ema), axis_names=set(ema))
     out = temp_f(*args)
     return out, (0,) * len(out)
 
@@ -752,26 +763,13 @@ def _pallas_call_batching_rule(
 
   if ema:
     # TODO all batching rules should probably be in outer mesh ctx
-    bind = remove_explicit(ema)(shard_map(
-        bind, out_specs=P(ema), axis_names=set(ema)))
+    with jax_core.remove_explicit_mesh_axis_names(ema):
+      bind = shard_map(bind, out_specs=P(ema), axis_names=set(ema))
 
   out = bind(*dynamic_grid_args, *args)
   return out, (0,) * len(out)
 
 batching.fancy_primitive_batchers[pallas_call_p] = _pallas_call_batching_rule
-batching.skippable_batchers[pallas_call_p] = lambda _: ()
-
-
-@contextlib.contextmanager
-def remove_explicit(ema):
-  prev = jax_core.trace_ctx.axis_env
-  # assert set(prev.explicit_mesh_axis_names) == set(ema)
-  new = jax_core.AxisEnv(prev.axis_sizes, prev.spmd_axis_names, set())
-  try:
-    jax_core.trace_ctx.set_axis_env(new)
-    yield
-  finally:
-    jax_core.trace_ctx.set_axis_env(prev)
 
 
 def checkify_pallas_kernel_body_jaxpr(
@@ -1046,8 +1044,14 @@ def _trace_kernel_to_jaxpr(
   )
   with grid_mapping.trace_env(), config._check_vma(False):
     with config.mutable_array_checks(False):
-      jaxpr, _, consts = pe.trace_to_jaxpr_dynamic(
-          wrapped_kernel_fun, kernel_avals)
+      with (
+          xla_client.TracebackScope()
+          if jaxlib_extension_version >= 399
+          else contextlib.nullcontext()
+      ):
+        jaxpr, _, consts = pe.trace_to_jaxpr_dynamic(
+            wrapped_kernel_fun, kernel_avals
+        )
     if consts:
       consts_avals = [
           aval

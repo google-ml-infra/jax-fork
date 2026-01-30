@@ -2205,13 +2205,12 @@ class PallasCallTest(ptu.PallasTPUTest):
         f' full shape is f32[{shape[0]},{shape[1]}].',
         error_message,
     )
-    if jtu.is_cloud_tpu_at_least(2025, 11, 5):
-      self.assertIn(
-          'This allocation is single buffered.'
-          if pmode.buffer_count == 1
-          else 'This allocation has 2 buffering levels',
-          error_message,
-      )
+    self.assertIn(
+        'This allocation is single buffered.'
+        if pmode.buffer_count == 1
+        else 'This allocation has 2 buffering levels',
+        error_message,
+    )
 
   def test_vmem_oom_error_message_dynamic_grid_scalar_prefetch_and_vmem_scratch(
       self,
@@ -3807,8 +3806,6 @@ class MiscellaneousTest(ptu.PallasTPUTest):
       )
   )
   def test_reshape_two_minor_dims_to_R2_padded_last_dim(self, q, m, n, dtype):
-    if not jtu.is_cloud_tpu_at_least(2025, 12, 22):
-      self.skipTest('Needs a newer libTPU')
     if (dtype == jnp.bfloat16 and not jtu.is_device_tpu_at_least(4)) or (
         dtype == jnp.int8 and not jtu.is_device_tpu_at_least(5)
     ):
@@ -3845,8 +3842,6 @@ class MiscellaneousTest(ptu.PallasTPUTest):
   def test_reshape_two_minor_dims_to_R3_padded_last_dim(
       self, q, m, n, k, dtype
   ):
-    if not jtu.is_cloud_tpu_at_least(2025, 12, 22):
-      self.skipTest('Needs a newer libTPU')
     if (dtype == jnp.bfloat16 and not jtu.is_device_tpu_at_least(4)) or (
         dtype == jnp.int8 and not jtu.is_device_tpu_at_least(5)
     ):
@@ -4220,6 +4215,263 @@ class PallasKernelMetadataTest(ptu.PallasTPUTest):
         json.dumps(metadata, sort_keys=True, indent=0, separators=(',', ':')),
         hlo,
     )
+
+
+class ExplicitMXUTest(jtu.JaxTestCase):
+
+  def setUp(self):
+    super().setUp()
+    if not jtu.is_device_tpu_at_least(7):
+      self.skipTest('TPU v7 required for this test.')
+    if not jtu.is_cloud_tpu_at_least(2026, 1, 28):
+      self.skipTest('Test requires a newer libTPU.')
+
+  @parameterized.named_parameters(
+      ('f32', jnp.float32),
+      ('bf16', jnp.bfloat16),
+      ('f8_e4m3fn', jnp.float8_e4m3fn),
+      ('f8_e5m2', jnp.float8_e5m2),
+  )
+  def test_basic(self, dtype):
+    m = 128 + 64
+    k = n = 256
+    generator = np.random.default_rng(1234)
+    x = generator.normal(size=(m, k)).astype(dtype)
+    y = generator.normal(size=(k, n)).astype(dtype)
+
+    def matmul_kernel(x_ref, y_ref, o_ref):
+      pltpu.matmul_push_rhs(
+          y_ref[...], mxu_index=0, staging_register=0
+      )
+      pltpu.matmul_acc_lhs(
+          acc_addr=0, lhs=x_ref[...], mxu_index=0, load_staged_rhs=0
+      )
+      o_ref[...] = pltpu.matmul_pop(
+          acc_addr=0, shape=(m, n), dtype=jnp.float32, mxu_index=0
+      )
+    matmul = pl.pallas_call(
+        matmul_kernel, out_shape=jax.ShapeDtypeStruct((m, n), jnp.float32),
+    )
+
+    def matmul_ref_kernel(x_ref, y_ref, o_ref):
+      o_ref[...] = jnp.matmul(
+          x_ref[...], y_ref[...], preferred_element_type=jnp.float32
+      )
+    matmul_ref = pl.pallas_call(
+        matmul_ref_kernel, out_shape=jax.ShapeDtypeStruct((m, n), jnp.float32),
+    )
+
+    out = matmul(x, y).block_until_ready()
+    out_ref = matmul_ref(x, y).block_until_ready()
+    np.testing.assert_array_equal(out, out_ref)
+
+  def test_two_mxus(self):
+    dtype = jnp.bfloat16
+    m = k = n = 256
+    generator = np.random.default_rng(1234)
+    x = generator.normal(size=(m, k)).astype(dtype)
+    y0 = generator.normal(size=(k, n)).astype(dtype)
+    y1 = generator.normal(size=(k, n)).astype(dtype)
+
+    def matmul_kernel(x_ref, y0_ref, y1_ref, o0_ref, o1_ref):
+      pltpu.matmul_push_rhs(
+          y0_ref[...], mxu_index=0, staging_register=0
+      )
+      pltpu.matmul_push_rhs(
+          y1_ref[...], mxu_index=1, staging_register=0
+      )
+      pltpu.matmul_acc_lhs(
+          acc_addr=0, lhs=x_ref[...], mxu_index=0, load_staged_rhs=0
+      )
+      pltpu.matmul_acc_lhs(
+          acc_addr=0, lhs=x_ref[...], mxu_index=1, load_staged_rhs=0
+      )
+      o0_ref[...] = pltpu.matmul_pop(
+          acc_addr=0, shape=(m, n), dtype=jnp.float32, mxu_index=0
+      )
+      o1_ref[...] = pltpu.matmul_pop(
+          acc_addr=0, shape=(m, n), dtype=jnp.float32, mxu_index=1
+      )
+
+    matmul = pl.pallas_call(
+        matmul_kernel,
+        out_shape=(
+            jax.ShapeDtypeStruct((m, n), jnp.float32),
+            jax.ShapeDtypeStruct((m, n), jnp.float32),
+        ),
+    )
+
+    out0, out1 = matmul(x, y0, y1)
+
+    out0_ref = jnp.matmul(
+        x.astype(jnp.float32),
+        y0.astype(jnp.float32),
+        preferred_element_type=jnp.float32,
+    )
+    out1_ref = jnp.matmul(
+        x.astype(jnp.float32),
+        y1.astype(jnp.float32),
+        preferred_element_type=jnp.float32,
+    )
+    np.testing.assert_allclose(out0, out0_ref, atol=1e-3, rtol=1e-3)
+    np.testing.assert_allclose(out1, out1_ref, atol=1e-3, rtol=1e-3)
+
+  def test_matmul_kernel(self):
+    dtype = jnp.bfloat16
+    m = n = k = 4096
+    generator = np.random.default_rng(1234)
+    x = generator.normal(size=(m, k)).astype(dtype)
+    y = generator.normal(size=(k, n)).astype(dtype)
+
+    def matmul_kernel(x_ref, y_ref, o_ref):
+      def _next_index(indices, grid):
+        out = []
+        carry: bool | jax.Array = True
+        for (i, g) in reversed(list(zip(indices, grid, strict=True))):
+          inc = jax.lax.select(carry, i + 1, i)
+          carry = inc == g
+          out.append(jax.lax.select(carry, 0, inc))
+        return tuple(
+            0 if isinstance(g, int) and g == 1 else i
+            for i, g in zip(tuple(reversed(out)), grid, strict=True)
+        )
+
+      mem_block_m = 2048
+      mem_block_n = 512
+      mem_block_k = 4096
+      assert m % mem_block_m == 0
+      assert n % mem_block_n == 0
+      assert k % mem_block_k == 0
+
+      compute_block_m = compute_block_n = compute_block_k = 256
+      mxu_count = 2
+
+      def memory_body(x_vmem, y_vmem, o_vmem):
+        compute_mn_grid = (
+            mem_block_m // (mxu_count * compute_block_m),
+            mem_block_n // compute_block_n,
+        )
+        compute_k_steps = mem_block_k // compute_block_k
+
+        def lhs_slice(mi, _, ki):
+          mxu_compute_block_m = mxu_count * compute_block_m
+          return (
+              pl.ds(mi * mxu_compute_block_m, mxu_compute_block_m),
+              pl.ds(ki * compute_block_k, compute_block_k),
+          )
+        def rhs_slice(_, ni, ki):
+          return (
+              pl.ds(ki * compute_block_k, compute_block_k),
+              pl.ds(ni * compute_block_n, compute_block_n),
+          )
+        def out_slice(mi, ni):
+          mxu_compute_block_m = mxu_count * compute_block_m
+          return (
+              pl.ds(mi * mxu_compute_block_m, mxu_compute_block_m),
+              pl.ds(ni * compute_block_n, compute_block_n),
+          )
+
+        for mxu in range(mxu_count):
+          pltpu.matmul_push_rhs(
+              rhs=y_vmem[rhs_slice(0, 0, 0)],
+              staging_register=0,
+              mxu_index=mxu,
+          )
+        # Zero the accumulator on the first step.
+        accumulate = pl.program_id(2) > 0
+
+        def compute_body(i, mn_indices, push=True):
+          pop_mi, pop_ni = mn_indices
+          mi, ni = _next_index(mn_indices, compute_mn_grid)
+
+          def body(pop_addr, mul_addr):
+            for mxu in range(mxu_count):
+              mxu_slice = pl.ds(mxu * compute_block_m, compute_block_m)
+              o_vmem_slice = o_vmem.at[out_slice(pop_mi, pop_ni)].at[mxu_slice]
+              prev_out = jnp.where(accumulate, o_vmem_slice[...], jnp.zeros_like(o_vmem_slice))
+              o_vmem_slice[...] = prev_out + pltpu.matmul_pop(
+                  acc_addr=pop_addr,
+                  shape=(compute_block_m, compute_block_n),
+                  dtype=jnp.float32,
+                  mxu_index=mxu,
+              ).astype(o_vmem.dtype)
+
+            def steady_k(ki, push=True):
+              lhs = x_vmem.at[lhs_slice(mi, ni, ki)]
+              # We push the next m/n block if this is the last k.
+              rhs_indices = _next_index(
+                  (mi, ni, ki), (*compute_mn_grid, compute_k_steps)
+              )
+              rhs = y_vmem.at[rhs_slice(*rhs_indices)]
+              for mxu in range(mxu_count):
+                mxu_slice = pl.ds(mxu * compute_block_m, compute_block_m)
+                pltpu.matmul_acc_lhs(
+                    acc_addr=mul_addr, lhs=lhs[mxu_slice], mxu_index=mxu, load_staged_rhs=0
+                )
+                if push:
+                  pltpu.matmul_push_rhs(rhs=rhs[...], staging_register=0, mxu_index=mxu)
+
+            assert compute_k_steps >= 3
+            steady_k(0, push=True)
+            steady_k(1, push=True)
+            if not push:
+              pl.loop(2, compute_k_steps - 1)(steady_k)
+              steady_k(compute_k_steps - 1, push=push)
+            else:
+              pl.loop(2, compute_k_steps)(steady_k)
+
+          @pl.when(jax.lax.rem(i, 2) == 0)
+          def _even():
+            body(128, 0)
+          @pl.when(jax.lax.rem(i, 2) != 0)
+          def _odd():
+            body(0, 128)
+
+          return mi, ni
+
+        final_indices = (compute_mn_grid[0] - 1, compute_mn_grid[1] - 1)
+        last_indices = jax.lax.fori_loop(0, math.prod(compute_mn_grid) - 1, compute_body, final_indices)
+        # TODO(apaszke): Add a way to push the RHS without a matmul.
+        compute_body(math.prod(compute_mn_grid) - 1, last_indices, push=False)
+
+        for mxu in range(mxu_count):
+          mxu_slice = pl.ds(mxu * compute_block_m, compute_block_m)
+          # TODO(apaszke): Accumulate in f32
+          o_vmem_slice = o_vmem.at[out_slice(*final_indices)].at[mxu_slice]
+          prev_out = jnp.where(accumulate, o_vmem_slice[...], jnp.zeros_like(o_vmem_slice))
+          o_vmem_slice[...] = prev_out + pltpu.matmul_pop(
+              acc_addr=128 if math.prod(compute_mn_grid) % 2 == 0 else 0,
+              shape=(compute_block_m, compute_block_n),
+              dtype=jnp.float32,
+              mxu_index=mxu,
+          ).astype(o_vmem.dtype)
+
+      mem_grid = (
+          x.shape[0] // mem_block_m,
+          y.shape[1] // mem_block_n,
+          x.shape[1] // mem_block_k,
+      )
+      pltpu.emit_pipeline(
+          memory_body,
+          grid=mem_grid,
+          in_specs=(
+              pl.BlockSpec((mem_block_m, mem_block_k), lambda i, j, l: (i, l)),
+              pl.BlockSpec((mem_block_k, mem_block_n), lambda i, j, l: (l, j)),
+          ),
+          out_specs=pl.BlockSpec((mem_block_m, mem_block_n), lambda i, j, l: (i, j)),
+      )(x_ref, y_ref, o_ref)
+
+    matmul = pl.pallas_call(
+        matmul_kernel,
+        out_shape=jax.ShapeDtypeStruct((x.shape[0], y.shape[1]), dtype),
+        in_specs=[pl.BlockSpec(memory_space=pl.ANY)] * 2,
+        out_specs=pl.BlockSpec(memory_space=pl.ANY),
+        compiler_params=pltpu.CompilerParams(vmem_limit_bytes=60 * 1024 * 1024),
+        name='matmul',
+    )
+    out = matmul(x, y).block_until_ready()
+    out_ref = jnp.matmul(x, y).block_until_ready().astype(jnp.float32)
+    np.testing.assert_allclose(out, out_ref, atol=1e-2, rtol=1e-2)
 
 
 if __name__ == '__main__':

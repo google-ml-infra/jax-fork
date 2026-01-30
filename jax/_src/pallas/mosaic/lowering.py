@@ -309,7 +309,7 @@ def _dtype_to_ir_type(dtype: DTypeLike,
 
 
 def aval_to_ir_type(
-    dynamic_shape_replacement_fn,
+    dynamic_shape_replacement_fn: DynamicShapeReplacementFn,
     aval,
     shape=None,
     memory_space: AnyMemorySpace | None = None,
@@ -973,7 +973,7 @@ def lower_jaxpr_to_transform_func(
     kernel_type: tpu_core.KernelType,
     forward_compatible: bool,
     backend: Any | None,
-    dynamic_shape_replacement_fn: DynamicShapeReplacementFn | None = None,
+    dynamic_shape_replacement_fn: DynamicShapeReplacementFn,
 ) -> func.FuncOp:
   num_grid = len(mosaic_grid_mapping.grid_types)
   arg_types = [
@@ -1031,8 +1031,8 @@ def lower_jaxpr_to_func(
     kernel_type: tpu_core.KernelType,
     forward_compatible: bool,
     backend: Any | None,
-    dynamic_shape_replacement_fn: DynamicShapeReplacementFn | None = None,
-    dynamic_shape_replacement_enabled: bool = False,
+    dynamic_shape_replacement_fn: DynamicShapeReplacementFn,
+    dynamic_shape_replacement_enabled: bool,
 ) -> func.FuncOp:
   num_grid = len(mosaic_grid_mapping.grid_types)
   num_scalar_prefetch = len(mosaic_grid_mapping.scalar_prefetch_types)
@@ -2041,22 +2041,6 @@ def _broadcast_in_dim_lowering_rule(
   if aval_in.shape == shape:
     return val
 
-  if jnp.issubdtype(aval_in.dtype, jnp.bool_) and (
-      ctx.forward_compatible or ctx.is_cloud_tpu_older_than(2025, 6, 3)
-  ):
-    # Direct broadcasts for bools are not supported in Mosaic due to booleans
-    # living in mask registers and broadcast operating on vregs. Broadcast as an
-    # integer instead and cast back to a bool.
-    def _proxy_fun(val, *, shape, broadcast_dimensions):
-      int_val = jnp.where(val, 1, 0)
-      bcast_val = jax.lax.broadcast_in_dim(int_val, shape, broadcast_dimensions)
-      return bcast_val == 1
-
-    proxy_lowering = lower_fun(_proxy_fun, multiple_results=False)
-    return proxy_lowering(
-        ctx, val, shape=shape, broadcast_dimensions=broadcast_dimensions
-    )
-
   if broadcast_dimensions:
     out_shape_list = [1] * len(shape)
     for i, s in zip(broadcast_dimensions, aval_in.shape):
@@ -2327,18 +2311,10 @@ def _convert_element_type_lowering_rule(
   unsigned = jnp.unsignedinteger
   old_bitwidth = dtypes.itemsize_bits(old_dtype)
   new_bitwidth = dtypes.itemsize_bits(new_dtype)
-  both_32bit = old_bitwidth == 32 and new_bitwidth == 32
   if _from(floating) and _to(floating):
-    forward_compat = ctx.forward_compatible or ctx.is_cloud_tpu_older_than(
-        2025, 6, 29
-    )
-    if old_bitwidth < new_bitwidth and (
-        new_bitwidth == 32 or not forward_compat
-    ):
+    if old_bitwidth < new_bitwidth:
       return arith.extf(out_type, x)
-    elif old_bitwidth > new_bitwidth and (
-        old_bitwidth == 32 or not forward_compat
-    ):
+    elif old_bitwidth > new_bitwidth:
       return arith.truncf(out_type, x)
   elif _from(integer) and _to(integer):
     if old_bitwidth < new_bitwidth and new_bitwidth == 32:
@@ -2354,11 +2330,7 @@ def _convert_element_type_lowering_rule(
   elif _from(floating) and _to(signed):
     return arith.fptosi(out_type, x)
   elif _from(signed) and _to(floating):
-    if (
-        not (ctx.forward_compatible or ctx.is_cloud_tpu_older_than(2025, 5, 12))
-        or both_32bit
-    ):
-      return arith.sitofp(out_type, x)
+    return arith.sitofp(out_type, x)
   elif old_dtype == jnp.bool_ and _to(integer) and new_bitwidth == 32:
     return arith.extui(out_type, x)
   return lower_fun(functools.partial(_convert_helper, to_dtype=new_dtype),
@@ -2529,10 +2501,7 @@ def _transpose_lowering_rule(ctx: LoweringRuleContext, x, *, permutation):
   out_type = aval_to_ir_type(
       ctx.lowering_context.dynamic_shape_replacement_fn, ctx.avals_out[0]
   )
-  if ctx.forward_compatible or ctx.is_cloud_tpu_older_than(2025, 5, 8):
-    return vector.transpose(out_type, x, permutation)
-  else:
-    return tpu.transpose(out_type, x, permutation)
+  return tpu.transpose(out_type, x, permutation)
 
 
 def _bcast(
@@ -2588,26 +2557,27 @@ class FoldingError(Exception):
   pass
 
 
-def _fold_and_get_constant_value(x):
-  def _fold(x, fuel):
-    if fuel <= 0:
-      raise FoldingError()
-    op_name = getattr(x.owner, "name", None)
-    binop_folds = {
-        "arith.maxsi": max,
-        "arith.minsi": min,
-    }
-    if op_name == "arith.constant":
-      if isinstance(x.type, ir.IntegerType):
-        return ir.IntegerAttr(x.owner.attributes["value"]).value
-      elif isinstance(x.type, ir.FloatType):
-        return ir.FloatAttr(x.owner.attributes["value"]).value
-      else:
-        raise ValueError(f"Unsupported constant type: {x.type}")
-    if op_name in binop_folds:
-      return binop_folds[op_name](_fold(v, fuel - 1) for v in x.owner.operands)
+def _fold(x, fuel):
+  if fuel <= 0:
     raise FoldingError()
+  op_name = getattr(x.owner, "name", None)
+  binop_folds = {
+      "arith.maxsi": max,
+      "arith.minsi": min,
+  }
+  if op_name == "arith.constant":
+    if isinstance(x.type, ir.IntegerType):
+      return ir.IntegerAttr(x.owner.attributes["value"]).value
+    elif isinstance(x.type, ir.FloatType):
+      return ir.FloatAttr(x.owner.attributes["value"]).value
+    else:
+      raise ValueError(f"Unsupported constant type: {x.type}")
+  if op_name in binop_folds:
+    return binop_folds[op_name](_fold(v, fuel - 1) for v in x.owner.operands)
+  raise FoldingError()
 
+
+def _fold_and_get_constant_value(x):
   try:
     return _fold(x, 10)
   except FoldingError:
@@ -4259,3 +4229,58 @@ def _dim_as_value_lowering(ctx: LoweringRuleContext, *, dim):
 def _touch_lowering_rule(ctx: LoweringRuleContext, x: jax.Array):
   del ctx, x
   return []
+
+
+@register_lowering_rule(tpu_primitives.trace_value_p)
+def _trace_value_lowering_rule(ctx: LoweringRuleContext, value, *, label: str):
+  """Lower trace_value to tpu.trace_value."""
+  del ctx
+  tpu.trace_value(value, label)
+  return []
+
+
+@register_lowering_rule(tpu_primitives.matmul_push_rhs_p)
+def _matmul_push_rhs_lowering_rule(
+    ctx: LoweringRuleContext,
+    rhs: jax.Array,
+    *,
+    staging_register: int,
+    mxu_index: int,
+):
+  del ctx
+  tpu.matmul_push_rhs(rhs, mxu_index, staging_register=staging_register)
+  return []
+
+
+@register_lowering_rule(tpu_primitives.matmul_acc_lhs_p)
+def _matmul_acc_lhs_lowering_rule(
+    ctx: LoweringRuleContext,
+    lhs: jax.Array,
+    *,
+    acc_addr: int,
+    mxu_index: int,
+    load_staged_rhs: int | None,
+):
+  del ctx
+  staged_rhs_kwarg = {}
+  if load_staged_rhs is not None:
+    staged_rhs_kwarg = {"load_staged_rhs": load_staged_rhs}
+  tpu.matmul_acc_lhs(acc_addr, lhs, mxu_index, **staged_rhs_kwarg)
+  return []
+
+
+@register_lowering_rule(tpu_primitives.matmul_pop_p)
+def _matmul_pop_lowering_rule(
+    ctx: LoweringRuleContext,
+    *,
+    acc_addr: int,
+    mxu_index: int,
+    shape: tuple[int, int],
+    dtype: jax.typing.DTypeLike,
+):
+  del ctx
+  return tpu.matmul_pop(
+      ir.VectorType.get(shape, _dtype_to_ir_type(dtype)),
+      acc_addr,
+      mxu_index,
+  )

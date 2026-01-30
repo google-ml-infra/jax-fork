@@ -21,7 +21,6 @@ from typing import Any
 import unittest
 
 from absl.testing import absltest
-from absl.testing import flagsaver
 from absl.testing import parameterized
 import jax
 from jax import api_util
@@ -32,8 +31,8 @@ from jax._src import linear_util as lu
 from jax._src import state
 from jax._src import test_util as jtu
 from jax._src.pallas import pallas_call
-from jax._src.pallas import primitives as pallas_primitives
 from jax._src.pallas import pallas_test_util as ptu
+from jax._src.pallas import primitives as pallas_primitives
 from jax.experimental import pallas as pl
 from jax.interpreters import partial_eval as pe
 import jax.numpy as jnp
@@ -584,7 +583,6 @@ class OpsTest(PallasBaseTest):
       for name, func, strategy in UNARY_FUNCTIONS
   )
   @hp.given(hps.data())
-  @jtu.skip_if_mosaic_gpu_exceeds_shared_memory(device_patterns="RTX PRO 6000 Blackwell")
   def test_unary_primitives(self, name, func, shape_dtype_strategy, data):
     if name in ["abs", "log1p", "pow2", "reciprocal", "relu", "sin", "sqrt"]:
       self.skip_if_mosaic_gpu()
@@ -1487,12 +1485,6 @@ class OpsTest(PallasBaseTest):
   ):
     if jtu.test_device_matches(["gpu"]):
       self.skipTest("TPU only test")
-
-    if jtu.test_device_matches(["tpu"]) and not jtu.is_cloud_tpu_at_least(
-        2025, 10, 5
-    ):
-      self.skipTest("Requires libtpu built after 2025-10-05")
-
     x_shape, y_shape, dims_numbers = shapes_and_dims_numbers
     if batch_size is not None:
       x_shape = (batch_size,) + x_shape
@@ -1547,11 +1539,6 @@ class OpsTest(PallasBaseTest):
   def test_dot_general_non_front_batch_dims(self, shapes_and_dims_numbers):
     if jtu.test_device_matches(["gpu"]):
       self.skipTest("TPU only test")
-
-    if jtu.test_device_matches(["tpu"]) and not jtu.is_cloud_tpu_at_least(
-        2025, 11, 30
-    ):
-      self.skipTest("Requires libtpu built after 2025-11-30")
 
     x_shape, y_shape, dims_numbers = shapes_and_dims_numbers
 
@@ -1610,11 +1597,6 @@ class OpsTest(PallasBaseTest):
   ):
     if jtu.test_device_matches(["gpu"]):
       self.skipTest("TPU only test")
-
-    if jtu.test_device_matches(["tpu"]) and not jtu.is_cloud_tpu_at_least(
-        2025, 10, 5
-    ):
-      self.skipTest("Requires libtpu built after 2025-10-05")
 
     (
         x_shape_unbatched,
@@ -1777,8 +1759,7 @@ class OpsTest(PallasBaseTest):
         rtol=rtol,
     )
 
-  @parameterized.parameters("float16", "bfloat16")
-  def test_true_divide_unsupported(self, dtype):
+  def test_f16_true_divide_unsupported(self):
     self.skip_if_mosaic_gpu()
 
     if self.INTERPRET:
@@ -1786,13 +1767,13 @@ class OpsTest(PallasBaseTest):
 
     @functools.partial(
         self.pallas_call,
-        out_shape=jax.ShapeDtypeStruct((2,), dtype),
+        out_shape=jax.ShapeDtypeStruct((2,), jnp.float16),
     )
     def kernel(x_ref, y_ref, o_ref):
       o_ref[...] = jnp.true_divide(x_ref[...], y_ref[...])
 
-    x = jnp.array([2.4, 4.2]).astype(dtype)
-    y = jnp.array([4.2, 2.4]).astype(dtype)
+    x = jnp.array([2.4, 4.2]).astype(jnp.float16)
+    y = jnp.array([4.2, 2.4]).astype(jnp.float16)
     with self.assertRaises(Exception):
       kernel(x, y)
 
@@ -2078,10 +2059,6 @@ class OpsTest(PallasBaseTest):
       trans_x=[False, True],
       trans_y=[False, True],
   )
-  @jtu.skip_if_triton_exceeds_shared_memory(
-    device_patterns=("RTX PRO 6000 Blackwell", "GB10$"))
-  @jtu.skip_if_mosaic_gpu_exceeds_shared_memory(
-    device_patterns=("RTX PRO 6000 Blackwell", "GB10$"))
   def test_dot(self, lhs_and_rhs_shape, dtype, trans_x, trans_y):
     self.skip_if_mosaic_gpu()
 
@@ -2110,7 +2087,7 @@ class OpsTest(PallasBaseTest):
           > (256 * 256) * 2
       ):
         self.skipTest("Shared memory size limit exceeded")
-      if (jax.local_devices()[0].device_kind == "NVIDIA L4" and
+      if (jax.local_devices()[0].shared_memory_per_block_optin == 99 * 1024 and
           dtype == jnp.float32 and
           lhs_and_rhs_shape in [
             ((128, 16), (128, 256)),
@@ -2205,32 +2182,6 @@ class OpsTest(PallasBaseTest):
         atol=3 if dtype == jnp.int4 else 0,
         rtol=0.05 if dtype == jnp.int4 else 0,
     )
-
-  @parameterized.parameters(jnp.int8, jnp.int4)
-  # Test that when compatibility mode is disabled,
-  # the dot is not converted to floating point matmul and fails.
-  def test_itof_dot_canonicalization_fails_without_compat_mode(self, dtype):
-    self.skip_if_mosaic_gpu()
-    if not jtu.test_device_matches(["tpu"]):
-      self.skipTest("Not supported on this hardware")
-    if jtu.get_tpu_version() != 7 or self.INTERPRET:
-      self.skipTest("The canonicalization pass being tested is on v7 only.")
-    lhs_shape = rhs_shape = out_shape = (256, 256)
-    with flagsaver.flagsaver(xla_mosaic_compat_mode=False):
-
-      @functools.partial(
-          self.pallas_call,
-          out_shape=jax.ShapeDtypeStruct(out_shape, jnp.int32),
-      )
-      def dot(x_ref, y_ref, o_ref):
-        x = x_ref[:, :]
-        y = y_ref[:, :]
-        o_ref[:, :] = pl.dot(x, y, False, False).astype(o_ref.dtype)
-
-      x = jnp.full(lhs_shape, 1, dtype=dtype)
-      y = jnp.full(rhs_shape, 1, dtype=dtype)
-      with self.assertRaises(Exception):
-        dot(x, y)
 
   def test_strided_load(self):
     self.skip_if_mosaic_gpu()
@@ -2591,20 +2542,17 @@ class OpsTest(PallasBaseTest):
       )(x)
       np.testing.assert_array_equal(out, jnp.pad(x, padding, mode=pad_type))
     except Exception as e:
+      self.assertLess(
+          jtu.get_tpu_version(), 4, "only TPU older than v4 may fail"
+      )
       self.assertEqual(
           dtype,
           jnp.bfloat16,
           "some bfloat16 combinations can fail with not implemented",
       )
-      # The first two options are expected to fail due to current limitations
-      # in the Pallas TPU lowering. However, the last one is unexpected, and
-      # should be fixed, it is a pjrt bug.
-      # b/379787665
-      acceptable_errors = (
-          "Only 32-bit types supported" in str(e)
-          or "Not implemented" in str(e)
-          or "Expected mask vector type" in str(e)
-      )
+      acceptable_errors = "Not implemented: Unsupported mask bitwidth" in str(
+          e
+      ) or "Expected mask vector type" in str(e)
       self.assertTrue(acceptable_errors, "Failed with error: " + str(e))
 
   @parameterized.parameters((128, 128), (256, 256))

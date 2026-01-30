@@ -44,8 +44,6 @@ from jax._src.basearray import Array as Array
 from jax import tree as tree
 from jax import typing as typing
 
-from jax._src.lib import jaxlib_extension_version
-
 from jax._src.config import (
   config as config,
   enable_checks as enable_checks,
@@ -70,16 +68,15 @@ from jax._src.config import (
   jax2tf_associative_scan_reductions as jax2tf_associative_scan_reductions,
   legacy_prng_key as legacy_prng_key,
   threefry_partitionable as threefry_partitionable,
+  array_garbage_collection_guard as array_garbage_collection_guard,
   transfer_guard as transfer_guard,
   transfer_guard_host_to_device as transfer_guard_host_to_device,
   transfer_guard_device_to_device as transfer_guard_device_to_device,
   transfer_guard_device_to_host as transfer_guard_device_to_host,
   make_user_context as make_user_context,
   remove_size_one_mesh_axis_from_type as remove_size_one_mesh_axis_from_type,
+  thread_guard as thread_guard
 )
-if jaxlib_extension_version >= 395:
-  from jax._src.config import thread_guard as thread_guard
-del jaxlib_extension_version
 
 from jax._src.core import ensure_compile_time_eval as ensure_compile_time_eval
 from jax._src.environment_info import print_environment_info as print_environment_info
@@ -148,6 +145,7 @@ from jax._src.shard_map import shard_map as shard_map
 from jax._src.shard_map import smap as smap
 
 from jax.ref import new_ref as new_ref
+from jax.ref import empty_ref as empty_ref
 from jax.ref import freeze as freeze
 from jax.ref import Ref as Ref
 

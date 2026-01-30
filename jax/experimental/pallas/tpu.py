@@ -47,6 +47,9 @@ from jax._src.pallas.mosaic.primitives import get_barrier_semaphore as get_barri
 from jax._src.pallas.mosaic.primitives import load as load
 from jax._src.pallas.mosaic.primitives import make_async_copy as make_async_copy
 from jax._src.pallas.mosaic.primitives import make_async_remote_copy as make_async_remote_copy
+from jax._src.pallas.mosaic.primitives import matmul_push_rhs as matmul_push_rhs
+from jax._src.pallas.mosaic.primitives import matmul_acc_lhs as matmul_acc_lhs
+from jax._src.pallas.mosaic.primitives import matmul_pop as matmul_pop
 from jax._src.pallas.mosaic.primitives import pack_elementwise as pack_elementwise
 from jax._src.pallas.mosaic.primitives import prng_random_bits as prng_random_bits
 from jax._src.pallas.mosaic.primitives import prng_seed as prng_seed
@@ -55,6 +58,7 @@ from jax._src.pallas.mosaic.primitives import roll as roll
 from jax._src.pallas.mosaic.primitives import stochastic_round as stochastic_round
 from jax._src.pallas.mosaic.primitives import store as store
 from jax._src.pallas.mosaic.primitives import touch as touch
+from jax._src.pallas.mosaic.primitives import trace_value as trace_value
 from jax._src.pallas.mosaic.primitives import unpack_elementwise as unpack_elementwise
 from jax._src.pallas.mosaic.primitives import with_memory_space_constraint as with_memory_space_constraint
 from jax._src.pallas.mosaic.random import sample_block as sample_block

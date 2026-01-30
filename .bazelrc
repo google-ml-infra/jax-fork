@@ -3,6 +3,9 @@
 # #############################################################################
 # TODO: Enable Bzlmod
 common --noenable_bzlmod
+common:bzlmod --enable_bzlmod --noenable_workspace
+## Make sure direct dependencies specified match the resolved version.
+common:bzlmod --check_direct_dependencies=error
 
 # Make Bazel print out all options from rc files.
 common --announce_rc
@@ -246,6 +249,14 @@ common:rocm --copt=-Wno-gnu-offsetof-extensions
 common:rocm --copt=-Qunused-arguments
 common:rocm --action_env=TF_HIPCC_CLANG="1"
 
+# ASan works only for Linux x86_64
+common:asan --platforms=@rules_ml_toolchain//common:linux_x86_64_with_sanitizers
+common:asan --features=asan
+common:asan --strip=never
+common:asan --copt -DADDRESS_SANITIZER
+common:asan --copt -O1
+common:asan --copt -g
+
 # #############################################################################
 # Cache options below.
 # #############################################################################
@@ -451,6 +462,17 @@ common:rbe_windows_amd64 --define=override_eigen_strong_inline=true
 common:rbe_windows_amd64 --nobuild_python_zip
 
 common:rbe_windows_amd64 --config=ci_windows_amd64
+
+# New RBE configs for Windows. These run in the new ml-oss-rbe-general project.
+common:rbe_windows_amd64_new --config=rbe_windows_amd64
+
+# Override the remote instance and BES instance names to use the new RBE pools
+common:rbe_windows_amd64_new --remote_instance_name=projects/ml-oss-rbe-general/instances/default_instance
+common:rbe_windows_amd64_new --bes_instance_name="ml-oss-rbe-general"
+
+common:rbe_windows_amd64_new --host_platform="@xla//tools/toolchains/win2022:windows_ltsc2022_clang_new"
+common:rbe_windows_amd64_new --extra_execution_platforms="@xla//tools/toolchains/win2022:windows_ltsc2022_clang_new"
+common:rbe_windows_amd64_new --platforms="@xla//tools/toolchains/win2022:windows_ltsc2022_clang_new"
 
 # #############################################################################
 # Cross-compile config options below. Native RBE support does not exist for

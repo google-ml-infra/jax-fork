@@ -17,23 +17,24 @@ xla_workspace3()
 # Details: https://github.com/google-ml-infra/rules_ml_toolchain
 tf_http_archive(
     name = "rules_ml_toolchain",
-    sha256 = "54c1a357f71f611efdb4891ebd4bcbe4aeb6dfa7e473f14fd7ecad5062096616",
-    strip_prefix = "rules_ml_toolchain-d8cb9c2c168cd64000eaa6eda0781a9615a26ffe",
+    sha256 = "6c7659bb7b9215f3d7235ee000736ffda8cca2ecda528cc48fc7e8f73f1c3737",
+    strip_prefix = "rules_ml_toolchain-c05eda50ad564dcd2f9745a2b4ec582ef8444c71",
     urls = tf_mirror_urls(
-        "https://github.com/google-ml-infra/rules_ml_toolchain/archive/d8cb9c2c168cd64000eaa6eda0781a9615a26ffe.tar.gz",
+        "https://github.com/google-ml-infra/rules_ml_toolchain/archive/c05eda50ad564dcd2f9745a2b4ec582ef8444c71.tar.gz",
     ),
 )
 
-load(
-    "@rules_ml_toolchain//cc/deps:cc_toolchain_deps.bzl",
-    "cc_toolchain_deps",
-)
+load("@rules_ml_toolchain//cc/deps:cc_toolchain_deps.bzl", "cc_toolchain_deps")
 
 cc_toolchain_deps()
 
 register_toolchains("@rules_ml_toolchain//cc:linux_x86_64_linux_x86_64")
 
+register_toolchains("@rules_ml_toolchain//cc:linux_x86_64_linux_x86_64_with_sanitizers")
+
 register_toolchains("@rules_ml_toolchain//cc:linux_x86_64_linux_x86_64_cuda")
+
+register_toolchains("@rules_ml_toolchain//cc:linux_x86_64_linux_x86_64_cuda_with_sanitizers")
 
 register_toolchains("@rules_ml_toolchain//cc:linux_aarch64_linux_aarch64")
 

@@ -14,12 +14,25 @@ limitations under the License.
 ==============================================================================*/
 
 #include <cstdint>
+#include <memory>
+#include <optional>
+#include <utility>
 #include <variant>
 #include <vector>
 
 #include "absl/hash/hash.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "mlir-c/IR.h"
+#include "mlir/Bindings/Python/IRCore.h"
 #include "mlir/Bindings/Python/NanobindAdaptors.h"  // IWYU pragma: keep
+#include "mlir/CAPI/IR.h"
+#include "mlir/IR/Block.h"  // IWYU pragma: keep
+#include "mlir/IR/Builders.h"
+#include "mlir/IR/Location.h"  // IWYU pragma: keep
+#include "mlir/IR/MLIRContext.h"
+#include "mlir/IR/Operation.h"  // IWYU pragma: keep
+#include "mlir/IR/Value.h"  // IWYU pragma: keep
 #include "nanobind/nanobind.h"
 #include "nanobind/operators.h"  // IWYU pragma: keep
 #include "nanobind/stl/string.h"  // IWYU pragma: keep
@@ -31,6 +44,36 @@ limitations under the License.
 
 namespace nb = nanobind;
 namespace mgpu = jax::mosaic::gpu;
+
+namespace {
+
+using ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::PyInsertionPoint;
+
+// Returns an ImplicitLocOpBuilder with the given `loc` location and `ip`
+// insertion point. Returns invalid argument error if the block is not specified
+// in the insertion point.
+absl::StatusOr<mlir::ImplicitLocOpBuilder> MlirBuilder(nb::object ip,
+                                                       nb::object loc) {
+  auto insertion_point = nb::cast<PyInsertionPoint>(ip);
+  mlir::Location location = unwrap(nb::cast<MlirLocation>(loc));
+  mlir::Block* block = unwrap(insertion_point.getBlock().get());
+  if (block == nullptr) {
+    return absl::InvalidArgumentError("MLIR block is null");
+  }
+  mlir::Operation* ref_op = nullptr;
+  if (insertion_point.getRefOperation()) {
+    if (auto* py_op = insertion_point.getRefOperation()->get(); py_op) {
+      ref_op = unwrap(py_op->get());
+    }
+  }
+  mlir::ImplicitLocOpBuilder builder(location, block, block->end());
+  if (ref_op != nullptr) {
+    builder.setInsertionPoint(ref_op);
+  }
+  return builder;
+}
+
+}  // namespace
 
 NB_MODULE(_mosaic_gpu_ext, m) {
   m.def(
@@ -361,6 +404,43 @@ NB_MODULE(_mosaic_gpu_ext, m) {
                      }
                      return nb::tuple(nb::cast(*self.TiledTilingShape()));
                    })
+      .def(
+          "warp_indices",
+          [](const mgpu::TiledLayout& self, nb::object ip, nb::object loc) {
+            auto builder = MlirBuilder(ip, loc);
+            if (!builder.ok()) {
+              throw nb::value_error(builder.status().message().data());
+            }
+            auto result = self.WarpIndices(*builder);
+            if (!result.ok()) {
+              throw nb::value_error(result.status().message().data());
+            }
+            nb::list l;
+            for (const auto& v : *result) {
+              l.append(nb::cast(wrap(v)));
+            }
+            return nb::tuple(l);
+          },
+          nb::arg("ip"), nb::arg("loc"))
+      .def(
+          "lane_indices",
+          [](const mgpu::TiledLayout& self, nb::object ip, nb::object loc) {
+            auto builder = MlirBuilder(ip, loc);
+            if (!builder.ok()) {
+              throw nb::value_error(builder.status().message().data());
+            }
+            auto result = self.LaneIndices(*builder);
+            if (!result.ok()) {
+              throw nb::value_error(result.status().message().data());
+            }
+            nb::list l;
+            for (const auto& v : *result) {
+              l.append(nb::cast(wrap(v)));
+            }
+            return nb::tuple(l);
+          },
+          nb::arg("ip"), nb::arg("loc"))
+
       .def("canonicalize",
            [](const mgpu::TiledLayout& self) {
              auto result = self.Canonicalize();
@@ -368,6 +448,86 @@ NB_MODULE(_mosaic_gpu_ext, m) {
                throw nb::value_error(result.status().message().data());
              }
              return *result;
+           })
+      .def(
+          "registers_shape",
+          [](const mgpu::TiledLayout& self, const std::vector<int64_t>& shape) {
+            auto result = self.RegistersShape(shape);
+            if (!result.ok()) {
+              throw nb::value_error(result.status().message().data());
+            }
+            return nb::tuple(nb::cast(*result));
+          },
+          nb::arg("shape"))
+      .def(
+          "registers_element_type",
+          [](const mgpu::TiledLayout& self, MlirType t) {
+            auto result = self.RegistersElementType(unwrap(t));
+            if (!result.ok()) {
+              throw nb::value_error(result.status().message().data());
+            }
+            return nb::cast(wrap(*result));
+          },
+          nb::arg("t"))
+      .def(
+          "shape_from_registers_shape",
+          [](const mgpu::TiledLayout& self, const std::vector<int64_t>& shape) {
+            auto result = self.ShapeFromRegistersShape(shape);
+            if (!result.ok()) {
+              throw nb::value_error(result.status().message().data());
+            }
+            return nb::tuple(nb::cast(*result));
+          },
+          nb::arg("shape"))
+      .def_prop_ro("base_tile_shape",
+                   [](const mgpu::TiledLayout& self) {
+                     return nb::tuple(nb::cast(self.BaseTileShape()));
+                   })
+      .def(
+          "remove_dimension",
+          [](const mgpu::TiledLayout& self, int64_t dim) {
+            auto result = self.RemoveDimension(dim);
+            if (!result.ok()) {
+              throw nb::value_error(result.status().message().data());
+            }
+            return *result;
+          },
+          nb::arg("dim"))
+      .def(
+          "reduce",
+          [](const mgpu::TiledLayout& self, nb::iterable axes) {
+            std::vector<int64_t> axes_vec;
+            for (const auto& axis : axes) {
+              axes_vec.push_back(nb::cast<int64_t>(axis));
+            }
+            auto result = self.Reduce(axes_vec);
+            if (!result.ok()) {
+              throw nb::value_error(result.status().message().data());
+            }
+            return *result;
+          },
+          nb::arg("axes"))
+      .def("thread_idxs",
+           [](const mgpu::TiledLayout& self, const std::vector<int64_t>& shape,
+              nb::object ip, nb::object loc) {
+             auto builder = MlirBuilder(ip, loc);
+             if (!builder.ok()) {
+               throw nb::value_error(builder.status().message().data());
+             }
+
+             auto result = self.ThreadIdxs(*builder, shape);
+             if (!result.ok()) {
+               throw nb::value_error(result.status().message().data());
+             }
+             nb::list list;
+             for (const auto& row : *result) {
+               nb::list inner_list;
+               for (const auto& val : row) {
+                 inner_list.append(nb::cast(wrap(val)));
+               }
+               list.append(nb::tuple(inner_list));
+             }
+             return list;
            })
       .def("__str__", &mgpu::TiledLayout::ToString)
       .def("__repr__", &mgpu::TiledLayout::ToString)

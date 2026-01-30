@@ -40,6 +40,8 @@ jax_multiplatform_test(
             "//tests/config:tsan_freethreading_rbe": 10,
             "//conditions:default": 5,
         }),
+        "gpu": 5,
+        "tpu": 5,
     },
     deps = py_deps([
         "absl/testing",
@@ -1263,7 +1265,7 @@ jax_multiplatform_test(
     srcs = ["pytorch_interoperability_test.py"],
     enable_backends = [
         "cpu",
-        "gpu",
+        # "gpu",  # TODO(b/477964663): Broken by PyTorch 2.10.0 upgrade.
     ],
     tags = [
         "noasan",  # TODO(b/392599624): torch fails to build.

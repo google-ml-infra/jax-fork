@@ -3472,6 +3472,14 @@ def _tri(dtype: DTypeLike, shape: Shape, offset: DimSize) -> Array:
   return convert_element_type_p.bind(bool_tri, new_dtype=dtype, weak_type=False,
                                      sharding=None)
 
+def _stop_gradient(x):
+  if dtypes.issubdtype(core.get_aval(x).dtype, dtypes.extended):
+    return x
+  elif isinstance(x, ad.JVPTracer):
+    return _stop_gradient(x.primal)
+  else:
+    return ad_util.stop_gradient_p.bind(x)
+
 def stop_gradient(x: T) -> T:
   """Stops gradient computation.
 
@@ -3517,14 +3525,7 @@ def stop_gradient(x: T) -> T:
     efficiency. Refer to :ref:`stopping-gradients` for more discussion of
     the applicability of ``stop_gradient``.
   """
-  def stop(x):
-    if dtypes.issubdtype(core.get_aval(x).dtype, dtypes.extended):
-      return x
-    elif isinstance(x, ad.JVPTracer):
-      return stop(x.primal)
-    else:
-      return ad_util.stop_gradient_p.bind(x)
-  return tree_util.tree_map(stop, x)
+  return tree_util.tree_map(_stop_gradient, x)
 
 def reduce_precision(operand: float | ArrayLike,
                      exponent_bits: int,
@@ -5022,12 +5023,18 @@ ad.primitive_transposes[convert_element_type_p] = _convert_element_type_transpos
 
 def _convert_element_type_batching_rule(
     axis_data, batched_args, batch_dims, *, new_dtype, weak_type, sharding):
-  if sharding is not None:
-    sharding = batching.get_sharding_for_vmap(axis_data, sharding, 0)
-  new_params = dict(new_dtype=new_dtype, weak_type=weak_type, sharding=sharding)
-  return convert_element_type_p.bind(*batched_args, **new_params), batch_dims[0]
+  operand, = batched_args
+  operand_bdim, = batch_dims
+  if operand_bdim is not None:
+    if sharding is not None:
+      sharding = batching.get_sharding_for_vmap(axis_data, sharding, 0)
+    new_params = dict(new_dtype=new_dtype, weak_type=weak_type, sharding=sharding)
+    return convert_element_type_p.bind(operand, **new_params), operand_bdim
+  else:
+    out = convert_element_type_p.bind(operand, new_dtype=new_dtype,
+                                      weak_type=weak_type, sharding=sharding)
+    return out, None
 batching.fancy_primitive_batchers[convert_element_type_p] = _convert_element_type_batching_rule
-batching.skippable_batchers[convert_element_type_p] = lambda _: ()
 
 pe.const_fold_rules[convert_element_type_p] = _convert_elt_type_folding_rule
 pe.forwarding_rules[convert_element_type_p] = _convert_elt_type_fwd_rule
@@ -5513,9 +5520,13 @@ def _dot_batch_rule(
     preferred_element_type: DTypeLike | None,
     **_,
 ):
-
   lhs, rhs = unpack_args(batched_args)
   lbd, rbd = unpack_dims(batch_dims)
+  if lbd is None and rbd is None:
+    out = invoke_prim(lhs, rhs, dimension_numbers, precision=precision,
+                      preferred_element_type=preferred_element_type,
+                      out_sharding=out_sharding)
+    return out, None
   new_dimension_numbers, result_stack_dim = _dot_general_batch_dim_nums(
       (np.ndim(lhs), np.ndim(rhs)), (lbd, rbd),
       dimension_numbers)
@@ -5645,13 +5656,9 @@ def _dot_general_batch_unpack_dims(batch_dims):
 ad.defbilinear(dot_general_p,
                _dot_general_transpose_lhs, _dot_general_transpose_rhs)
 _dot_general_batch_rule = functools.partial(
-    _dot_batch_rule,
-    _dot_general_batch_unpack_args,
-    _dot_general_batch_unpack_dims,
-    dot_general,
-)
+    _dot_batch_rule, _dot_general_batch_unpack_args,
+    _dot_general_batch_unpack_dims, dot_general)
 batching.fancy_primitive_batchers[dot_general_p] = _dot_general_batch_rule
-batching.skippable_batchers[dot_general_p] = lambda _: ()
 core.pp_eqn_rules[dot_general_p] = _dot_general_pp_rule
 
 
@@ -6230,7 +6237,6 @@ ragged_dot_general_p = standard_primitive(
 ad.primitive_jvps[ragged_dot_general_p] = _ragged_dot_general_jvp_rule
 ad.primitive_transposes[ragged_dot_general_p] = _ragged_dot_general_transpose_rule
 batching.fancy_primitive_batchers[ragged_dot_general_p] = _ragged_dot_general_batch_rule
-batching.skippable_batchers[ragged_dot_general_p] = lambda _: ()
 
 
 def _ragged_dot_general_impl(
@@ -6483,7 +6489,11 @@ def _broadcast_in_dim_batch_rule(axis_data, batched_args, batch_dims, shape,
   # dimension broadcast_dimensions[i] of the output.
   operand, = batched_args
   operand_bdim, = batch_dims
-  assert operand_bdim is not None
+  if operand_bdim is None:
+    out = broadcast_in_dim_p.bind(
+        operand, shape=shape, broadcast_dimensions=broadcast_dimensions,
+        sharding=sharding)
+    return out, None
   new_operand = batching.moveaxis(operand, operand_bdim, 0)
   new_broadcast_dimensions = (0,) + tuple(np.add(1, broadcast_dimensions))
   new_shape = (operand.shape[operand_bdim],) + shape
@@ -6558,7 +6568,6 @@ broadcast_in_dim_p.def_impl(partial(dispatch.apply_primitive, broadcast_in_dim_p
 ad.primitive_jvps[broadcast_in_dim_p] = _broadcast_in_dim_jvp_rule
 ad.primitive_transposes[broadcast_in_dim_p] = _broadcast_in_dim_transpose_rule
 batching.fancy_primitive_batchers[broadcast_in_dim_p] = _broadcast_in_dim_batch_rule
-batching.skippable_batchers[broadcast_in_dim_p] = lambda _: ()
 pe.forwarding_rules[broadcast_in_dim_p] = _broadcast_in_dim_fwd_rule
 pe.custom_partial_eval_rules[broadcast_in_dim_p] = _broadcast_in_dim_partial_eval
 pe.custom_staging_rules[broadcast_in_dim_p] = _broadcast_in_dim_staging_rule
@@ -7200,6 +7209,10 @@ def _reshape_batch_rule(axis_data, batched_args, batch_dims, *, new_sizes,
                         dimensions, sharding):
   operand, = batched_args
   bdim, = batch_dims
+  if bdim is None:
+    out = reshape_p.bind(operand, new_sizes=new_sizes, dimensions=dimensions,
+                         sharding=sharding)
+    return out, None
   operand = batching.moveaxis(operand, bdim, 0)
   if dimensions is not None:
     dimensions = (0,) + tuple(np.add(1, dimensions))
@@ -7230,7 +7243,6 @@ reshape_p = standard_primitive(_reshape_shape_rule, _reshape_dtype_rule,
                                vma_rule=partial(core.standard_vma_rule, 'reshape'))
 ad.deflinear2(reshape_p, _reshape_transpose_rule)
 batching.fancy_primitive_batchers[reshape_p] = _reshape_batch_rule
-batching.skippable_batchers[reshape_p] = lambda _: ()
 mlir.register_lowering(reshape_p, _reshape_lower)
 core.custom_typechecks[reshape_p] = _reshape_typecheck_rule
 pe.custom_staging_rules[reshape_p] = _reshape_staging_rule
@@ -7384,6 +7396,10 @@ def _select_transpose_rule(t, which, *cases):
 def _select_batch_rule(axis_data, batched_args, batch_dims, **unused_kwargs):
   which, *cases = batched_args
   which_bdim, *case_bdims = batch_dims
+  if all(bdim is None for bdim in batch_dims):
+    out = select_n_p.bind(which, *cases, **unused_kwargs)
+    return out, None
+
   size = next(x.shape[i] for x, i in zip(batched_args, batch_dims)
               if i is not None)
 
@@ -7502,7 +7518,6 @@ select_n_p = standard_primitive(
 ad.primitive_jvps[select_n_p] = _select_jvp
 ad.primitive_transposes[select_n_p] = _select_transpose_rule
 batching.fancy_primitive_batchers[select_n_p] = _select_batch_rule
-batching.skippable_batchers[select_n_p] = lambda _: ()
 mlir.register_lowering(select_n_p, _select_hlo_lowering)
 
 
@@ -8465,7 +8480,9 @@ def dce_sink(val):
   tree_util.tree_map(dce_sink_p.bind, val)
 
 class NoDCEEffect(effects.Effect):
-  pass
+  # we don't inherit these from `object` due to serialization.py
+  def __hash__(self): return hash(type(self))
+  def __eq__(self, other): return type(self) is type(other)
 no_dce_effect = NoDCEEffect()
 effects.control_flow_allowed_effects.add_type(NoDCEEffect)
 effects.lowerable_effects.add_type(NoDCEEffect)

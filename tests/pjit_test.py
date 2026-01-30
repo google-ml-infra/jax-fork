@@ -41,7 +41,6 @@ from jax import lax
 from jax._src.lax import lax as lax_internal
 from jax.lax import with_sharding_constraint
 from jax._src import prng
-from jax._src import lib
 from jax.sharding import (PartitionSpec as P, Mesh, auto_axes, explicit_axes,
                           AbstractDevice)
 from jax.experimental import multihost_utils
@@ -63,7 +62,6 @@ from jax._src import mesh as mesh_lib
 from jax._src.mesh import AxisType
 from jax._src.interpreters import pxla
 from jax._src.lib import xla_client as xc
-from jax._src.lib import ifrt_version
 from jax._src.util import curry, unzip2
 
 config.parse_flags_with_absl()
@@ -3096,7 +3094,6 @@ class ArrayPjitTest(jtu.JaxTestCase):
       pjit(_pmapped_fun)(inputs)  # doesn't crash
       jax.jit(_pmapped_fun)(inputs)  # doesn't crash
 
-  @unittest.skipIf(lib.jaxlib_extension_version < 394, "jaxlib version")
   @jtu.thread_unsafe_test()  # logging is not thread-safe
   def test_cache_miss_explanations_sharding_mismatch(self):
     mesh = jtu.create_mesh((2,), ('x',))
@@ -5072,10 +5069,11 @@ class ShardingInTypesTest(jtu.JaxTestCase):
         "mul got incompatible shardings for broadcasting"):
       g(arr1, jax.device_put(np_inp1, NamedSharding(mesh, jax.P(('x', 'y')))))
 
+  # TODO(b/448574823) - Expect an all-gather in the `contracting2` test case.
   @parameterized.named_parameters(
       ('x_y', P('x', None), P(None, 'y'), P('x', 'y'), None),
       ('x_None', P('x', None), P(None, None), P('x', None), None),
-      ('contracting2', P('x', 'y'), P(None, None), P('x', None), 'all-gather'),
+      ('contracting2', P('x', 'y'), P(None, None), P('x', None), None),
       ('fsdp', P('x', None), P('x', None), P('x', None), 'all-gather'),
       ('half_tp', P(None, 'y'), P(None, 'y'), P(None, 'y'), 'all-gather'),
   )
@@ -9692,10 +9690,6 @@ class ShardingInTypesTest(jtu.JaxTestCase):
   )
   @jtu.with_explicit_mesh((2,), 'x')
   def test_both_inputs_reduced(self, func, mesh):
-    if ifrt_version < 46:
-      self.skipTest('Requires ifrt_version >= 46')
-    if not jtu.is_cloud_tpu_at_least(2025, 12, 22):
-      self.skipTest('Requires libtpu built after 2025-12-22')
     arr1 = jax.device_put(np.arange(8.), P(reduced={'x'}))
     arr2 = jax.device_put(np.arange(8.), P(reduced={'x'}))
 
@@ -9768,10 +9762,6 @@ class ShardingInTypesTest(jtu.JaxTestCase):
 
   @jtu.with_explicit_mesh((2,), ('x',))
   def test_scalar_to_unreduced(self, mesh):
-    if ifrt_version < 46:
-      self.skipTest('Requires ifrt_version >= 46')
-    if not jtu.is_cloud_tpu_at_least(2025, 12, 22):
-      self.skipTest('Requires libtpu built after 2025-12-22')
     inp = jnp.array(1)
     for s in inp.addressable_shards:
       self.assertArraysEqual(s.data, inp)
@@ -9806,10 +9796,6 @@ class ShardingInTypesTest(jtu.JaxTestCase):
   @jtu.with_explicit_mesh((2, 2, 2), ('x', 'y', 'z'))
   def test_replicated_sharded_unreduced_roundtrip(
       self, shape, orig_spec, un_spec, mesh):
-    if ifrt_version < 46:
-      self.skipTest('Requires ifrt_version >= 46')
-    if not jtu.is_cloud_tpu_at_least(2025, 12, 22):
-      self.skipTest('Requires libtpu built after 2025-12-22')
     np1 = np.arange(math.prod(shape)).reshape(shape)
     arr = jax.device_put(np1, orig_spec)
 
@@ -10098,6 +10084,57 @@ class ShardingInTypesTest(jtu.JaxTestCase):
     out = tile(x)
     self.assertEqual(out.sharding, NamedSharding(mesh, P(None, ('x', 'y'))))
     self.check_wsc_in_lowered(tile.lower(x).as_text())
+
+  @jtu.with_explicit_mesh((2, 2), ('x', 'y'))
+  def test_vmap_grad_axis_error(self, mesh):
+    def einsum_loss(a, b):
+      einsum_out = jnp.einsum('xyz,wz->xyw', b, a, out_sharding=jax.P())
+      loss_value = jnp.sum(einsum_out)
+      return loss_value
+
+    a = jax.device_put(np.ones((32, 64), dtype=jnp.float32), P(None, 'y'))
+    b = jax.device_put(np.ones((8, 1, 32, 64), dtype=jnp.float32),
+                       jax.P(('x', 'y'), None, None))
+    with self.assertRaisesRegex(
+        ValueError, "Unmapped values passed to vmap cannot be sharded"):
+      jax.jit(jax.vmap(jax.grad(einsum_loss), in_axes=(None, 0)))(a, b)
+
+  def test_no_op_auto_axes_no_mesh(self):
+    @auto_axes(out_sharding=P())
+    def g(x):
+      return x
+
+    @jax.jit
+    def f(x):
+      return g(x)
+
+    f(np.arange(8))  # doesn't crash
+
+  @jtu.with_explicit_mesh((2,), 'x')
+  def test_device_put_unreduced_error(self, mesh):
+    with self.assertRaisesRegex(
+        NotImplementedError, "device_put with unreduced is not implemented"):
+      jax.device_put(np.arange(8), P(unreduced={'x'}))
+
+    with self.assertRaisesRegex(
+        NotImplementedError, "device_put with unreduced is not implemented"):
+      jax.device_put(np.arange(8), NamedSharding(mesh, P(unreduced={'x'})))
+
+    arr_unreduced = jax.reshard(jnp.arange(8), P(unreduced={'x'}))
+    with self.assertRaisesRegex(
+        NotImplementedError, "device_put with unreduced is not implemented"):
+      jax.device_put(arr_unreduced, P())
+
+    out = jax.device_put(np.arange(8), P(reduced={'x'}))
+    self.assertEqual(out.sharding, NamedSharding(mesh, P(reduced={'x'})))
+    self.assertEqual(out.aval.sharding,
+                     NamedSharding(mesh.abstract_mesh, P(None, reduced={'x'})))
+
+    arr_reduced = jax.reshard(jnp.arange(8), P(reduced={'x'}))
+    out = jax.device_put(arr_reduced, P())
+    self.assertEqual(out.sharding, NamedSharding(mesh, P()))
+    self.assertEqual(out.aval.sharding,
+                     NamedSharding(mesh.abstract_mesh, P(None)))
 
 
 @jtu.pytest_mark_if_available('multiaccelerator')
@@ -10803,6 +10840,36 @@ class UtilTest(jtu.JaxTestCase):
     jaxpr = f.trace(arr, arr).jaxpr
     out = dispatch.get_intermediate_shardings(jaxpr)
     self.assertLen(out, 16)
+
+  def test_compile_after_trace_and_lower_on_abstract_mesh(self):
+    mesh = jtu.create_mesh((4,), ('x',))
+    abstract_sharding = NamedSharding(mesh.abstract_mesh, P('x'))
+
+    jitted = jax.jit(
+        lambda x: x * 2,
+        in_shardings=abstract_sharding,
+        out_shardings=abstract_sharding,
+    )
+
+    abstract_arr = jax.ShapeDtypeStruct(
+        mesh.devices.shape, np.float32, sharding=abstract_sharding
+    )
+    traced = jitted.trace(abstract_arr)
+
+    lowered = traced.lower(lowering_platforms=(mesh.devices.flat[0].platform,))
+
+    # Repeat twice to test that `compile()` behaves consistently across
+    # calls.
+    for _ in range(2):
+      # Compiling without a device assignment should fail, as we
+      # traced/lowered on an abstract mesh.
+      with self.assertRaisesRegex(
+          RuntimeError, 'device_assignment cannot be `None`'
+      ):
+        lowered.compile()
+
+      # Compiling with a device assignment should succeed.
+      lowered.compile(device_assignment=tuple(mesh.devices.flat))
 
 
 if __name__ == '__main__':

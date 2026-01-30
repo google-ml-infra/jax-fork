@@ -41,7 +41,6 @@ from jax._src import hardware_utils
 from jax._src import traceback_util
 from jax._src import util
 from jax._src.cloud_tpu_init import get_tpu_library_path
-from jax._src.lib import jaxlib_extension_version
 from jax._src.lib import xla_client
 from jax._src.lib import _jax
 from jax._src.lib import _profiler
@@ -197,13 +196,6 @@ def make_tpu_client(
     _jax.initialize_pjrt_plugin('tpu')
   if options is None:
     options = {}
-  if jaxlib_extension_version < 397:
-    return _jax.get_c_api_client(
-        "tpu",
-        options,
-        distributed.global_state.client,
-        _make_transfer_server_factory(),
-    )
   return _jax.get_c_api_client(
       "tpu",
       options,
@@ -286,9 +278,6 @@ _plugin_callback_lock = threading.Lock()
 # that a reasonable feature set is implemented and the plugin fails gracefully
 # for unimplemented features. Wrong outputs are not acceptable.
 _nonexperimental_plugins: set[str] = {'cuda', 'rocm'}
-
-# The set of known experimental plugins that have registrations in JAX codebase.
-_experimental_plugins: set[str] = {"METAL"}
 
 def register_backend_factory(name: str, factory: BackendFactory, *,
                              priority: int = 0,
@@ -560,13 +549,6 @@ def make_pjrt_c_api_client(
     distribute_options['partition_index'] = partition_index
   if options is not None:
     distribute_options.update(updated_options)
-  if jaxlib_extension_version < 397:
-    return xla_client.make_c_api_client(
-        plugin_name,
-        distribute_options,
-        distributed.global_state.client,
-        _make_transfer_server_factory(),
-    )
   return xla_client.make_c_api_client(
       plugin_name,
       distribute_options,
@@ -708,7 +690,6 @@ for _platform, _alias in _platform_aliases.items():
 def known_platforms() -> set[str]:
   platforms = set()
   platforms |= set(_nonexperimental_plugins)
-  platforms |= set(_experimental_plugins)
   platforms |= set(_backend_factories.keys())
   platforms |= set(_platform_aliases.values())
   return platforms

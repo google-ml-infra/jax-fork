@@ -17,6 +17,16 @@ When releasing, please add the new-release-boilerplate to docs/pallas/CHANGELOG.
 ## Unreleased
 
 * New features:
+* Bug fixes:
+* Deprecations:
+* Changes:
+  * JAX tracers that are not of `Array` type (e.g., of `Ref` type) will no
+    longer report themselves to be instances of `Array`.
+
+
+## JAX 0.9.0 (January 20, 2026)
+
+* New features:
 
   * Added {func}`jax.thread_guard`, a context manager that detects when devices
     are used by multiple threads in multi-controller JAX.

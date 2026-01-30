@@ -90,6 +90,7 @@ CollectiveAxesType = Sequence[Hashable]
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class ResourceEstimatorContext:
+  reduction_scratch_bytes: int
   axis_names: _AxisNames
   lowering_semantics: mgpu.LoweringSemantics
 
@@ -361,7 +362,6 @@ def _run_scoped_resource_estimator(
           f"Unsupported memory space: {aval.memory_space}")
   return rs + _estimate_resources(ctx, jaxpr)
 
-REDUCE_SCRATCH_ELEMS = 128 * 4  # vector of 4 elements per lane in each WG
 
 @_register_resource_estimator(lax.reduce_sum_p)
 @_register_resource_estimator(lax.reduce_max_p)
@@ -370,10 +370,10 @@ def _reduce_resource_estimator(
     ctx: ResourceEstimatorContext, x_aval: jax_core.ShapedArray, *, axes,
     **kwargs
 ) -> Resources:
-  del ctx, axes  # Unused.
+  del x_aval, axes, kwargs  # Unused.
   # We don't need SMEM for some reductions, but it depends on the layout, so we
   # conservatively request the maximum scratch space we might need.
-  return Resources(smem_scratch_bytes=REDUCE_SCRATCH_ELEMS * x_aval.dtype.itemsize)
+  return Resources(smem_scratch_bytes=ctx.reduction_scratch_bytes)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -420,6 +420,8 @@ class ModuleContext:
   mesh_info: pallas_utils.MeshInfo | None
   # See the documentation of unsafe_no_auto_barriers in CompilerParams.
   auto_barriers: bool
+  # See the documentation of reduction_scratch_bytes in CompilerParams.
+  reduction_scratch_bytes: int
   warp_axis_name: str | None = None
 
   @property
@@ -596,8 +598,9 @@ class LoweringRuleContext:
   @property
   def estimator_ctx(self) -> ResourceEstimatorContext:
     return ResourceEstimatorContext(
+        reduction_scratch_bytes=self.module_ctx.reduction_scratch_bytes,
         axis_names=self.module_ctx.axis_names,
-        lowering_semantics=self.module_ctx.lowering_semantics,
+        lowering_semantics=self.module_ctx.lowering_semantics
     )
 
 
@@ -886,6 +889,7 @@ def lower_jaxpr_to_module(
 
   rs = _estimate_resources(
       ResourceEstimatorContext(
+          reduction_scratch_bytes=params.reduction_scratch_bytes,
           axis_names=axis_names, lowering_semantics=lowering_semantics
       ),
       jaxpr,
@@ -982,6 +986,7 @@ def lower_jaxpr_to_module(
         if jax_mesh is not None
         else None,
         auto_barriers=not params.unsafe_no_auto_barriers,
+        reduction_scratch_bytes=params.reduction_scratch_bytes,
     )
     del runtime_smem, grouped_barriers, runtime_barriers
     _ = lower_jaxpr_to_mosaic_gpu(
@@ -1038,21 +1043,20 @@ def lower_jaxpr_to_module(
 
   # NOTE: new_out_shapes has out_shapes, then semaphores_shape and
   # optionally the profiler buffer.
-  module, new_out_shapes, _, launch_ctx = (
-      mgpu_core._lower_as_gpu_kernel(
-          body,
-          grid=cuda_grid,
-          cluster=cluster,
-          block=block,
-          in_shapes=(*in_shapes, *scoped_semaphores_shape),
-          out_shape=(*out_shapes, *scoped_semaphores_shape),
-          inout_shape=(),
-          smem_scratch_shape=scratch_buffers,
-          lowering_semantics=lowering_semantics,
-          module_name=mlir.sanitize_name(debug_info.func_name),
-          kernel_name=mlir.sanitize_name(debug_info.func_name),
-          prof_spec=prof_spec,
-      )
+  module, new_out_shapes, _, launch_ctx = mgpu_core._lower_as_gpu_kernel(
+      body,
+      grid=cuda_grid,
+      cluster=cluster,
+      block=block,
+      in_shapes=(*in_shapes, *scoped_semaphores_shape),
+      out_shape=(*out_shapes, *scoped_semaphores_shape),
+      inout_shape=(),
+      smem_scratch_shape=scratch_buffers,
+      lowering_semantics=lowering_semantics,
+      module_name=mlir.sanitize_name(debug_info.func_name),
+      kernel_name=mlir.sanitize_name(debug_info.func_name),
+      prof_spec=prof_spec,
+      jax_mesh=jax_mesh,
   )
 
   if lowering_semantics == mgpu.LoweringSemantics.Warpgroup:
@@ -1609,6 +1613,7 @@ def _get_lowering_rule(
           swizzle=swizzle,
           layout=ctx.out_layout_hint or mgpu.WGMMA_LAYOUT,
           optimized=optimized,
+          tiling_rank=len(tiling),
       )
     case (*maybe_transpose,):
       if maybe_transpose:
@@ -1752,8 +1757,9 @@ def _swap_lowering_rule(
           is_signed=mgpu_utils.is_signed(v_aval.dtype),
           swizzle=swizzle,
           layout=value.layout,
+          tiling_rank=len(tiling),
       )
-      value.store_tiled(x_smem, swizzle=swizzle)
+      value.store_tiled(x_smem, swizzle=swizzle, tiling_rank=len(tiling))
     case () | (gpu_core.TransposeRef(),):
       transposed = bool(transforms)
       match value.layout:
@@ -2590,12 +2596,11 @@ def _reduce_lowering_rule(op, ctx: LoweringRuleContext, x, *, axes, **kwargs):
         raise NotImplementedError("Multi-axis reductions not supported")
       reduced_dim = x.layout.tiling.tile_dimension(axes[0])
       if any(reduced_dim[d] for d in x.layout.partitioned_warp_dims):
-        size = x.layout.vector_length * 128  # a vector per lane in each WG.
-        if size > REDUCE_SCRATCH_ELEMS:
-          raise NotImplementedError(
-              f"Reduce scratch {size=} exceeds max={REDUCE_SCRATCH_ELEMS}"
-          )
-        scratch_ty = jax.ShapeDtypeStruct(shape=(size,), dtype=x_aval.dtype)
+        dtype_bitwidth = dtypes.itemsize_bits(x_aval.dtype)
+        if dtype_bitwidth % 8:
+          raise NotImplementedError("Sub-byte dtypes not supported")
+        scratch_elems = ctx.module_ctx.reduction_scratch_bytes * 8 // dtype_bitwidth
+        scratch_ty = jax.ShapeDtypeStruct(shape=(scratch_elems,), dtype=x_aval.dtype)
         ctx = ctx.module_ctx.scratch_view(scratch_ty)
       else:
         ctx = contextlib.nullcontext(None)
@@ -2634,15 +2639,19 @@ def _reduce_lowering_rule_wg(
           ir.VectorType.get([x_aval.size], out_type), x
       )
     reduction = vector_dialect.ReductionOp(out_type, kind, x)
-    reduction.attributes["offset"] = ir.IntegerAttr.get(
-        ir.IntegerType.get_signless(32), ctx.module_ctx.smem_used_bytes
+  else:
+    acc = vector_dialect.broadcast(
+        ir.VectorType.get(out_aval.shape, out_type),
+        _ensure_ir_value(acc, out_aval.dtype),
     )
-    return reduction.result
-  acc = vector_dialect.broadcast(
-      ir.VectorType.get(out_aval.shape, out_type),
-      _ensure_ir_value(acc, out_aval.dtype),
-  )
-  return vector_dialect.multi_reduction(kind, x, acc, axes)
+    reduction = vector_dialect.MultiDimReductionOp(kind, x, acc, axes)
+  def i32_attr(value: int) -> ir.IntegerAttr:
+    return ir.IntegerAttr.get(ir.IntegerType.get_signless(32), value)
+  reduction.attributes["offset"] = i32_attr(ctx.module_ctx.smem_used_bytes)
+  # TODO(bchetioui): here, we could just donate all the remaining free SMEM that
+  # we have at this point in time.
+  reduction.attributes["scratch_size"] = i32_attr(ctx.module_ctx.reduction_scratch_bytes)
+  return reduction.result
 
 
 @register_lowering_rule(lax.reduce_sum_p, mgpu.LoweringSemantics.Warpgroup)
@@ -3795,7 +3804,6 @@ def _semaphore_signal_lowering_rule(
   sem, transforms = _handle_transforms(ctx, sem, transforms)
   if transforms:
     raise NotImplementedError(f"Unhandled transforms for semaphore_signal: {transforms}")
-  sem_ptr = mgpu.utils.memref_ptr(sem)
   if device_id is not None:
     device_id, other_axes = primitives.device_id_to_logical(
         ctx.module_ctx.mesh_info,
@@ -3807,7 +3815,9 @@ def _semaphore_signal_lowering_rule(
       raise NotImplementedError(
           f"Only JAX mesh axes can be used in device_id, but found {other_axes}"
       )
-    sem_ptr = ctx.launch_ctx.to_remote(sem_ptr, device_id)
+    sem = ctx.launch_ctx.to_remote(sem, device_id)
+  sem_ptr = mgpu.utils.memref_ptr(sem)
+
   # TODO(apaszke): Narrow the scope from .sys to .gpu when the semaphore is local.
   val = _ir_constant(value, i32)
   # We only signal the semaphore from a single lane, which does not guarantee

@@ -895,6 +895,43 @@ def TPU_MatmulOp : TPU_Op<"matmul", [Pure]> {
   let hasVerifier = 1;
 }
 
+def TPU_MatmulPushRhsOp : TPU_Op<"matmul_push_rhs"> {
+  let arguments = (ins
+    AnyVectorOfNonZeroRank:$rhs,
+    I32Attr:$mxu_index,
+    DefaultValuedAttr<I32Attr, "0">:$staging_register,
+    DefaultValuedAttr<BoolAttr, "false">:$transpose
+  );
+  let results = (outs);
+  let assemblyFormat = [{
+    $rhs attr-dict `:` type($rhs)
+  }];
+}
+
+def TPU_MatmulAccLhsOp : TPU_Op<"matmul_acc_lhs"> {
+  let arguments = (ins
+    I32Attr:$acc,
+    AnyVectorOfNonZeroRank:$lhs,
+    I32Attr:$mxu_index,
+    OptionalAttr<I32Attr>:$load_staged_rhs
+  );
+  let results = (outs);
+  let assemblyFormat = [{
+    $acc `,` $lhs attr-dict `:` type($lhs)
+  }];
+}
+
+def TPU_MatmulPopOp : TPU_Op<"matmul_pop"> {
+  let arguments = (ins
+    I32Attr:$acc,
+    I32Attr:$mxu_index
+  );
+  let results = (outs AnyVectorOfNonZeroRank:$result);
+  let assemblyFormat = [{
+    $acc attr-dict `:` type($result)
+  }];
+}
+
 def TPU_ConcatenateOp : TPU_Op<"concatenate", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
   let arguments = (ins
     Variadic<AnyVectorOfNonZeroRank>:$sources,
@@ -1371,6 +1408,27 @@ def TPU_TraceStopOp : TPU_Op<"trace_stop", []> {
   let results = (outs);
 }
 
+def TPU_TraceValueOp : TPU_Op<"trace_value", []> {
+  let summary = "Emit a scalar value as a trace event.";
+  let description = [{
+    Emits a dynamic scalar value as a trace event.
+    When lowered to LLO, creates its own trace scope (start/value/stop).
+    Supported types: i32, f32.
+
+    Example:
+    ```mlir
+    %count = arith.constant 42 : i32
+    tpu.trace_value %count, "my_value" : i32
+    ```
+  }];
+  let arguments = (ins
+    AnyTypeOf<[I32, F32]>:$value,
+    StrAttr:$label
+  );
+  let results = (outs);
+  let assemblyFormat = [{ $value `,` $label attr-dict `:` type($value) }];
+}
+
 def TPU_YieldOp : TPU_Op<"yield", [Pure, ReturnLike, Terminator]> {
   let arguments = (ins Variadic<AnyType>:$results);
   let assemblyFormat = [{ attr-dict ($results^ `:` type($results))? }];
@@ -1493,6 +1551,7 @@ def TPU_LogBufferOp : TPU_Op<"log_buffer"> {
   let results = (outs);
   let assemblyFormat = [{ $tag attr-dict `:` $input `:` type($input) }];
   let hasVerifier = 1;
+  let hasCanonicalizeMethod = 1;
 }
 
 #endif  // TPU_OPS

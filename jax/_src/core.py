@@ -1288,6 +1288,10 @@ class AxisEnv:
     new_ema = self.explicit_mesh_axis_names | frozenset(axis_names)
     return AxisEnv(self.axis_sizes, self.spmd_axis_names, new_ema)
 
+  def remove_explicit_mesh_axis_names(self, axis_names):
+    new_ema = self.explicit_mesh_axis_names - frozenset(axis_names)
+    return AxisEnv(self.axis_sizes, self.spmd_axis_names, new_ema)
+
   def as_hashable_key(self):
     return tuple((name, size) for (name, size) in self.axis_sizes.items()
                  if name is not no_axis_name)
@@ -1398,7 +1402,7 @@ class AddSpmdAxisNamesContextManager:
 
 add_spmd_axis_names = AddSpmdAxisNamesContextManager
 
-
+# TODO(yashkatariya): Remove this once vmap handles mesh contexts correctly.
 class AddExplicitMeshAxisNamesContextManager:
   __slots__ = ['prev', 'axis_names']
 
@@ -1415,6 +1419,24 @@ class AddExplicitMeshAxisNamesContextManager:
     trace_ctx.set_axis_env(self.prev)
 
 add_explicit_mesh_axis_names = AddExplicitMeshAxisNamesContextManager
+
+# TODO(yashkatariya): Remove this once vmap handles mesh contexts correctly.
+class RemoveExplicitMeshAxisNamesContextManager:
+  __slots__ = ['prev', 'axis_names']
+
+  def __init__(self, axis_names: AxisName | None):
+    self.axis_names = axis_names
+
+  def __enter__(self):
+    self.prev = trace_ctx.axis_env
+    if self.axis_names is not None:
+      trace_ctx.set_axis_env(self.prev.remove_explicit_mesh_axis_names(
+          self.axis_names))
+
+  def __exit__(self, exc_type, exc_value, traceback):
+    trace_ctx.set_axis_env(self.prev)
+
+remove_explicit_mesh_axis_names = RemoveExplicitMeshAxisNamesContextManager
 
 
 def get_axis_env():
@@ -2358,6 +2380,8 @@ def primal_sharding_to_cotangent_sharding(sharding):
 
 # Invariant -> Variant no-op cast
 def pvary(x, axis_name):
+  if not config._check_vma.value:
+    return x
   axes = (axis_name,) if not isinstance(axis_name, tuple) else axis_name
   if not axis_name:
     return x
@@ -2379,6 +2403,8 @@ pvary_p = Primitive('pvary')
 
 # Reduced -> Varying no-op cast
 def reduced_vary_cast(x, axis_name):
+  if not config._check_vma.value:
+    return x
   axes = (axis_name,) if not isinstance(axis_name, tuple) else axis_name
   if not axis_name:
     return x
@@ -2388,16 +2414,18 @@ reduced_vary_cast_p = Primitive('reduced_vary_cast_p')
 
 #######################################################################
 
-def check_unreduced_args(args, name):
+def check_unreduced_args(args, axes, name):
+  axes = axes if isinstance(axes, (tuple, list)) else (axes,)
+  axes = set(axes)
   for a in args:
-    if a.sharding.spec.unreduced:
+    if a.sharding.spec.unreduced & axes:
       raise ValueError(
           f"{name} cannot accept args which are unreduced. Got"
-          f" {a.str_short(True)}")
-    if a.sharding.spec.reduced:
+          f" {a.str_short(True)} and axes={axes}")
+    if a.sharding.spec.reduced & axes:
       raise ValueError(
           f"{name} cannot accept args which are reduced. Got"
-          f" {a.str_short(True)}")
+          f" {a.str_short(True)} and axes={axes}")
 
 def standard_insert_pvary(*args):
   if not config._check_vma.value:
@@ -2547,6 +2575,21 @@ def _ref_to_lojax(init_val, *, memory_space, kind):
   aval = AbstractRef(typeof(init_val))
   return Ref(AbstractRef(val_ty), hival_of_refs)
 ref_p.to_lojax = _ref_to_lojax  # type: ignore
+
+
+# TODO(mattjj,dougalm): merge with ref_p
+def empty_ref(ty, memory_space=None):
+  aval = shaped_abstractify(ty)
+  return empty_ref_p.bind(ty=aval, memory_space=memory_space)
+empty_ref_p = Primitive('empty_ref')
+empty_ref_p.ref_primitive = True
+empty_ref_p.is_effectful = lambda _: True  # type: ignore
+
+@empty_ref_p.def_effectful_abstract_eval
+def _empty_ref_abstract_eval(*, ty, memory_space):
+  from jax._src.state.types import AbstractRef  # pytype: disable=import-error
+  return (AbstractRef(ty, memory_space=memory_space),
+          {internal_mutable_array_effect})
 
 
 class InternalMutableArrayEffect(effects.Effect):
@@ -3107,10 +3150,16 @@ def typematch(t1: AbstractValue, t2: AbstractValue,
 def cmp_shape_sharding_vma(t1, t2):
   # TODO(yashkatariya): Expand this to Manual and Auto mode.
   # See https://github.com/jax-ml/jax/issues/26474
-  if (not t1.sharding.mesh.empty and not t2.sharding.mesh.empty and
-      (t1.sharding.mesh._any_axis_explicit or
-        t2.sharding.mesh._any_axis_explicit)):
-    shd_eq = t1.sharding == t2.sharding
+  t1_mesh, t2_mesh = t1.sharding.mesh, t2.sharding.mesh
+  if not t1_mesh.empty and not t2_mesh.empty:
+    if t1_mesh._any_axis_explicit or t2_mesh._any_axis_explicit:
+      shd_eq = t1.sharding == t2.sharding
+    elif t1_mesh._any_axis_manual or t2_mesh._any_axis_manual:
+      # TODO(yashkatariya): Once reduced/unreduced is fused into vma, remove this.
+      shd_eq = (t1.sharding.spec.unreduced == t2.sharding.spec.unreduced or
+                t1.sharding.spec.reduced == t2.sharding.spec.reduced)
+    else:
+      shd_eq = True
   else:
     shd_eq = True
   return (shd_eq and definitely_equal_shape(t1.shape, t2.shape) and
@@ -3193,7 +3242,7 @@ class MutableTypecheckVal:
   mutable_qdd : MutableQuasiDynamicData
 
 
-_ref_allocating_primitives = {ref_p}
+_ref_allocating_primitives = {ref_p, empty_ref_p}
 
 
 def _check_jaxpr(

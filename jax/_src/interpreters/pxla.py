@@ -2038,6 +2038,8 @@ def jaxpr_transfer_mem_kinds(jaxpr: core.Jaxpr):
     if eqn.primitive is dispatch.device_put_p:
       out.extend(d for d in eqn.params['devices']
                  if isinstance(d, core.MemorySpace))
+    elif eqn.primitive.name == 'compute_on':
+      out.extend(o for o in eqn.params['out_memory_spaces'])
     elif eqn.primitive.name == 'call_exported':
       out.extend(aval.memory_space for aval in eqn.params['exported'].out_avals)
 
@@ -2506,15 +2508,19 @@ class MeshComputation(stages.Lowering):
       compilation_device_list = device_list
     assert isinstance(compilation_device_list, (type(None), xc.DeviceList))
 
-    if self._executable is None or compiler_options_kvs or device_assignment:
-      executable = UnloadedMeshExecutable.from_hlo(
-          self._name, self._hlo, **self.compile_args,
-          compiler_options_kvs=compiler_options_kvs,
-          device_list=compilation_device_list)
-      if not compiler_options_kvs:
-        self._executable = executable
-      return executable
-    return self._executable
+    # Only cache executable into `self` if `.compile()` in AOT is called without
+    # specifying compiler_options and device_assignment.
+    use_cache = compiler_options is None and device_assignment is None
+    if use_cache and self._executable is not None:
+      return self._executable
+
+    executable = UnloadedMeshExecutable.from_hlo(
+        self._name, self._hlo, **self.compile_args,
+        compiler_options_kvs=compiler_options_kvs,
+        device_list=compilation_device_list)
+    if use_cache:
+      self._executable = executable
+    return executable
 
   def cost_analysis(self) -> dict[str, float]:
     backend = self.compile_args["backend"]
@@ -3134,6 +3140,15 @@ class MeshExecutableFastpathData(NamedTuple):
   kept_var_bitvec: Iterable[bool]
   in_device_local_layouts: Sequence[Layout | None]
   const_args: Sequence[ArrayLike]
+
+
+def clear_in_memory_compilation_cache() -> None:
+  """Clears the in-memory compilation cache.
+
+  This function clears all cached executables that were compiled by
+  _cached_compilation function.
+  """
+  _cached_compilation.cache_clear()
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)

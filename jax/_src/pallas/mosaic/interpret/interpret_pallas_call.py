@@ -28,10 +28,10 @@ from jax._src import callback
 from jax._src import config
 from jax._src import core as jax_core
 from jax._src import frozen_dict
-from jax._src import linear_util as lu
 from jax._src import pjit
 from jax._src import source_info_util
 from jax._src.interpreters import mlir
+from jax._src.tree_util import FlatTree
 from jax._src.pallas import core as pallas_core
 from jax._src.pallas import primitives
 from jax._src.pallas.mosaic import core as mosaic_core
@@ -50,7 +50,7 @@ from jax._src.util import (
     safe_zip,
     split_list
 )
-from jax.interpreters import partial_eval as pe
+from jax._src.interpreters import partial_eval as pe
 import jax.numpy as jnp
 import numpy as np
 
@@ -1064,12 +1064,6 @@ def _compute_transformed_shape_and_dtype(shape, dtype, transforms):
   return shape, dtype
 
 
-@lu.cache
-def _to_jaxpr(flat_fun, in_avals):
-  new_jaxpr, _, consts = pe.trace_to_jaxpr_dynamic(flat_fun, in_avals)
-  new_jaxpr = jax_core.ClosedJaxpr(new_jaxpr, consts)
-  return new_jaxpr
-
 def _is_any(memory_space):
   return memory_space is pallas_core.MemorySpace.ANY
 
@@ -1236,11 +1230,11 @@ def _interpret_jaxpr(
         def f(*args, jaxpr):
           return _interpret(jaxpr.jaxpr, *jaxpr.consts, *args)
         invals = deferred_invals()
-        in_avals = tuple(jax_core.shaped_abstractify(i) for i in invals)
-        new_jaxpr = _to_jaxpr(
-            lu.wrap_init(functools.partial(f, jaxpr=eqn.params['jaxpr']),
-                        debug_info=eqn.params['jaxpr'].jaxpr.debug_info),
-            in_avals)
+        args_ft = FlatTree.flatten((invals, {}))
+        avals_ft = args_ft.map(jax_core.shaped_abstractify)
+        new_jaxpr, _ = pe.trace_to_jaxpr(
+            functools.partial(f, jaxpr=eqn.params['jaxpr']), avals_ft,
+            eqn.params['jaxpr'].jaxpr.debug_info)
         out = pjit.jit_p.bind(*invals, **(eqn.params | {'jaxpr': new_jaxpr}))
 
       elif prim is primitives.run_scoped_p:
@@ -1514,23 +1508,6 @@ def _compute_start_indices(
       dtype=jnp.int32,
   )
   return block_indices, ret
-
-def _get_next_indices(grid, indices):
-  next_indices = []
-  carry = True
-  for dim_size, index in reversed(list(zip(grid, indices))):
-    i = jnp.where(carry, index + 1, index)
-    carry = dim_size == i
-    next_indices.append(jnp.where(carry, 0, i))
-  return tuple(reversed(next_indices))
-
-def _get_indices(grid, loop_index):
-  indices = []
-  for dim_size in reversed(grid):
-    i = loop_index % dim_size
-    loop_index = loop_index // dim_size
-    indices.append(i)
-  return tuple(reversed(indices))
 
 def _get_mosaic_params(compiler_params: dict[str, pallas_core.CompilerParams]) -> mosaic_core.CompilerParams:
   try:
@@ -1997,7 +1974,7 @@ def interpret_pallas_call(
         )
 
       with pallas_core.grid_env(_get_local_grid_env(grid_point)):
-        next_loop_idx = _get_next_indices(grid, loop_idx)
+        next_loop_idx = interpret_utils.get_next_indices(grid, loop_idx)
         next_grid_point = _get_grid_point(
             next_loop_idx, randomized_grid_coordinates
         )
@@ -2179,7 +2156,7 @@ def interpret_pallas_call(
             next_start_indices,
         )
 
-    initial_loop_idx = _get_indices(grid, initial_iteration_idx)
+    initial_loop_idx = interpret_utils.get_indices(grid, initial_iteration_idx)
     initial_grid_point = _get_grid_point(
       initial_loop_idx, randomized_grid_coordinates)
     with pallas_core.grid_env(_get_local_grid_env(initial_grid_point)):

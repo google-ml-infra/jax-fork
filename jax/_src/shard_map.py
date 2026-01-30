@@ -325,6 +325,8 @@ def _shmap_checks(mesh, axis_names, in_specs, out_specs, _smap):
     raise TypeError("shard_map requires a `jax.sharding.Mesh` or a "
                     "`jax.sharding.AbstractMesh` instance for its "
                     f"second argument, but got {mesh} of type {type(mesh)}.")
+  if mesh.empty:
+    raise ValueError(f"shard_map requires a non-empty mesh. Got {mesh}")
 
   mesh_axis_names_wo_vmap = (
       frozenset(mesh.axis_names) - core.get_axis_env().explicit_mesh_axis_names
@@ -720,7 +722,9 @@ def _shard_map_staging(
                   in_avals)
   with (_extend_axis_env(mesh, manual_axes), use_abstract_mesh(inner_mesh),
         config._check_vma(check_vma)):
-    jaxpr, out_avals_, consts = pe.trace_to_jaxpr_dynamic(f, in_avals_)
+    jaxpr, out_avals_, consts = pe.trace_to_jaxpr_dynamic(
+        f, in_avals_, lower=trace.requires_low)
+
   _check_names(out_specs_thunk(), out_avals_)
   if check_vma:
     out_vma = [v.aval.vma for v in jaxpr.outvars]
@@ -737,6 +741,7 @@ def _shard_map_staging(
                 check_vma=check_vma, manual_axes=manual_axes)
   effs = core.filter_named_axis_effects(jaxpr.effects, mesh.axis_names)
   const_tracers = map(to_jaxpr_tracer, consts)
+  trace.frame.is_high |= jaxpr.is_high
   return trace.emit_eqn([*const_tracers, *in_tracers], out_avals, prim, params,
                          effs, source_info)
 pe.DynamicJaxprTrace.process_shard_map = _shard_map_staging
@@ -767,7 +772,10 @@ def _shard_shaped_array(mesh: Mesh, manual_axes: frozenset, check_vma,
   new_shape = tuple(sz // prod(mesh.shape[n] for n in names.get(i, ()))
                     for i, sz in enumerate(aval.shape))
   manual_mesh = _as_manual_mesh(mesh, manual_axes)
-  new_sharding = aval.sharding.update(mesh=manual_mesh)
+  new_spec = aval.sharding.spec.update(
+      unreduced=aval.sharding.spec.unreduced if check_vma else frozenset(),
+      reduced=aval.sharding.spec.reduced if check_vma else frozenset())
+  new_sharding = aval.sharding.update(mesh=manual_mesh, spec=new_spec)
   vma = _spec_to_vma(spec) if check_vma else frozenset()
   vma = vma | aval.vma
   return aval.update(shape=new_shape, sharding=new_sharding, vma=vma)
@@ -776,12 +784,12 @@ core.shard_aval_handlers[core.ShapedArray] = _shard_shaped_array
 def _unshard_shaped_array(mesh: Mesh, check_vma, spec, aval: core.AbstractValue
                           ) -> core.AbstractValue:
   assert isinstance(aval, core.ShapedArray)
-  if spec.unreduced != aval.sharding.spec.unreduced:
+  if check_vma and spec.unreduced != aval.sharding.spec.unreduced:
     raise ValueError(
         "out_specs passed to shard_map should be equal to the unreduced"
         f" present on the out_aval. Got out_specs={spec} and"
         f" out_aval={aval.str_short(True)}")
-  if spec.reduced != aval.sharding.spec.reduced:
+  if check_vma and spec.reduced != aval.sharding.spec.reduced:
     raise ValueError(
         "out_specs passed to shard_map should be equal to the reduced present"
         f" on the out_aval. Got out_specs={spec} and"
@@ -791,7 +799,7 @@ def _unshard_shaped_array(mesh: Mesh, check_vma, spec, aval: core.AbstractValue
                     for i, sz in enumerate(aval.shape))
   names_spec = spec._normalized_spec_for_aval(aval.ndim)
   if aval.ndim == 0:
-    out_spec = P()
+    out_spec = P(unreduced=spec.unreduced, reduced=spec.reduced)
   else:
     out_spec = []  # type: ignore
     for name_s, aval_s in zip(names_spec, aval.sharding.spec):
@@ -812,8 +820,7 @@ def _unshard_shaped_array(mesh: Mesh, check_vma, spec, aval: core.AbstractValue
               get_abstract_mesh())
   new_sharding = NamedSharding(new_mesh, out_spec)
   manual_axes = set(new_mesh.manual_axes)
-  vma = (frozenset(v for v in aval.vma if v in manual_axes)
-         if check_vma else frozenset())
+  vma = frozenset(v for v in aval.vma if v in manual_axes)
   return aval.update(shape=new_shape, sharding=new_sharding, vma=vma)
 core.unshard_aval_handlers[core.ShapedArray] = _unshard_shaped_array
 
@@ -1087,6 +1094,10 @@ def _spec_to_vma(spec):
 def _shard_map_impl(trace, prim, fun, args, *, mesh, in_specs, out_specs_thunk,
                     check_vma, manual_axes):
   del prim
+  if any(s.unreduced or s.reduced for s in in_specs):
+    raise NotImplementedError(
+        "Eager shard_map with unreduced/reduced is not implemented. Please wrap"
+        " your shard_map in `jax.jit`.")
   if isinstance(mesh, AbstractMesh):
     concrete_mesh = get_concrete_mesh()
     mesh = concrete_mesh if not concrete_mesh.empty else mesh
@@ -1105,6 +1116,10 @@ def _shard_map_impl(trace, prim, fun, args, *, mesh, in_specs, out_specs_thunk,
     src_pspecs = tuple(P(order_wrt_mesh(mesh, manual_axes))
                        for _ in range(len(out_vma)))
   dst_pspecs = out_specs_thunk()
+  if any(s.unreduced or s.reduced for s in dst_pspecs):
+    raise NotImplementedError(
+        "Eager shard_map with unreduced/reduced is not implemented. Please wrap"
+        " your shard_map in `jax.jit`.")
   return map(partial(_match_spec, mesh, check_vma, manual_axes),
              src_pspecs, dst_pspecs, outs)
 core.EvalTrace.process_shard_map = _shard_map_impl
@@ -1385,6 +1400,14 @@ def _device_put_eager_rule(mesh, *xs, srcs, devices, copy_semantics):
   return xs
 eager_rules[dispatch.device_put_p] = _device_put_eager_rule
 
+def raise_notimplemented(*args, **kwargs):
+  raise NotImplementedError(
+      "Eager shard_map with unreduced/reduced is not implemented. Please wrap"
+      " your shard_map in `jax.jit`.")
+
+eager_rules[lax_parallel.preduced_p] = raise_notimplemented
+eager_rules[lax_parallel.vary_unreduced_cast_p] = raise_notimplemented
+eager_rules[core.reduced_vary_cast_p] = raise_notimplemented
 
 # Batching
 
@@ -1679,7 +1702,7 @@ def _unmentioned2(mesh: Mesh, spec, manual_axes: frozenset[AxisName]
                   ) -> list[AxisName]:
   # We use a filtered-down version of unmentioned to avoid defensive-psum over
   # more chips than required in the transpose-no-check-vma case.
-  name_set = _spec_to_vma(spec)
+  name_set = _spec_to_vma(spec) | spec.unreduced
   return [n for n in _all_mesh_names_except_spmd(mesh, manual_axes)
           if n not in name_set]
 
