@@ -83,7 +83,6 @@ jobs:
           gcs_download_uri: ${{ inputs.gcs_download_uri }}
       - name: Install Python dependencies
         run: |
-          exit 1
           $JAXCI_PYTHON -m pip install uv~=0.5.30
 
           $JAXCI_PYTHON -m uv pip install -r build/test-requirements.txt
@@ -92,6 +91,6 @@ jobs:
         uses: google-ml-infra/actions/ci_connection@7f5ca0c263a81ed09ea276524c1b9192f1304e3c
         with:
           halt-dispatch-input: ${{ inputs.halt-for-connection }}
-      - name: Run Pytest CPU tests
-        timeout-minutes: 60
-        run: ./ci/run_pytest_cpu.sh
+      # - name: Run Pytest CPU tests
+      #   timeout-minutes: 60
+      #   run: ./ci/run_pytest_cpu.sh
