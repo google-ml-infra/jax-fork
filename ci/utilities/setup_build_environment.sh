@@ -30,10 +30,8 @@ fi
 
 function clone_main_xla() {
   echo "Cloning XLA at HEAD to $(pwd)/xla"
-  git clone https://github.com/openxla/xla.git $(pwd)/xla
+  git clone --depth=1 https://github.com/openxla/xla.git $(pwd)/xla
   cd $(pwd)/xla
-  # Pin XLA to a known working commit
-  git checkout 51051dca0202670381438cf46489fd9217bf5661
   echo "XLA commit: $(git log -1 --format=%H)"
   cd ..
   export JAXCI_XLA_GIT_DIR=$(pwd)/xla
