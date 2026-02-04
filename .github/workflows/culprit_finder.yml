@@ -8,12 +8,19 @@ on:
         type: string
         default: ""
         required: true
+      json_vars:
+        type: string
+        description: 'A JSON string of key-value pairs that will be passed as environment variables to the workflow. (e.g., {"NAME": "test", "VERSION": "1.2.3"})'
+        required: false
+        default: '{}'
 
 jobs:
   bisect-test-workflow:
     if: ${{ inputs.workflow-to-debug == 'hello_world.yml' }}
     uses: ./.github/workflows/hello_world.yml
     name: Bisect Test Workflow
+    with:
+      json_vars: ${{ inputs.json_vars }}
 
   bisect-wheel-test-continuous:
     if: ${{ inputs.workflow-to-debug == 'wheel_tests_continuous.yml' }}

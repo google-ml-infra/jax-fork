@@ -33,9 +33,8 @@ jobs:
           echo "Current SHA: ${{ github.sha }}"
           echo "Listing all environment variables:"
           env
-          sleep 5
-          echo "Fail!"
-          exit 1
+          echo "Success!"
+          exit 0
   build:
     runs-on: ubuntu-latest
     steps:
@@ -43,6 +42,5 @@ jobs:
         run: |
           echo "Current SHA: ${{ github.sha }}"
           echo "Build Job"
-          sleep 5
           echo "Success!"
           exit 0
