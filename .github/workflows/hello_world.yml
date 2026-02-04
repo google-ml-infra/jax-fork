@@ -33,8 +33,8 @@ jobs:
           echo "Current SHA: ${{ github.sha }}"
           echo "Listing all environment variables:"
           env
-          echo "Success!"
-          exit 0
+          echo "Fail!"
+          exit 1
   build:
     runs-on: ubuntu-latest
     steps:
