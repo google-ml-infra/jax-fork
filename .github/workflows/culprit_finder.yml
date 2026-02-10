@@ -16,6 +16,12 @@ on:
         description: 'A JSON string of key-value pairs that will be passed as environment variables to the workflow. (e.g., {"NAME": "test", "VERSION": "1.2.3"})'
         required: false
         default: '{"TEST": "my-cli-test"}'
+      xla-commit:
+        description: "[Wheel Tests] Specific XLA commit to pin"
+        type: string
+        required: false
+        default: ""
+
 
 permissions: {}
 
@@ -27,11 +33,10 @@ jobs:
     name: Bisect Hello World
     with:
       json_vars: ${{ inputs.json_vars }}
-  
-  bisect-wheel-continuous:
+
+  bisect-wheel-tests:
     if: ${{ inputs.workflow-to-debug == 'wheel_tests_continuous.yml' }}
     uses: ./.github/workflows/wheel_tests_continuous.yml
-    permissions:
-      contents: read
-    
-    name: Bisect Wheel Test Continuous
+    name: Bisect Wheel Tests
+    with:
+      xla-commit: ${{ inputs.xla-commit }}
