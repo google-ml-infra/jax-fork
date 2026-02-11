@@ -24,8 +24,6 @@
 #                           runs Bazel TPU tests with py_import.
 
 name: CI - Wheel Tests (Continuous)
-permissions:
-      contents: read
 
 on:
   schedule:
