@@ -23,7 +23,8 @@ on:
         default: ""
 
 
-permissions: {}
+permissions:
+  contents: read
 
 jobs:
   bisect-hello-world:
