@@ -507,9 +507,9 @@ jaxlib==0.8.2 \
     --hash=sha256:f28edac8c226fc07fa3e8af6f9defede8ac2c307429e3291edce8739d39becc9 \
     --hash=sha256:f472cc72e3058e50b5f0230b236d5a1183bf6c3d5423d2a52eff07bcf34908de
     # via -r build/requirements.in
-keras==3.12.0 \
-    --hash=sha256:02b69e007d5df8042286c3bcc2a888539e3e487590ffb08f6be1b4354df50aa8 \
-    --hash=sha256:536e3f8385a05ae04e82e08715a1a59988578087e187b04cb0a6fad11743f07f
+keras==3.13.2 \
+    --hash=sha256:14b2afc0f9c636cc295d28efc36aae42fc52e7b892c950eec33f3befe4d22fb5 \
+    --hash=sha256:62f0123488ac87c929c988617e14f293f7bc993811837d08bb37eff77adc85a9
     # via tensorflow
 kiwisolver==1.4.9 \
     --hash=sha256:0749fd8f4218ad2e851e11cc4dc05c7cbc0cbc4267bdfdb31782e65aace4ee9c \
