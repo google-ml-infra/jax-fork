@@ -23,16 +23,6 @@ Experimental Modules
     jax.experimental.mesh_utils
     jax.experimental.multihost_utils
     jax.experimental.pallas
-    jax.experimental.pjit
+    jax.experimental.random
     jax.experimental.serialize_executable
-    jax.experimental.shard_map
     jax.experimental.sparse
-
-Experimental APIs
------------------
-
-.. autosummary::
-   :toctree: _autosummary
-
-   enable_x64
-   disable_x64

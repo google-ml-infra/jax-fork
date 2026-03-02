@@ -74,6 +74,7 @@ limitations under the License.
 #include "xla/pjrt/pjrt_layout.h"
 #include "xla/pjrt/status_casters.h"
 #include "xla/python/ifrt/array.h"
+#include "xla/python/ifrt/attribute_map.h"
 #include "xla/python/ifrt/client.h"
 #include "xla/python/ifrt/compiler.h"
 #include "xla/python/ifrt/device.h"
@@ -93,6 +94,7 @@ limitations under the License.
 #include "xla/python/pjrt_ifrt/pjrt_executable.h"
 #include "xla/python/pjrt_ifrt/xla_compiler.h"
 #include "xla/python/types.h"
+#include "xla/python/version.h"
 #include "xla/service/platform_util.h"  // IWYU pragma: keep
 #include "xla/service/spmd/shardy/utils.h"  // IWYU pragma: keep
 #include "xla/shape.h"
@@ -348,7 +350,7 @@ absl::Status PyClient::Defragment() {
   }
   GlobalPyRefManager()->CollectGarbage();
 
-  xla::ifrt::UserContextScope user_context_scope(PyUserContext::Create());
+  PyUserContextScope user_context_scope;
   DevicePutOptions options;
   options.squash_64bit_types = false;
   options.allow_zero_copy =
@@ -410,6 +412,24 @@ MakeIfrtDeserializeExecutableOptions(std::optional<xla::CompileOptions> options,
       std::move(ifrt_loaded_host_callbacks));
 }
 
+std::unique_ptr<ifrt::DeserializeExecutableOptions>
+MakeIfrtDeserializeExecutableOptions(std::optional<xla::CompileOptions> options,
+                                     ifrt::DeviceListRef executable_devices,
+                                     std::vector<nb::callable> host_callbacks,
+                                     ifrt::Client* ifrt_client) {
+  std::vector<tsl::RCReference<ifrt::LoadedHostCallback>>
+      ifrt_loaded_host_callbacks;
+  ifrt_loaded_host_callbacks.reserve(host_callbacks.size());
+  for (auto& host_callback : host_callbacks) {
+    auto callback = tsl::MakeRef<PyFfiLoadedHostCallback>(
+        ifrt_client, std::move(host_callback));
+    ifrt_loaded_host_callbacks.push_back(callback);
+  }
+  return std::make_unique<ifrt::XlaDeserializeExecutableOptions>(
+      std::move(options), std::move(executable_devices),
+      std::move(ifrt_loaded_host_callbacks));
+}
+
 }  // namespace
 
 /* static */ absl::StatusOr<nb_class_ptr<PyLoadedExecutable>>
@@ -446,7 +466,7 @@ PyClient::CompileAndLoadIfrtProgram(
     }
   }
 
-  xla::ifrt::UserContextScope user_context_scope(PyUserContext::Create());
+  PyUserContextScope user_context_scope;
   ifrt::LoadedExecutableRef ifrt_loaded_executable;
   std::optional<std::string> fingerprint;
   absl::Status compile_status;
@@ -479,7 +499,7 @@ PyClient::CompileAndLoadIfrtProgram(
     ifrt::DeviceListRef executable_devices, xla::CompileOptions options) {
   mlir::OwningOpRef<mlir::ModuleOp> clone(module.clone());
   module = *clone;
-  ifrt::ExecutableRef executable_ref;
+  ifrt::ExecutableRef ifrt_executable;
   {
     TF_ASSIGN_OR_RETURN(
         auto topology,
@@ -487,12 +507,12 @@ PyClient::CompileAndLoadIfrtProgram(
     auto xla_options = std::make_unique<ifrt::XlaCompileOptions>(
         options, std::move(executable_devices));
     TF_ASSIGN_OR_RETURN(
-        auto pjrt_executable,
-        PjRtCompile(std::move(options), module, *topology->description()));
-    TF_ASSIGN_OR_RETURN(executable_ref, ifrt::PjRtExecutable::Create(
-                                            std::move(pjrt_executable)));
+        ifrt_executable,
+        client->ifrt_client()->GetDefaultCompiler()->Compile(
+            std::make_unique<xla::ifrt::HloProgram>(std::move(module)),
+            *topology, std::move(xla_options)));
   }
-  return make_nb_class<PyExecutable>(executable_ref);
+  return make_nb_class<PyExecutable>(ifrt_executable);
 }
 
 /* static */ absl::StatusOr<nb_class_ptr<PyLoadedExecutable>>
@@ -515,8 +535,9 @@ PyClient::CompileAndLoad(nb_class_ptr<PyClient> client, mlir::ModuleOp module,
       TF_RETURN_IF_ERROR(xla::ExportShardyForGSPMD(module));
     }
   }
+  options.allow_in_place_mlir_modification = true;  // We just cloned the module
   return CompileAndLoadIfrtProgram(
-      client, std::make_unique<xla::ifrt::HloProgram>(module),
+      client, std::make_unique<xla::ifrt::HloProgram>(std::move(module)),
       MakeIfrtCompileOptions(std::move(options), std::move(executable_devices),
                              std::move(host_callbacks)));
 }
@@ -564,7 +585,33 @@ PyClient::DeserializeExecutable(nb_class_ptr<PyClient> client,
   auto ifrt_deserialize_options = MakeIfrtDeserializeExecutableOptions(
       std::move(options), std::move(executable_devices),
       std::move(host_callbacks));
-  xla::ifrt::UserContextScope user_context_scope(PyUserContext::Create());
+  PyUserContextScope user_context_scope;
+  {
+    nb::gil_scoped_release gil_release;
+    TF_ASSIGN_OR_RETURN(
+        ifrt_loaded_executable,
+        client->ifrt_client_->GetDefaultCompiler()->DeserializeLoadedExecutable(
+            std::string_view(serialized.c_str(), serialized.size()),
+            std::move(ifrt_deserialize_options)));
+  }
+  TF_ASSIGN_OR_RETURN(fingerprint, ifrt_loaded_executable->Fingerprint());
+  return make_nb_class<PyLoadedExecutable>(std::move(client),
+                                           std::move(ifrt_loaded_executable),
+                                           std::move(fingerprint));
+}
+
+/* static */ absl::StatusOr<nb_class_ptr<PyLoadedExecutable>>
+PyClient::DeserializeExecutable(nb_class_ptr<PyClient> client,
+                                nb::bytes serialized,
+                                ifrt::DeviceListRef executable_devices,
+                                std::optional<xla::CompileOptions> options,
+                                std::vector<nb::callable> host_callbacks) {
+  ifrt::LoadedExecutableRef ifrt_loaded_executable;
+  std::optional<std::string> fingerprint;
+  auto ifrt_deserialize_options = MakeIfrtDeserializeExecutableOptions(
+      std::move(options), std::move(executable_devices),
+      std::move(host_callbacks), client->ifrt_client());
+  PyUserContextScope user_context_scope;
   {
     nb::gil_scoped_release gil_release;
     TF_ASSIGN_OR_RETURN(
@@ -742,7 +789,7 @@ PyType_Slot PyClient::slots_[] = {
     {0, nullptr},
 };
 
-/* static */ void PyClient::RegisterPythonTypes(nb::module_& m) {
+/* static */ void PyClient::Register(nb::module_& m) {
   nb::enum_<xla::PjRtClient::HostBufferSemantics>(m, "HostBufferSemantics")
       .value("IMMUTABLE_ONLY_DURING_CALL",
              xla::PjRtClient::HostBufferSemantics::kImmutableOnlyDuringCall)
@@ -920,6 +967,22 @@ PyType_Slot PyClient::slots_[] = {
           nb::arg("serialized"), nb::arg("executable_devices"),
           nb::arg("compile_options").none() = nb::none(),
           nb::arg("host_callbacks") = std::vector<nb::capsule>())
+      .def(
+          "deserialize_executable",
+          [](nb_class_ptr<PyClient> client, nb::bytes serialized,
+             jax::PyDeviceList& py_executable_devices,
+             std::optional<xla::CompileOptions> options,
+             std::vector<nb::callable> host_callbacks) {
+            ifrt::DeviceListRef executable_devices =
+                xla::ValueOrThrow(py_executable_devices.ifrt_device_list());
+            return xla::ValueOrThrow(PyClient::DeserializeExecutable(
+                std::move(client), std::move(serialized),
+                std::move(executable_devices), std::move(options),
+                std::move(host_callbacks)));
+          },
+          nb::arg("serialized"), nb::arg("executable_devices"),
+          nb::arg("compile_options").none() = nb::none(),
+          nb::arg("host_callbacks") = std::vector<nb::callable>())
       // The following overload is for users of deprecated APIs who call
       // `deserialize_executable` but do not have visibility to `DeviceList`.
       .def(
@@ -962,11 +1025,12 @@ PyType_Slot PyClient::slots_[] = {
           nb::arg("dtype"), nb::arg("shard_shape"), nb::arg("device"))
       .def("__getattr__",
            [](PyClient& client, std::string_view name) -> nb::object {
-             const auto& attrs = client.Attributes().map();
-             auto it = attrs.find(name);
-             if (it != attrs.end()) {
+             auto value =
+                 client.Attributes().Get<xla::ifrt::AttributeMap::Value>(
+                     std::string(name));
+             if (value.ok()) {
                return std::visit([](auto&& v) { return nb::cast(v.value); },
-                                 it->second);
+                                 *value);
              }
              throw nb::attribute_error(
                  absl::StrCat("Unknown attribute ", name).c_str());

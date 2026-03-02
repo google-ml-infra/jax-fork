@@ -51,7 +51,7 @@ VectorType getNativeVregOrVmaskTypeImpl(
 
 VectorType getNativeVregOrVmaskType(Type elem_ty, const int8_t layout_bitwidth,
                                     const std::array<int64_t, 2> target_shape) {
-  int8_t bitwidth = elem_ty.getIntOrFloatBitWidth();
+  int8_t bitwidth = getTypeBitwidth(elem_ty);
   if (bitwidth == 1) {
     bitwidth = layout_bitwidth;
   } else {
@@ -62,14 +62,14 @@ VectorType getNativeVregOrVmaskType(Type elem_ty, const int8_t layout_bitwidth,
 
 VectorType getNativeVregType(Type elem_ty,
                              const std::array<int64_t, 2> target_shape) {
-  return getNativeVregOrVmaskTypeImpl(elem_ty, elem_ty.getIntOrFloatBitWidth(),
+  return getNativeVregOrVmaskTypeImpl(elem_ty, getTypeBitwidth(elem_ty),
                                       target_shape);
 }
 
 TypedValue<VectorType> getFullVector(ImplicitLocOpBuilder &builder,
                                      VectorType vty, Attribute value) {
   return cast<TypedValue<VectorType>>(
-      builder.create<arith::ConstantOp>(DenseElementsAttr::get(vty, value))
+      arith::ConstantOp::create(builder, DenseElementsAttr::get(vty, value))
           .getResult());
 }
 
@@ -82,7 +82,8 @@ TypedValue<VectorType> getFullLikeVector(ImplicitLocOpBuilder &builder,
 TypedValue<VectorType> getFullVector(OpBuilder &builder, Location loc,
                                      VectorType vty, Attribute value) {
   return cast<TypedValue<VectorType>>(
-      builder.create<arith::ConstantOp>(loc, DenseElementsAttr::get(vty, value))
+      arith::ConstantOp::create(builder, loc,
+                                DenseElementsAttr::get(vty, value))
           .getResult());
 }
 
@@ -124,13 +125,13 @@ FailureOr<TypedValue<VectorType>> getX32VmaskByPaddingEnd(
   const VectorType vmask_ty = getNativeVregOrVmaskType(
       builder.getI1Type(), /*layout_bitwidth=*/32, target_shape);
   if (dim == 0) {
-    mask_op = builder.create<tpu::CreateMaskOp>(
-        vmask_ty, ValueRange{idx_const(0), idx_const(0)},
+    mask_op = tpu::CreateMaskOp::create(
+        builder, vmask_ty, ValueRange{idx_const(0), idx_const(0)},
         ValueRange{idx_const(target_shape[0] - padding),
                    idx_const(target_shape[1])});
   } else {
-    mask_op = builder.create<tpu::CreateMaskOp>(
-        vmask_ty, ValueRange{idx_const(0), idx_const(0)},
+    mask_op = tpu::CreateMaskOp::create(
+        builder, vmask_ty, ValueRange{idx_const(0), idx_const(0)},
         ValueRange{idx_const(target_shape[0]),
                    idx_const(target_shape[1] - padding)});
   }
@@ -187,23 +188,23 @@ LogicalResult maskNativeTilingVregs(ImplicitLocOpBuilder &builder,
     Value partial_sublane_mask = getFullVector(
         builder, i32_vreg_ty,
         builder.getI32IntegerAttr(
-            0xffffffff >> (sub_padding * vreg_ty.getElementTypeBitWidth())));
+            0xffffffff >> (sub_padding * getElementTypeBitwidth(vreg_ty))));
     // Insert 0xffffffff above the blended sublane.
-    Value sublane_mask = builder.create<arith::SelectOp>(mask_top, i32_max_vreg,
-                                                         partial_sublane_mask);
+    Value sublane_mask = arith::SelectOp::create(
+        builder, mask_top, i32_max_vreg, partial_sublane_mask);
     // Insert 0 below the blended sublane.
-    sublane_mask = builder.create<arith::SelectOp>(mask_bottom, sublane_mask,
-                                                   i32_zeros_vreg);
+    sublane_mask = arith::SelectOp::create(builder, mask_bottom, sublane_mask,
+                                           i32_zeros_vreg);
     for (int64_t i = 0; i < vregs.dim(1); ++i) {
       Value &vreg = vregs({vregs.dim(0) - 1, i});
-      Value i32_vreg = builder.create<tpu::BitcastVregOp>(i32_vreg_ty, vreg);
+      Value i32_vreg = tpu::BitcastVregOp::create(builder, i32_vreg_ty, vreg);
       if (sub_padding > 0) {
-        i32_vreg = builder.create<arith::AndIOp>(i32_vreg, sublane_mask);
+        i32_vreg = arith::AndIOp::create(builder, i32_vreg, sublane_mask);
       } else {
-        i32_vreg = builder.create<arith::SelectOp>(mask_bottom, i32_vreg,
-                                                   i32_zeros_vreg);
+        i32_vreg = arith::SelectOp::create(builder, mask_bottom, i32_vreg,
+                                           i32_zeros_vreg);
       }
-      vreg = builder.create<tpu::BitcastVregOp>(vreg_ty, i32_vreg);
+      vreg = tpu::BitcastVregOp::create(builder, vreg_ty, i32_vreg);
     }
   }
   // Mask out the right.
@@ -213,10 +214,10 @@ LogicalResult maskNativeTilingVregs(ImplicitLocOpBuilder &builder,
                                                   target_shape, /*dim=*/1));
     for (int64_t i = 0; i < vregs.dim(0); ++i) {
       Value &vreg = vregs({i, vregs.dim(1) - 1});
-      Value i32_vreg = builder.create<tpu::BitcastVregOp>(i32_vreg_ty, vreg);
-      i32_vreg =
-          builder.create<arith::SelectOp>(mask_right, i32_vreg, i32_zeros_vreg);
-      vreg = builder.create<tpu::BitcastVregOp>(vreg_ty, i32_vreg);
+      Value i32_vreg = tpu::BitcastVregOp::create(builder, i32_vreg_ty, vreg);
+      i32_vreg = arith::SelectOp::create(builder, mask_right, i32_vreg,
+                                         i32_zeros_vreg);
+      vreg = tpu::BitcastVregOp::create(builder, vreg_ty, i32_vreg);
     }
   }
   return success();
@@ -225,7 +226,7 @@ LogicalResult maskNativeTilingVregs(ImplicitLocOpBuilder &builder,
 FailureOr<TypedValue<VectorType>> broadcastSubelements(
     ImplicitLocOpBuilder &builder, TypedValue<VectorType> vec,
     int subelement_idx, std::array<int64_t, 2> target_shape) {
-  int bitwidth = vec.getType().getElementTypeBitWidth();
+  int bitwidth = getElementTypeBitwidth(vec.getType());
   int packing = 32 / bitwidth;
   if (subelement_idx < 0 || subelement_idx >= packing) {
     return builder.emitError()
@@ -241,16 +242,16 @@ FailureOr<TypedValue<VectorType>> broadcastSubelements(
       getNativeVregType(builder.getIntegerType(bitwidth), target_shape);
   // The chosen subelements must be in the low bits. High bits are unspecified.
   Value src_vreg_int =
-      builder.create<tpu::BitcastVregOp>(vreg_native_int_ty, vec);
-  Value vreg_subelement_low = builder.create<arith::ShRUIOp>(
-      src_vreg_int,
+      tpu::BitcastVregOp::create(builder, vreg_native_int_ty, vec);
+  Value vreg_subelement_low = arith::ShRUIOp::create(
+      builder, src_vreg_int,
       getFullVector(builder, vreg_native_int_ty,
                     builder.getI32IntegerAttr(subelement_idx * bitwidth)));
   SmallVector<Value> packed_vregs(packing, vreg_subelement_low);
-  Value vreg_result_int = builder.create<tpu::PackSubelementsOp>(
-      vreg_packed_int_ty, packed_vregs, tpu::PackFormat::kInterleaved);
+  Value vreg_result_int = tpu::PackSubelementsOp::create(
+      builder, vreg_packed_int_ty, packed_vregs, tpu::PackFormat::kInterleaved);
   return cast<TypedValue<VectorType>>(
-      builder.create<tpu::BitcastVregOp>(vec.getType(), vreg_result_int)
+      tpu::BitcastVregOp::create(builder, vec.getType(), vreg_result_int)
           .getResult());
 }
 

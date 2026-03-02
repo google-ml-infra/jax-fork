@@ -92,7 +92,8 @@ intersphinx_mapping = {
     'array_api': ('https://data-apis.org/array-api/2023.12/', None),
     'python': ('https://docs.python.org/3/', None),
     'numpy': ('https://numpy.org/doc/stable/', None),
-    'scipy': ('https://docs.scipy.org/doc/scipy/reference/', None),
+    # TODO(phawkins,jakevdp): revert to stable scipy docs when it is up again.
+    'scipy': ('https://scipy.github.io/devdocs/', None),
 }
 
 suppress_warnings = [
@@ -142,6 +143,7 @@ exclude_patterns = [
     'pallas/tpu/distributed.md',
     'pallas/tpu/sparse.md',
     'pallas/tpu/matmul.md',
+    'pallas/tpu/core_map.md',
     'jep/9407-type-promotion.md',
     'autodidax.md',
     'autodidax2_part1.md',
@@ -244,6 +246,7 @@ nb_execution_excludepatterns = [
     'pallas/tpu/distributed.*',
     'pallas/tpu/sparse.*',
     'pallas/tpu/matmul.*',
+    'pallas/tpu/core_map.*',
     'distributed_data_loading.*',
     'notebooks/host-offloading.*',
 ]
@@ -379,7 +382,7 @@ rediraffe_redirects = {
   "jax-101/03-vectorization.md": "automatic-vectorization.md",
   "jax-101/04-advanced-autodiff.md": "automatic-differentiation.md",
   "jax-101/05-random-numbers.md": "random-numbers.md",
-  "jax-101/05.1-pytrees.md": "working-with-pytrees.md",
+  "jax-101/05.1-pytrees.md": "pytrees.md",
   "jax-101/06-parallelism.md": "sharded-computation.md",
   "jax-101/07-state.md": "stateful-computations.md",
   "jax-101/08-pjit.rst": "sharded-computation.md",
@@ -393,4 +396,5 @@ rediraffe_redirects = {
   "quickstart.md": "notebooks/thinking_in_jax.md",
   "advanced_guide.rst": "advanced_guides.rst",
   "user_guides.rst": "advanced_guides.rst",
+  "working_with_pytrees.md": "pytrees.md",
 }

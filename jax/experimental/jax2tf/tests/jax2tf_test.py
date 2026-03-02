@@ -15,11 +15,11 @@
 
 Specific JAX primitive conversion tests are in primitives_test."""
 import collections
-import contextlib
 import math
 import os
 import re
 import unittest
+import warnings
 
 from absl import logging
 from absl.testing import absltest, parameterized
@@ -37,12 +37,16 @@ from jax._src import source_info_util
 from jax._src import test_util as jtu
 from jax._src import xla_bridge as xb
 from jax._src.shard_map import shard_map
-from jax.experimental import pjit
 from jax.sharding import PartitionSpec as P
 
 import numpy as np
 try:
-  import tensorflow as tf
+  # TODO(b/470156950): Remove this once a proper fix is in place
+  with warnings.catch_warnings():
+    warnings.filterwarnings("ignore",
+                            category=FutureWarning,
+                            message=".*np.object.*")
+    import tensorflow as tf
   from jax.experimental import jax2tf
   from jax.experimental.jax2tf.tests import tf_test_util
   JaxToTfTestCase = tf_test_util.JaxToTfTestCase
@@ -833,7 +837,7 @@ class Jax2TfTest(JaxToTfTestCase):
       x3 = jnp.sin(x2)
       x4 = jnp.sin(x3)
       return x4
-    remat_f = ad_checkpoint.checkpoint(f)
+    remat_f = jax.checkpoint(f)
 
     # The computation of grad_f computes "sin" 5 times, 3 for the forward pass
     # and then to rematerialize "x2" and "x3" in the backward pass.
@@ -846,7 +850,7 @@ class Jax2TfTest(JaxToTfTestCase):
     def f(x):
       y = 2 * x
 
-      @ad_checkpoint.checkpoint
+      @jax.checkpoint
       def g():
         return y
 
@@ -1231,8 +1235,9 @@ class Jax2TfTest(JaxToTfTestCase):
         self.fail(f"{op.name} does not start with {scope_name}.")
 
   def test_name_scope_polymorphic(self):
-    if not config.dynamic_shapes.value:
-      self.skipTest("shape polymorphism but --jax_dynamic_shapes is not set.")
+    self.skipTest("no more dynamic shapes")
+    # if not config.dynamic_shapes.value:
+    #   self.skipTest("shape polymorphism but --jax_dynamic_shapes is not set.")
 
     def func_jax(x, y):
       return jnp.sin(x) + jnp.cos(y)
@@ -1321,42 +1326,33 @@ class Jax2TfTest(JaxToTfTestCase):
 
   @parameterized.named_parameters(
       dict(testcase_name=(
-          f"{'with_mesh_' if with_mesh else ''}"
           f"2={transform2 if transform2 != 'none' else ''}"
           f"_1={transform1 if transform1 != 'none' else ''}"
           f"{'_nullary' if nullary else ''}"),
-          with_mesh=with_mesh, transform1=transform1,
-          transform2=transform2, nullary=nullary)
+          transform1=transform1, transform2=transform2, nullary=nullary)
       # Test transform2(transform1(func)
       for transform1 in [
           "none",
-          "jit",
-          "pjit", "pjit_in_shardings_None", "pjit_in_shardings_P",
-          "pjit_in_shardings_Sharding", "shard_map", "pmap"]
+          "jit", "jit_in_shardings_None",
+          "jit_in_shardings_Sharding", "shard_map", "pmap"]
       for transform2 in (
-          ["none", "pjit_in_shardings_None", "pjit_in_shardings_P",
-           "pjit_in_shardings_Sharding"]
+          ["none", "jit_in_shardings_None",
+           "jit_in_shardings_Sharding"]
       )
       # Whether the function can be nullary
       for nullary in (
           # To reduce the number of tests
           [True, False] if transform2 == "none" else
           [False])
-      # Whether we use a "with mesh"
-      for with_mesh in (
-          [True] if (transform1 not in ["base", "jit", "pjit"] or
-                     transform2 != "none") else
-          [False, True])
   )
-  def test_cross_platform(self, with_mesh=True, transform1="pjit_in_shardings_P",
-                          transform2="pjit_in_shardings_P", nullary=False):
-    # Tests cross-lowering for
-    #  with mesh:
-    #   transform2(transform1(func))
+  def test_cross_platform(self,
+                          transform1="jit_in_shardings_P",
+                          transform2="jit_in_shardings_P", nullary=False):
+    # Tests cross-lowering for transform2(transform1(func))
     if transform2 == "none" and (
         transform1 == "shard_map" or
-        transform1 in ["pjit_in_shardings_P", "pjit_in_shardings_Sharding"] and nullary):
-      raise unittest.SkipTest("Skip because must have pjit at top level")
+        transform1 in ["jit_in_shardings_P", "jit_in_shardings_Sharding"] and nullary):
+      raise unittest.SkipTest("Skip because must have jit at top level")
 
     x = np.ones((4, 6), dtype=np.float32)
     mesh = sharding.Mesh(jax.devices()[:1], ("a",))
@@ -1365,22 +1361,14 @@ class Jax2TfTest(JaxToTfTestCase):
     # For shard_map we cannot use cummax :-( because it does not have a
     # replication rule. But we use lax.all_gather which on TPU is lowered with
     # an all-gather op
-    func_shard_map = lambda x: lax.all_gather(x, 'a', axis=1, tiled=True)
+    func_shard_map = lambda x: lax.all_gather(x, "a", axis=1, tiled=True)
 
     def apply_transform(func, transform: str):
       transformed_func = dict(
           none=func,
           jit=jax.jit(func),
           jit_in_shardings_None=jax.jit(func, in_shardings=None),
-          jit_in_shardings_P=jax.jit(func, in_shardings=(P("a"),)),
           jit_in_shardings_Sharding=jax.jit(
-              func, in_shardings=(sharding.NamedSharding(mesh, P("a")),)),
-          pjit=pjit.pjit(func),
-          pjit_in_shardings_None=pjit.pjit(func, in_shardings=None,
-                                           out_shardings=None),
-          pjit_in_shardings_P=pjit.pjit(func, in_shardings=(P("a"),),
-                                        out_shardings=P("a")),
-          pjit_in_shardings_Sharding=pjit.pjit(
               func,
               in_shardings=(sharding.NamedSharding(mesh, P("a")),),
               out_shardings=sharding.NamedSharding(mesh, P("a"))),
@@ -1412,15 +1400,12 @@ class Jax2TfTest(JaxToTfTestCase):
         raise unittest.SkipTest("Cannot lower nested pmap: jit-of-pmap warning")
       raise unittest.SkipTest("TODO: figure out how to invoke pmap from TF")
 
-    with contextlib.ExitStack() as stack:
-      if with_mesh:
-        stack.enter_context(mesh)
-      # Run the JAX native version, to check it works, and to fill caches.
-      _ = func_to_convert(*args)
-      exported = export.export(
-          (jax.jit(func_to_convert) if not hasattr(func_to_convert, "trace") else func_to_convert),
-          platforms=("tpu",)
-      )(*(core.ShapedArray(a.shape, a.dtype) for a in args))
+    # Run the JAX native version, to check it works, and to fill caches.
+    _ = func_to_convert(*args)
+    exported = export.export(
+        (jax.jit(func_to_convert) if not hasattr(func_to_convert, "trace") else func_to_convert),
+        platforms=("tpu",)
+    )(*(core.ShapedArray(a.shape, a.dtype) for a in args))
 
     if transform1 == "shard_map":
       self.assertIn("stablehlo.all_gather", str(exported.mlir_module()))
@@ -1641,6 +1626,7 @@ class Jax2TfTest(JaxToTfTestCase):
 
 @unittest.skipIf(tf is None, "Test requires tensorflow")
 @jtu.with_config(jax_enable_custom_prng=True)
+@jtu.thread_unsafe_test_class()
 class Jax2tfWithCustomPRNGTest(JaxToTfTestCase):
 
   def test_key_argument(self):
@@ -1671,6 +1657,7 @@ class Jax2tfWithCustomPRNGTest(JaxToTfTestCase):
 
 
 @unittest.skipIf(tf is None, "Test requires tensorflow")
+@jtu.thread_unsafe_test_class()
 class Jax2TfVersioningTest(JaxToTfTestCase):
   # Use a separate test case with the default jax_serialization_version
   def setUp(self):

@@ -94,7 +94,7 @@ def array(object: Any, dtype: DTypeLike | None = None, copy: bool = True,
   Args:
     object: an object that is convertible to an array. This includes JAX
       arrays, NumPy arrays, Python scalars, Python collections like lists
-      and tuples, objects with an ``__array__`` method, and objects
+      and tuples, objects with a ``__jax_array__`` method, and objects
       supporting the Python buffer protocol.
     dtype: optionally specify the dtype of the output array. If not
       specified it will be inferred from the input.
@@ -226,7 +226,9 @@ def array(object: Any, dtype: DTypeLike | None = None, copy: bool = True,
       object = xc._xla.cuda_array_interface_to_buffer(
           cai=cai, gpu_backend=backend, device_id=device_id)
 
-  leaves, treedef = tree_util.tree_flatten(object, is_leaf=lambda x: x is None)
+  # To handle nested lists & tuples, flatten the tree and process each leaf.
+  leaves, treedef = tree_util.tree_flatten(
+      object, is_leaf=lambda x: not isinstance(x, (list, tuple)))
   if any(leaf is None for leaf in leaves):
     raise ValueError("None is not a valid value for jnp.array")
   leaves = [
@@ -329,7 +331,7 @@ def asarray(a: Any, dtype: DTypeLike | None = None, order: str | None = None,
   Args:
     a: an object that is convertible to an array. This includes JAX
       arrays, NumPy arrays, Python scalars, Python collections like lists
-      and tuples, objects with an ``__array__`` method, and objects
+      and tuples, objects with a ``__jax_array__`` method, and objects
       supporting the Python buffer protocol.
     dtype: optionally specify the dtype of the output array. If not
       specified it will be inferred from the input.

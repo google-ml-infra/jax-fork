@@ -2,17 +2,6 @@ JAX: High performance array computing
 =====================================
 
 .. raw:: html
-
-   <script>
-      /* Along with some CSS settings in style.css (look for `body:has(.hero)`)
-         this will ensure that the menu sidebar is hidden on the main page. */
-      if (window.innerWidth >= 960) {
-         document.getElementById("__primary").checked = true;
-      }
-   </script>
-
-
-.. raw:: html
    :file: hero.html
 
 .. grid:: 3
@@ -149,10 +138,11 @@ maintains an up-to-date list.
 
    key-concepts
    advanced_guides
+   jax
    contributor_guide
    extensions
    notes
-   jax
+   pallas/index
    about
 
 

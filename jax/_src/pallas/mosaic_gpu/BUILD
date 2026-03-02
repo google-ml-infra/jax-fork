@@ -63,6 +63,7 @@ pytype_strict_library(
         "//jax",
         "//jax/_src:api",
         "//jax/_src:checkify",
+        "//jax/_src:config",
         "//jax/_src:core",
         "//jax/_src:debugging",
         "//jax/_src:dtypes",
@@ -119,6 +120,7 @@ pytype_strict_library(
         "//jax/_src:debugging",
         "//jax/_src:dtypes",
         "//jax/_src:lax",
+        "//jax/_src:literals",
         "//jax/_src:pretty_printer",
         "//jax/_src:state_types",
         "//jax/_src:tree_util",
@@ -154,6 +156,21 @@ pytype_strict_library(
         ":primitives",
         "//jax",
         "//jax/_src:dtypes",
+        "//jax/_src:util",
+        "//jax/_src/lib",
         "//jax/_src/pallas",
+        "//jax/experimental:mosaic_gpu",
+    ] + py_deps("numpy"),
+)
+
+pytype_strict_library(
+    name = "torch",
+    srcs = ["torch.py"],
+    deps = [
+        "//jax",
+        "//jax/_src:dtypes",
+        "//jax/_src:util",
+        "//jax/_src/lib",
+        "//jax/experimental:mosaic_gpu",
     ] + py_deps("numpy"),
 )

@@ -107,7 +107,7 @@ xla_metadata_value_p.def_impl(
 xla_metadata_value_p.def_abstract_eval(lambda aval, *, xla_metadata_kvs: aval)
 batching.defvectorized(xla_metadata_value_p)
 # TODO(nbasile): Implement tagging gradient ops with metadata.
-ad.deflinear2(xla_metadata_value_p, lambda ct, _: (ct,))
+ad.deflinear2(xla_metadata_value_p, lambda ct, _, **kwargs: (ct,))
 
 
 def _xla_metadata_value_lowering_rule(
@@ -131,9 +131,6 @@ def _target_op_to_attach_metadata(value_mlir: ir.Value) -> ir.Operation | None:
   op = value_mlir.owner
   if op is None or isinstance(op, ir.Block):
     return None
-  # TODO(nbasile): Add logic for handling multiply-by-constant-1.0 ops, which
-  # are often added by jax gradients.
-  # [Couple this change with tagging gradient ops.]
   return op
 
 
@@ -146,8 +143,8 @@ def _attach_xla_metadata_to_op(
       ctx_attributes[k] = ir.StringAttr.get(str(v).lower())
     # Combine with existing mhlo.frontend_attributes
     for attr in op.attributes:
-      if attr.name == "mhlo.frontend_attributes":
-        for a in attr.attr:
+      if attr == "mhlo.frontend_attributes":
+        for a in op.attributes[attr]:
           existing_attributes[a.name] = a.attr
     op.attributes["mhlo.frontend_attributes"] = ir.DictAttr.get(
         ctx_attributes | existing_attributes

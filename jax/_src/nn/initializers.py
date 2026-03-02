@@ -49,6 +49,7 @@ OutShardingType: TypeAlias = NamedSharding | PartitionSpec | None
 @export
 @typing.runtime_checkable
 class Initializer(Protocol):
+  """Protocol for initializers returned by :mod:`jax.nn.initializers` APIs."""
   def __call__(self,
                key: Array,
                shape: core.Shape,
@@ -222,9 +223,12 @@ def _compute_fans(shape: Sequence[int],
   Axes not in in_axis, out_axis, or batch_axis are assumed to constitute the
   "receptive field" of a convolution (kernel spatial dimensions).
   """
-  if len(shape) <= 1:
-    raise ValueError(f"Can't compute input and output sizes of a {len(shape)}"
-                     "-dimensional weights tensor. Must be at least 2D.")
+  if isinstance(in_axis, int) and in_axis == -2 and len(shape) <= 1:
+    raise ValueError(
+        f"Can't compute input and output sizes of a {len(shape)}-dimensional"
+        " weights tensor with default in_axis. Must be at least 2D or specify"
+        " in_axis explicitly."
+    )
 
   if isinstance(in_axis, int):
     in_size = shape[in_axis]

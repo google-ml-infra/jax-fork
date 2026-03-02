@@ -19,11 +19,10 @@ import atexit
 from collections.abc import Sequence
 import dataclasses
 from functools import partial
-import itertools
 import logging
 import threading
 import time
-from typing import Any, TYPE_CHECKING
+from typing import Any
 
 from jax._src import api
 from jax._src import array
@@ -31,7 +30,7 @@ from jax._src import basearray
 from jax._src import config
 from jax._src import core
 from jax._src import dtypes
-from jax._src import lib
+
 from jax._src import literals
 from jax._src import pjit
 from jax._src import traceback_util
@@ -46,7 +45,6 @@ from jax._src.interpreters import partial_eval
 from jax._src.interpreters import pxla
 from jax._src.api_util import InternalFloatingPointError
 from jax._src.layout import Layout, Format
-from jax._src.lib import jaxlib_extension_version
 from jax._src.lib import xla_client as xc
 from jax._src.mesh import AbstractMesh, Mesh
 from jax._src.monitoring import record_scalar, record_event_duration_secs, record_event_time_span
@@ -83,30 +81,17 @@ _on_exit = False
 
 ### op-by-op execution
 
-if TYPE_CHECKING or jaxlib_extension_version >= 375:
-  def apply_primitive(prim, *args, **params):
-    """Impl rule that compiles and runs a single primitive 'prim' using XLA."""
-    fun = xla_primitive_callable(prim, **params)
-    # TODO(yashkatariya): Investigate adding is_primitive to jit and never
-    # triggering the disable jit path instead of messing around with it here.
-    prev = config.disable_jit.swap_local(False)
-    try:
-      outs = fun(*args)
-    finally:
-      config.disable_jit.set_local(prev)
-    return outs
-else:
-  def apply_primitive(prim, *args, **params):
-    """Impl rule that compiles and runs a single primitive 'prim' using XLA."""
-    fun = xla_primitive_callable(prim, **params)
-    # TODO(yashkatariya): Investigate adding is_primitive to jit and never
-    # triggering the disable jit path instead of messing around with it here.
-    prev = lib.jax_jit.swap_thread_local_state_disable_jit(False)
-    try:
-      outs = fun(*args)
-    finally:
-      lib.jax_jit.swap_thread_local_state_disable_jit(prev)
-    return outs
+def apply_primitive(prim, *args, **params):
+  """Impl rule that compiles and runs a single primitive 'prim' using XLA."""
+  fun = xla_primitive_callable(prim, **params)
+  # TODO(yashkatariya): Investigate adding is_primitive to jit and never
+  # triggering the disable jit path instead of messing around with it here.
+  prev = config.disable_jit.swap_local(False)
+  try:
+    outs = fun(*args)
+  finally:
+    config.disable_jit.set_local(prev)
+  return outs
 
 # TODO(necula): this cache will contain strong references to all
 # Jaxprs in `params` (for higher-order primitives).
@@ -300,24 +285,6 @@ def get_intermediate_shardings(
   return out
 
 
-def jaxpr_has_bints(jaxpr: core.Jaxpr) -> bool:
-  return (any(type(v.aval.dtype) is core.bint for v in jaxpr.invars
-              if isinstance(v.aval, core.UnshapedArray)) or
-          any(_is_bint_axis_size(d)
-              for j in itertools.chain([jaxpr], core.subjaxprs(jaxpr))
-              for e in j.eqns for v in e.outvars
-              if isinstance(v.aval, core.DShapedArray) for d in v.aval.shape))
-
-def _is_bint_axis_size(d: core.AxisSize) -> bool:
-  if isinstance(d, core.DArray):
-    assert not d.shape
-    return type(d.dtype) is core.bint
-  elif isinstance(d, core.Var):
-    return (isinstance(d.aval, core.DShapedArray) and
-            type(d.aval.dtype) is core.bint)
-  return False
-
-
 def check_arg(arg: Any):
   if not (isinstance(arg, core.Tracer) or core.valid_jaxtype(arg)):
     raise TypeError(f"Argument '{arg}' of type {type(arg)} is not a valid "
@@ -331,6 +298,15 @@ def check_special(name: str, bufs: Sequence[basearray.Array]) -> None:
   if needs_check_special():
     for buf in bufs:
       _check_special(name, buf.dtype, buf)
+
+
+def check_special_array(name: str, arr: array.ArrayImpl) -> array.ArrayImpl:
+  if needs_check_special():
+    if dtypes.issubdtype(arr.dtype, np.inexact):
+      for buf in arr._arrays:
+        _check_special(name, buf.dtype, buf)
+  return arr
+
 
 def _check_special(name: str, dtype: np.dtype, buf: basearray.Array) -> None:
   if dtypes.issubdtype(dtype, np.inexact):
@@ -391,14 +367,19 @@ def _is_supported_cross_host_transfer(ndim, src_sharding, dst_sharding):
   # If a cross-host device transfer is requested but the backend does not
   # support it, then the user must set the flags to enable DCN-based transfers.
   if (different_process_inds and
-      not getattr(backend, 'supports_cross_host_transfers', False) and
+      (xla_bridge.FORCE_DCN_CROSS_HOST_TRANSFERS.value
+      or not getattr(backend, "supports_cross_host_transfers", False)) and
       not xla_bridge.CROSS_HOST_TRANSFER_SOCKET_ADDRESS.value):
+    if xla_bridge.FORCE_DCN_CROSS_HOST_TRANSFERS.value:
+      msg = ("DCN-based cross-host transfers were requested with the "
+             "jax_force_dcn_cross_host_transfers flag.")
+    else:
+      msg = ("The backend ({backend.platform}, {backend.platform_version}) "
+             "does not support cross-host device transfers.")
     raise ValueError(
-        f"The backend ({backend.platform}, {backend.platform_version}) does "
-        "not support cross-host device transfers via ICI/NCCL. Please set "
-        "jax_cross_host_transfer_socket_address and (optionally) "
-        "jax_cross_host_transport_addresses flags to enable DCN-based cross "
-        "host device transfers.")
+        f"{msg} Please set jax_cross_host_transfer_socket_address and "
+        "(optionally) jax_cross_host_transport_addresses flags to enable "
+        "DCN-based cross host device transfers.")
   return different_process_inds
 
 @dataclasses.dataclass(frozen=True)
@@ -419,6 +400,25 @@ class _DeferredShardArg:
   def result_handler(self, shard_arg_result):
     return pxla.global_aval_to_result_handler(
         self.aval, self.s, self.committed)(shard_arg_result)
+
+@dataclasses.dataclass(frozen=True)
+class _DeferredCrossHostTransferArg:
+  """Deferred call to `xc.batched_copy_array_to_devices_with_sharding` for
+  cross-host data transfers.
+
+  Per-array impls return this object instead of a result array to indicate a
+  deferred `batched_copy_array_to_devices_with_sharding` call for a cross-host
+  data transfer. `_batched_device_put_impl` then batches all
+  `_DeferredCrossHostTransferArg` objects into a single
+  `_batched_device_put_impl` call.
+
+  For any _DeferredCrossHostTransferArg, _is_supported_cross_host_transfer(
+  x.ndim, x.sharding, dst_sharding) == True.
+  """
+
+  x: array.ArrayImpl
+  dst_sharding: Sharding
+  copy_semantics: ArrayCopySemantics
 
 
 def _device_put_sharding_impl(
@@ -458,9 +458,7 @@ def _device_put_sharding_impl(
 
     if (x_is_jax_array and x._committed and xla_bridge.process_count() > 1
         and _is_supported_cross_host_transfer(x.ndim, x_sharding, s)):
-      return xc.batched_copy_array_to_devices_with_sharding(
-          [x], [s._internal_device_list], [s],  # pytype: disable=attribute-error
-          [copy])[0]
+      return _DeferredCrossHostTransferArg(x, s, copy)
 
     if not s_is_fully_addressable:
       # If both the source and target shardings are not fully addressable and
@@ -576,7 +574,14 @@ def _batched_device_put_impl(
     copy_semantics: Sequence[ArrayCopySemantics],
     dst_avals: Sequence[core.ShapedArray | None]):
   ys = []
+
+  # Used to batch transfers when _device_put_impl returns a _DeferredShardArg.
   dsa_indices, dsa_xs, dsa_shardings, dsa_copy_semantics = [], [], [], []
+  # Used to batch transfers when _device_put_impl returns a
+  # _DeferredCrossHostTransferArg.
+  dca_indices, dca_xs, dca_shardings, dca_device_lists, dca_copy_semantics = \
+    [], [], [], [], []
+
   for i, (x, device, src, cp, aval) in enumerate(
       zip(xs, devices, srcs, copy_semantics, dst_avals)):
     y = _device_put_impl(x, device=device, src=src, copy=cp, aval=aval)
@@ -585,11 +590,17 @@ def _batched_device_put_impl(
       dsa_xs.append(y.x)
       dsa_shardings.append(y.s)
       dsa_copy_semantics.append(y.copy_semantics)
+    elif isinstance(y, _DeferredCrossHostTransferArg):
+      dca_indices.append(i)
+      dca_xs.append(y.x)
+      dca_shardings.append(y.dst_sharding)
+      dca_device_lists.append(y.dst_sharding._internal_device_list) # pytype: disable=attribute-error
+      dca_copy_semantics.append(y.copy_semantics)
     ys.append(y)
 
+  # Batch shard_arg / batched_copy_array_to_devices_with_sharding calls. Helps
+  # improve efficiency for backends that support efficient batch transfer.
   if dsa_xs:
-    # Batch shard_arg calls. Helps improve efficiency for backends that support
-    # efficient batch transfer.
     # device_put handles `Format` via a different path, so just pass `None` as
     # the layout here.
     shard_arg_results = pxla.shard_args(dsa_shardings, [None] * len(dsa_xs),
@@ -597,6 +608,13 @@ def _batched_device_put_impl(
     for i, shard_arg_result in zip(dsa_indices, shard_arg_results):
       assert isinstance(ys[i], _DeferredShardArg)
       ys[i] = ys[i].result_handler(shard_arg_result)
+  if dca_xs:
+    copy_array_results = xc.batched_copy_array_to_devices_with_sharding(
+      dca_xs, dca_device_lists, dca_shardings, dca_copy_semantics)
+    for i, copy_array_result in zip(dca_indices, copy_array_results):
+      assert isinstance(ys[i], _DeferredCrossHostTransferArg)
+      ys[i] = copy_array_result
+
   return ys
 
 def batched_device_put_impl(
@@ -630,7 +648,8 @@ def update_dp_aval(aval, d):
   if not isinstance(aval, core.ShapedArray):
     return aval
   if isinstance(d, Sharding):
-    aval = (aval.update(sharding=aval.sharding.update(mesh=d.mesh.abstract_mesh))
+    aval = (aval.update(sharding=aval.sharding.update(mesh=d.mesh.abstract_mesh,
+                                                      spec=d.spec))
             if isinstance(d, NamedSharding) else aval.update(sharding=None))
     if d.memory_kind is not None:
       aval = aval.update(memory_space=core.mem_kind_to_space(d.memory_kind))

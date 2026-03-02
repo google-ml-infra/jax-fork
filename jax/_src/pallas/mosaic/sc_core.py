@@ -25,10 +25,10 @@ import jax
 from jax._src import core as jax_core
 from jax._src import state
 from jax._src import tree_util
-from jax._src.lax import lax
 from jax._src.pallas import core as pallas_core
 from jax._src.pallas import primitives as pallas_primitives
 from jax._src.pallas.mosaic import core as tpu_core
+from jax._src.pallas.mosaic import tpu_info
 import jax.numpy as jnp
 
 
@@ -149,6 +149,13 @@ class BlockMapping(pallas_core.BlockMapping):
   indexed_dim: int | None = None
 
 
+def get_sparse_core_info() -> tpu_info.SparseCoreInfo:
+  """Returns the SparseCore information for the current device."""
+  return tpu_info.get_tpu_info().sparse_core or tpu_info.SparseCoreInfo(
+      num_cores=0, num_subcores=0, num_lanes=0, dma_granule_size_bytes=0,
+  )
+
+
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class ScalarSubcoreMesh:
   axis_name: str
@@ -167,32 +174,23 @@ class ScalarSubcoreMesh:
     return False
 
 
-def _num_available_cores():
-  """Returns the number of SparseCores on the current device."""
-  device_kind = tpu_core.get_device_kind()
-  match device_kind:
-    case "TPU v5" | "TPU v5p":
-      return 4
-    case "TPU v6 lite" | "TPU v6" | "TPU7x":
-      return 2
-    case _:
-      raise NotImplementedError(
-          f"Unsupported device kind: {device_kind}"
-      )
+def gather_global_allocations(jaxpr):
 
+  def _gather_from_eqns(*, eqn=None, jaxpr=None):
+    if eqn is not None:
+      if eqn.primitive is pallas_primitives.get_global_p:
+        what = eqn.params["what"]
+        yield pallas_core.MemoryRef(what.inner_aval, what.memory_space)
+      for subjaxpr in jax_core.jaxprs_in_params(eqn.params):
+        yield from _gather_from_eqns(jaxpr=subjaxpr)
+    else:
+      for eqn in jaxpr.eqns:
+        yield from _gather_from_eqns(eqn=eqn)
 
-def _vector_dimension():
-  """Returns the supported vector dimension for the current device."""
-  device_kind = tpu_core.get_device_kind()
-  match device_kind:
-    case "TPU v5" | "TPU v5p" | "TPU v6" | "TPU v6 lite":
-      return 8
-    case "TPU7x":
-      return 16
-    case _:
-      raise NotImplementedError(
-          f"Unsupported device kind: {device_kind}"
-      )
+  allocations = collections.defaultdict(list)
+  for memref in _gather_from_eqns(jaxpr=jaxpr):
+    allocations[memref].append(memref)
+  return allocations
 
 
 def _scalar_subcore_mesh_discharge_rule(
@@ -211,7 +209,8 @@ def _scalar_subcore_mesh_discharge_rule(
   if not isinstance(mesh, ScalarSubcoreMesh):
     raise TypeError(f"Mesh must be a ScalarSubcoreMesh, got {type(mesh)}")
   assert len(mesh.shape) == 1
-  if mesh.num_cores > (num_expected := _num_available_cores()):
+  sc_info = get_sparse_core_info()
+  if mesh.num_cores > (num_expected := sc_info.num_cores):
     raise ValueError(
         f"Mesh has {mesh.num_cores} cores, but the current TPU chip has only"
         f" {num_expected} SparseCores"
@@ -220,6 +219,11 @@ def _scalar_subcore_mesh_discharge_rule(
     compiler_params = tpu_core.CompilerParams()
   if compiler_params.dimension_semantics is not None:
     raise ValueError("ScalarSubcoreMesh does not support dimension_semantics=")
+  sa_avals = [a for a in in_avals if isinstance(a, jax_core.ShapedArray)]
+  if sa_avals:
+    raise NotImplementedError(
+        f"Cannot close over values in core_map: {sa_avals}"
+    )
   return pallas_core.default_mesh_discharge_rule(
       in_avals,
       out_avals,
@@ -237,6 +241,7 @@ def _scalar_subcore_mesh_discharge_rule(
       name=name,
       memory_space=tpu_core.MemorySpace.HBM,
       metadata=metadata,
+      scratch_shapes=tree_util.tree_leaves(gather_global_allocations(jaxpr)),
   )
 
 
@@ -244,13 +249,36 @@ pallas_core._core_map_mesh_rules[ScalarSubcoreMesh] = (
     _scalar_subcore_mesh_discharge_rule
 )
 
+def _get_num_cores() -> int:
+  """Returns the number of cores for the current SparseCore."""
+  return get_sparse_core_info().num_cores
+
+def _get_num_subcores() -> int:
+  """Returns the number of subcores for the current SparseCore."""
+  return get_sparse_core_info().num_subcores
+
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class VectorSubcoreMesh:
   core_axis_name: str
   subcore_axis_name: str
-  num_cores: int
-  num_subcores: int = dataclasses.field(default=16, init=False)
+  num_cores: int = dataclasses.field(default_factory=_get_num_cores)
+  num_subcores: int = dataclasses.field(
+      default_factory=_get_num_subcores, init=False
+  )
+
+  def __post_init__(self):
+    sc_info = get_sparse_core_info()
+    if self.num_cores > (num_expected := sc_info.num_cores):
+      raise ValueError(
+          f"Mesh has {self.num_cores} cores, but the current TPU chip has only"
+          f" {num_expected} SparseCores"
+      )
+    if self.num_subcores != sc_info.num_subcores:
+      raise ValueError(
+          f"Mesh has {self.num_subcores} subcores, but the current TPU chip has"
+          f" only {num_expected} subcores"
+      )
 
   @property
   def backend(self) -> str:
@@ -282,7 +310,8 @@ def _vector_subcore_mesh_discharge_rule(
   if not isinstance(mesh, VectorSubcoreMesh):
     raise TypeError(f"Mesh must be a VectorSubcoreMesh, got {type(mesh)}")
   assert len(mesh.shape) == 2
-  if mesh.num_cores > (num_expected := _num_available_cores()):
+  sc_info = get_sparse_core_info().num_cores
+  if mesh.num_cores > (num_expected := sc_info):
     raise ValueError(
         f"Mesh has {mesh.num_cores} cores, but the current TPU chip has only"
         f" {num_expected} SparseCores"
@@ -308,6 +337,7 @@ def _vector_subcore_mesh_discharge_rule(
       name=name,
       memory_space=tpu_core.MemorySpace.HBM,
       metadata=metadata,
+      scratch_shapes=tree_util.tree_leaves(gather_global_allocations(jaxpr)),
   )
 
 
@@ -315,44 +345,8 @@ pallas_core._core_map_mesh_rules[VectorSubcoreMesh] = (
     _vector_subcore_mesh_discharge_rule
 )
 
-def kernel(
-    out_shape: object,
-    *,
-    mesh: pallas_core.Mesh,
-    scratch_shapes: pallas_core.ScratchShapeTree = (),
-    **kwargs: object,
-):
-  if unwrap_out := not isinstance(out_shape, (tuple, list)):
-    out_shape = (out_shape,)
 
-  def decorator(body):
-    @jax.jit
-    def wrapper(*args):
-      arg_refs = jax.tree.map(jax_core.new_ref, args)
-      out_refs = jax.tree.map(
-          lambda out: jax_core.new_ref(
-              lax.empty(out.shape, out.dtype),
-              memory_space=getattr(out, "memory_space", None),
-          ),
-          out_shape,
-      )
-
-      @pallas_core.core_map(mesh, **kwargs)
-      def _():
-        return pallas_primitives.run_scoped(
-            lambda *scratch_refs: body(*arg_refs, *out_refs, *scratch_refs),
-            *scratch_shapes,
-        )
-
-      outs = jax.tree.map(lambda ref: ref[...], out_refs)
-      return outs[0] if unwrap_out else outs
-
-    return wrapper
-
-  return decorator
-
-
-# TODO(slebedev): Add more dtypes and vector shapes.
+# TODO(slebedev): Only keep the shapes which do not require unrolling.
 SUPPORTED_VECTOR_SHAPES = collections.defaultdict(list)
 for dtype in [jnp.int32, jnp.uint32, jnp.float32]:
   SUPPORTED_VECTOR_SHAPES[jnp.dtype(dtype)].extend([

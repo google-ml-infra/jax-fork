@@ -60,6 +60,10 @@ on:
         type: string
         default: 'no'
 permissions: {}
+
+env:
+  UV_DEFAULT_INDEX: "https://us-python.pkg.dev/ml-oss-artifacts-published/pypi-mirror/simple"
+
 jobs:
   run-tests:
     defaults:
@@ -77,7 +81,7 @@ jobs:
       JAXCI_TPU_CORES: "${{ inputs.cores }}"
 
     steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
         with:
           persist-credentials: false
       - name: Download JAX CPU wheels
@@ -118,7 +122,7 @@ jobs:
       - name: Run Pytest TPU tests
         timeout-minutes: ${{ github.event_name == 'pull_request' && 30 || 210 }}
         run: |
-          if [[ ${{ inputs.python }} == "3.13-nogil" && ${{ inputs.tpu-type }} == "v5e-8" ]]; then
+          if [[ ${{ inputs.python }} == "3.13-nogil" ]]; then
             echo "Uninstalling xprof as it is not compatible with python 3.13t."
             $JAXCI_PYTHON -m uv pip uninstall xprof
           fi

@@ -34,7 +34,7 @@ import dataclasses
 import enum
 from collections.abc import Sequence
 from dataclasses import dataclass
-from functools import partial
+import itertools as it
 from typing import Any, NamedTuple, Protocol, Union, runtime_checkable
 
 from jax._src import core
@@ -52,6 +52,7 @@ from jax._src.lib.mlir import ir
 from jax._src.lib import _jax
 from jax._src.lib import xla_client as xc
 from jax._src.tree_util import tree_structure, tree_unflatten
+from jax._src.core import typeof
 
 
 source_info_util.register_exclusion(__file__)
@@ -120,16 +121,27 @@ class Executable:
     xla_ext_exe = self.xla_extension_executable()
     err_msg = ("text view unsupported on current XLA backend: "
                f"{type(xla_ext_exe)}")
-    if not hasattr(xla_ext_exe, "hlo_modules"):
-      raise NotImplementedError(err_msg)
-    try:
-      return "\n\n".join([m.to_string() for m in xla_ext_exe.hlo_modules()])
-    except _jax.JaxRuntimeError as e:
-      msg, *_ = e.args
-      if type(msg) is str and msg.startswith("UNIMPLEMENTED"):
-        raise NotImplementedError(err_msg) from e
-      else:
-        raise
+
+    if hasattr(xla_ext_exe, "get_hlo_text"):
+      try:
+        return xla_ext_exe.get_hlo_text()
+      except _jax.JaxRuntimeError as e:
+        msg, *_ = e.args
+        if type(msg) is str and msg.startswith("UNIMPLEMENTED"):
+          raise NotImplementedError(err_msg) from e
+        else:
+          raise
+    else:
+      if not hasattr(xla_ext_exe, "hlo_modules"):
+        raise NotImplementedError(err_msg)
+      try:
+        return "\n\n".join([m.to_string() for m in xla_ext_exe.hlo_modules()])
+      except _jax.JaxRuntimeError as e:
+        msg, *_ = e.args
+        if type(msg) is str and msg.startswith("UNIMPLEMENTED"):
+          raise NotImplementedError(err_msg) from e
+        else:
+          raise
 
   def cost_analysis(self) -> Any:
     """A summary of execution cost estimates.
@@ -347,10 +359,16 @@ def make_args_info(in_tree, in_avals, donate_argnums):
 class CompiledCallParams(NamedTuple):
   executable: Executable
   no_kwargs: bool
-  in_tree: tree_util.PyTreeDef
-  out_tree: tree_util.PyTreeDef
-  # See https://docs.jax.dev/en/latest/internals/constants.html
-  const_args: list[ArrayLike]
+  in_tree: tree_util.PyTreeDef  # lo tree
+  out_tree: tree_util.PyTreeDef  # lo tree
+  const_args: list[ArrayLike]  # https://docs.jax.dev/en/latest/internals/constants.html
+  in_types: tuple[tree_util.PyTreeDef, list[core.AbstractValue | core.AvalQDD]] | None
+  out_types: tuple[tree_util.PyTreeDef, list[core.AbstractValue]] | None
+
+  @property
+  def is_high(self):
+    return self.in_types and self.out_types and any(
+        a.is_high for a in it.chain(self.in_types[1], self.out_types[1]))
 
 
 def _traced_args_info(self):
@@ -360,7 +378,7 @@ def _traced_args_info(self):
 
 def _traced_out_info(self):
   out_shardings = [None if isinstance(s, UnspecifiedValue) else s
-                    for s in self._params['out_shardings']]
+                   for s in self._params['out_shardings']]
   out_layouts = [None if isinstance(l, AutoLayout) else l
                  for l in self._params['out_layouts']]
   out = []
@@ -375,7 +393,7 @@ def _traced_out_info(self):
               vma=(a.vma if config._check_vma.value else None)))
     else:
       out.append(a)
-  return tree_util.tree_unflatten(self._out_tree, out)
+  return tree_util.tree_unflatten(self.out_tree, out)
 
 
 class Traced(Stage):
@@ -384,48 +402,96 @@ class Traced(Stage):
   A traced computation is ready for lowering. This class carries the
   traced representation with the remaining information needed to later
   lower, compile, and execute it.
-  """
-  __slots__ = ['_lfg', '_params', '_in_tree', '_out_tree', '_num_consts']
 
-  def __init__(self, lfg, params, in_tree, out_tree, num_consts):
-    self._lfg = lfg
+  Provides access to both the hijax (high-level) and lojax (low-level)
+  representations via `.jaxpr` and `.lojax` properties respectively.
+  """
+  __slots__ = ['_meta_tys_flat', '_params', '_in_tree', 'out_tree', '_consts',
+               '_lojax']
+
+  def __init__(self, meta_tys_flat, params, in_tree, out_tree, consts):
+    self._meta_tys_flat = meta_tys_flat
     self._params = params
     self._in_tree = in_tree
-    self._out_tree = out_tree
-    self._num_consts = num_consts
+    self.out_tree = out_tree
+    self._consts = consts
+    self._lojax = None
 
   jaxpr = property(lambda self: self._params['jaxpr'])
   fun_name = property(lambda self: self._params['name'])
   args_info = property(_traced_args_info)
   out_info = property(_traced_out_info)
-  _args_flat = property(lambda self: self._lfg.args[0])
+  _num_consts = property(lambda self: len(self._consts))
 
-  def fall(self):
+  @property
+  def out_avals(self):
+    return tree_unflatten(self.out_tree, self.jaxpr.out_avals)
+
+  def __call__(self, *args, **kwargs):
+    args_flat = tree_util.tree_leaves_checked(self.in_tree, (args, kwargs))
+    out_flat = core.jaxpr_as_fun(self.jaxpr)(*args_flat)
+    return tree_unflatten(self.out_tree, out_flat)
+
+
+  @property
+  def lojax(self) -> LoJax:
+    if self._lojax is not None:
+      return self._lojax
+
     if not self.jaxpr.is_high:
-      return Fallen(self._lfg, self._params, self._in_tree, self._out_tree,
-                    self._num_consts)
+      self._lojax = LoJax(
+          self._meta_tys_flat, self._params, self._in_tree, self.out_tree,
+          (self._in_tree, self.jaxpr.in_avals),
+          (self.out_tree, self.jaxpr.out_avals),
+          self._consts)
+      return self._lojax
 
     # TODO(mattjj): when pmap is deleted, merge with pjit.py BUILD rule
-    from jax._src.pjit import _resolve_and_lower  # type: ignore
     from jax._src.interpreters import partial_eval as pe  # type:ignore
     hi_jaxpr = self.jaxpr
     _, closed_over_himutables = pe.convert_const_himutables(hi_jaxpr)
     if closed_over_himutables: raise NotImplementedError  # TODO(mattjj)
     lo_jaxpr = pe.lower_jaxpr(hi_jaxpr)
-    in_tree = lojax_pytree(hi_jaxpr.in_aval_qdds, self._in_tree)
-    out_tree = lojax_pytree(hi_jaxpr.out_avals, self._out_tree)
+    if any(a.is_high for a in hi_jaxpr.final_aval_qdds):
+      in_tree = lojax_pytree(hi_jaxpr.in_aval_qdds, self._in_tree)
+    else:
+      in_tree = self._in_tree
+    if any(a.is_high for a in hi_jaxpr.out_avals):
+      out_tree = lojax_pytree(hi_jaxpr.out_avals, self.out_tree)
+    else:
+      out_tree = self.out_tree
     params = dict(lojax_expand_params(hi_jaxpr, self._params), jaxpr=lo_jaxpr)
-    lo_args = [lo_val for aval, x in zip(hi_jaxpr.in_aval_qdds, self._args_flat)
-               for lo_val in (aval.read_loval(x) if aval.has_qdd
-                              else aval.lower_val(x))]
-    lfg = partial(_resolve_and_lower, lo_args, pgle_profiler=None)
-    return Fallen(lfg, params, in_tree, out_tree, self._num_consts)
+    lo_meta_tys = [mty.replace(aval=lo_ty)
+                   for mty, aq in zip(self._meta_tys_flat, hi_jaxpr.in_aval_qdds)
+                   for lo_ty in (mty.aval.lo_ty_qdd(aq.qdd)
+                                 if mty.aval.has_qdd else mty.aval.lo_ty())]
+    self._lojax = LoJax(
+        lo_meta_tys, params, in_tree, out_tree,
+        (self._in_tree, hi_jaxpr.final_aval_qdds),
+        (self.out_tree, hi_jaxpr.out_avals),
+        self._consts)
+    return self._lojax
 
   def lower(self, *, lowering_platforms: tuple[str, ...] | None = None,
             _private_parameters: mlir.LoweringParameters | None = None):
     """Lower to compiler input, returning a ``Lowered`` instance."""
-    return self.fall().lower(lowering_platforms=lowering_platforms,
-                             _private_parameters=_private_parameters)
+    lo = self.lojax
+    if _private_parameters is None:
+      _private_parameters = mlir.LoweringParameters()
+    try:
+      from jax._src.pjit import _resolve_and_lower  # type: ignore
+      lowering = _resolve_and_lower(
+          lo._meta_tys_flat, **lo._params, lowering_platforms=lowering_platforms,
+          lowering_parameters=_private_parameters, pgle_profiler=None)
+    except DeviceAssignmentMismatchError as e:
+      fails, = e.args
+      msg = _device_assignment_mismatch_error(
+          lo._params['name'], fails, lo._meta_tys_flat, 'jit',
+          lo.jaxpr.debug_info.safe_arg_names(len(lo.jaxpr.in_avals)))
+      raise ValueError(msg) from None
+    return Lowered(lowering, lo.args_info, lo.out_tree,
+                   in_types=lo._in_types, out_types=lo._out_types)
+
 
 def lojax_expand_params(jaxpr, params):
   from jax._src.pjit import _lojax_expand_params  # type: ignore
@@ -433,47 +499,34 @@ def lojax_expand_params(jaxpr, params):
   lo_nums_out = [len(t.lo_ty()) for t in jaxpr.out_avals]
   lo_muts_out = sum(len(aval.lo_ty()) for aval in jaxpr.final_aval_qdds
                     if aval.has_qdd)
-  if lo_muts_out: raise NotImplementedError  # TODO(mattjj)
   return _lojax_expand_params(lo_nums_in, lo_nums_out, lo_muts_out,
                               **dict(params, jaxpr=jaxpr))
 
 def lojax_pytree(hi_avals, tree):
-  lo_avals = [t.lo_ty_qdd() if t.has_qdd else t.lo_ty() for t in hi_avals]
+  lo_avals = [t.lo_ty() for t in hi_avals]
   return tree_structure(tree_unflatten(tree, lo_avals))
 
-class Fallen(Stage):
-  """True leader of the Decepticons."""
-  __slots__ = ['_lfg', '_params', '_in_tree', '_out_tree', '_num_consts']
 
-  def __init__(self, lfg, params, in_tree, out_tree, num_consts):
-    self._lfg = lfg
+class LoJax:
+  __slots__ = ['_meta_tys_flat', '_params', '_in_tree', 'out_tree',
+               '_consts', '_in_types', '_out_types']
+
+  def __init__(self, meta_tys_flat, params, in_tree, out_tree, in_types, out_types,
+               consts):
+    self._meta_tys_flat = meta_tys_flat
     self._params = params
     self._in_tree = in_tree
-    self._out_tree = out_tree
-    self._num_consts = num_consts
+    self.out_tree = out_tree
+    self._consts = consts
+    self._in_types = in_types  # hi types
+    self._out_types = out_types
 
   jaxpr = property(lambda self: self._params['jaxpr'])
   fun_name = property(lambda self: self._params['name'])
   args_info = property(_traced_args_info)
   out_info = property(_traced_out_info)
-  _args_flat = property(lambda self: self._lfg.args[0])
+  _num_consts = property(lambda self: len(self._consts))
 
-  def lower(self, *, lowering_platforms: tuple[str, ...] | None = None,
-            _private_parameters: mlir.LoweringParameters | None = None):
-    """Lower to compiler input, returning a ``Lowered`` instance."""
-    if _private_parameters is None:
-      _private_parameters = mlir.LoweringParameters()
-    try:
-      lowering = self._lfg(**self._params,
-                           lowering_platforms=lowering_platforms,
-                           lowering_parameters=_private_parameters)
-    except DeviceAssignmentMismatchError as e:
-      fails, = e.args
-      msg = _device_assignment_mismatch_error(
-          self._params['name'], fails, self._args_flat, 'jit',
-          self.jaxpr.debug_info.safe_arg_names(len(self.jaxpr.in_avals)))
-      raise ValueError(msg) from None
-    return Lowered(lowering, self.args_info, self._out_tree)
 
 
 class Lowered(Stage):
@@ -485,46 +538,40 @@ class Lowered(Stage):
   querying properties of lowered computations across JAX's various
   lowering paths (:func:`~jax.jit`, :func:`~jax.pmap`, etc.).
   """
-  __slots__ = ["_lowering", "args_info", "out_tree", "_no_kwargs"]
+  __slots__ = ["_lowering", "args_info", "out_tree", "_no_kwargs",
+               "_in_types", "_out_types"]
+
   _lowering: Lowering
   args_info: Any  # PyTree of ArgInfo, not including the const_args
   out_tree: tree_util.PyTreeDef
   _no_kwargs: bool
+  _in_types: list[tuple[core.AbstractValue, core.QuasiDynamicData]] | None
+  _out_types: list[core.AbstractValue] | None
 
-  def __init__(
-      self,
-      lowering: Lowering,
-      args_info,
-      out_tree: tree_util.PyTreeDef,
-      no_kwargs: bool = False):
+  def __init__(self, lowering: Lowering, args_info,
+               out_tree: tree_util.PyTreeDef, no_kwargs: bool = False,
+               in_types=None, out_types=None):
 
     self._lowering = lowering
     self.args_info = args_info
     self.out_tree = out_tree
     self._no_kwargs = no_kwargs
+    self._in_types = in_types  # type: ignore
+    self._out_types = out_types  # type: ignore
 
-  @classmethod
-  def from_flat_info(cls,
-                     lowering: Lowering,
-                     in_tree: tree_util.PyTreeDef,
-                     in_avals,
-                     donate_argnums: tuple[int, ...],
-                     out_tree: tree_util.PyTreeDef,
-                     no_kwargs: bool = False):
-    """Initialize from flat info (``in_avals`` etc.) and an input PyTreeDef.
-
-    Args:
-      in_tree: The ``PyTreeDef`` of (args, kwargs).
-      out_tree: The ``PyTreeDef`` of the outputs.
-      no_kwargs: If ``True`` the transformation, and the
-        ``Compiled`` returned from this object will not support keyword
-        arguments (an error will be raised if some are provided).
-    """
-    return cls(
-        lowering,
-        make_args_info(in_tree, in_avals, donate_argnums),
-        out_tree,
-        no_kwargs=no_kwargs)
+  @property
+  def in_avals(self):
+    in_avals_ = self._lowering.compile_args.get("global_in_avals", None)
+    if in_avals_ is None:  # For old pmap code i.e. PmapComputation
+      return tree_util.tree_map(lambda x: x._aval, self.args_info)
+    kept_var_idx = self._lowering.compile_args["kept_var_idx"]
+    non_dce_avals = self._lowering.compile_args["all_args_info"].in_avals
+    if self.in_tree.num_leaves > len(in_avals_):
+      iter_in_avals = iter(in_avals_)
+      in_avals_ = [
+          next(iter_in_avals) if i in kept_var_idx
+          else a for i, a in zip(range(self.in_tree.num_leaves), non_dce_avals)]
+    return self.in_tree.unflatten(in_avals_)
 
   @property
   def out_info(self):  # PyTree of OutInfo
@@ -553,7 +600,9 @@ class Lowered(Stage):
         self._lowering.const_args,
         self.args_info,
         self.out_tree,
-        no_kwargs=self._no_kwargs,
+        self._no_kwargs,
+        self._in_types,
+        self._out_types,
     )
 
   def as_text(self, dialect: str | None = None, *,
@@ -619,8 +668,7 @@ class Compiled(Stage):
   common API for querying properties of compiled computations across
   JAX's various compilation paths and backends.
   """
-  __slots__ = ["args_info", "out_tree", "_executable", "_no_kwargs",
-               "_params"]
+  __slots__ = ["args_info", "out_tree", "_executable", "_no_kwargs", "_params"]
 
   args_info: Any                # PyTree of ArgInfo, not including const_args
   out_tree: tree_util.PyTreeDef
@@ -629,13 +677,14 @@ class Compiled(Stage):
   _params: CompiledCallParams
 
   def __init__(self, executable, const_args: list[ArrayLike],
-               args_info, out_tree, no_kwargs=False):
+               args_info, out_tree, no_kwargs=False, in_types=None, out_types=None):
     self._executable = executable
     self._no_kwargs = no_kwargs
     self.args_info = args_info
     self.out_tree = out_tree
-    self._params = CompiledCallParams(self._executable, self._no_kwargs,
-                                      self.in_tree, self.out_tree, const_args)
+    self._params = CompiledCallParams(
+        self._executable, self._no_kwargs, self.in_tree, self.out_tree,
+        const_args, in_types, out_types)
     self._call = None
 
   def as_text(self) -> str | None:
@@ -687,6 +736,17 @@ class Compiled(Stage):
       return self._executable.memory_analysis()
     except NotImplementedError:
       return None
+
+  @property
+  def in_avals(self):
+    in_avals_ = self._executable.in_avals
+    if self.in_tree.num_leaves > len(in_avals_):
+      iter_in_avals = iter(in_avals_)
+      non_dce_avals = self._executable._all_args_info.in_avals
+      in_avals_ = [
+          next(iter_in_avals) if i in self._executable._kept_var_idx
+          else a for i, a in zip(range(self.in_tree.num_leaves), non_dce_avals)]
+    return self.in_tree.unflatten(in_avals_)
 
   @property
   def out_info(self):  # PyTree of jax.ShapeDtypeStruct
@@ -764,14 +824,23 @@ class Compiled(Stage):
     # which might conflict here.
     params = args[0]
     args = args[1:]  # Not including const_args
-    if config.dynamic_shapes.value:
-      raise NotImplementedError
     if params.no_kwargs and kwargs:
       kws = ', '.join(kwargs.keys())
       raise NotImplementedError(
           "function was compiled by a transformation that does not support "
           f"keyword arguments, but called with keyword arguments: {kws}")
-    args_flat, in_tree = tree_util.tree_flatten((args, kwargs))
+
+    if params.is_high:
+      hi_args_flat, in_hi_tree = tree_util.tree_flatten((args, kwargs))
+      in_hi_tree_, final_qdds = params.in_types
+      args_flat = [a.read_loval(core.cur_qdd(x), x) if (a := typeof(x)).has_qdd
+                  else a.lower_val(x) for x in hi_args_flat]
+      args_flat, in_tree = \
+          tree_util.tree_flatten(tree_util.tree_unflatten(in_hi_tree, args_flat))
+    else:
+      args_flat, in_tree = tree_util.tree_flatten((args, kwargs))
+
+    # TODO(mattjj): improve wrong-number-of-args error
     if in_tree != params.in_tree:
       errs = list(tree_util.equality_errors_pytreedef(in_tree, params.in_tree))
       msg = []
@@ -785,6 +854,7 @@ class Compiled(Stage):
             f"    * at {base}{tree_util.keystr(tuple(rest))}, seen {thing2} but now"
             f" given {thing1}, so {explanation}")
       raise TypeError('\n'.join(msg))
+
     if not core.trace_state_clean():
       # We check for tracers when we are under a transformation, and skip the
       # check in the common path. We can't transform ahead-of-time compiled
@@ -796,8 +866,18 @@ class Compiled(Stage):
               "Cannot apply JAX transformations to a function lowered and "
               "compiled for a particular signature. Detected argument of "
               f"Tracer type {type(arg)}.")
-    out_flat = params.executable.call(*params.const_args, *args_flat)
-    outs = tree_util.tree_unflatten(params.out_tree, out_flat)
+    lo_outs = params.executable.call(*params.const_args, *args_flat)
+
+    if params.is_high:
+      out_mut, lo_outs = util.split_list(lo_outs, [_num_himuts_out(final_qdds)])
+      _apply_himut(final_qdds, hi_args_flat, out_mut)
+      out_hi_tree, out_hi_types = params.out_types
+      out_flat = _raise_lo_outs(out_hi_types, lo_outs)
+      outs = tree_util.tree_unflatten(out_hi_tree, out_flat)
+    else:
+      out_flat = lo_outs
+      outs = tree_util.tree_unflatten(params.out_tree, out_flat)
+
     return outs, out_flat, args_flat
 
   def __call__(self, *args, **kwargs):
@@ -810,6 +890,23 @@ class Compiled(Stage):
           return outs
         self._call = cpp_call_fallback
     return self._call(*args, **kwargs)
+
+def _raise_lo_outs(avals, lo_outs):
+  from jax._src.interpreters import partial_eval as pe  # type: ignore
+  return pe.raise_lo_outs(avals, lo_outs)
+
+# TODO(mattjj): de-dup with partial_eval.py
+def _num_himuts_out(final_qdds):
+  return sum(len(a.lo_ty()) for a in final_qdds if a.has_qdd)
+
+# TODO(mattjj): de-dup with partial_eval.py
+def _apply_himut(final_qdds, hi_args, out_mut):
+  out_mut_ = iter(out_mut)
+  for i, a in enumerate(final_qdds):
+    if isinstance(a, core.AvalQDD):
+      lo_vals = it.islice(out_mut_, len(a.aval.lo_ty_qdd(a.qdd)))
+      a.aval.update_from_loval(a.qdd, hi_args[i], *lo_vals)  # type: ignore
+  assert next(out_mut_, None) is None
 
 
 @runtime_checkable
@@ -939,9 +1036,8 @@ def _device_assignment_mismatch_error(fun_name, fails, args_flat, api_name,
   if arg_names is None:
     arg_names = [''] * len(args_flat)
   for a, n in zip(args_flat, arg_names):
-    da = (a.sharding._device_assignment
-          if getattr(a, 'sharding', None) is not None else None)
-    arg_list.append((n, da, core.shaped_abstractify(a)))
+    da = a.sharding._device_assignment if a.sharding is not None else None
+    arg_list.append((n, da, a.aval))
 
   mismatched_args_msg = _find_arg_mismatch(arg_list, fails, fun_name)
 
@@ -949,7 +1045,7 @@ def _device_assignment_mismatch_error(fun_name, fails, args_flat, api_name,
     first, second = mismatched_args_msg  # pytype: disable=bad-unpacking
     extra_msg = f" Got {first} and {second}"
   elif len(mismatched_args_msg) == 1:
-    first, second  = fails
+    first, second = fails
     # Choose the failure left which is not already covered by ARG_SHARDING.
     left = second if first.m_type == MismatchType.ARG_SHARDING else first
     extra_msg = f" Got {mismatched_args_msg[0]} and{left._str(api_name)}"

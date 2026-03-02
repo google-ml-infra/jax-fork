@@ -184,20 +184,10 @@ _intn_dtypes = [
 
 # Default types.
 bool_ = np.bool_
-int_: type[Any]
-uint: type[Any]
-float_: type[Any]
-complex_: type[Any]
-if config.default_dtype_bits.value == '32':
-  int_ = np.int32
-  uint = np.uint32
-  float_ = np.float32
-  complex_ = np.complex64
-else:
-  int_ = np.int64
-  uint = np.uint64
-  float_ = np.float64
-  complex_ = np.complex128
+int_: type[Any] = np.int64
+uint: type[Any] = np.uint64
+float_: type[Any] = np.float64
+complex_: type[Any] = np.complex128
 
 
 # Default dtypes. These are intended to have the same semantics as, say,
@@ -206,33 +196,23 @@ else:
 
 
 def default_int_dtype() -> DType:
-  return (
-      np.dtype(np.int64)
-      if config.enable_x64.value and config.default_dtype_bits.value == '64'
-      else np.dtype(np.int32)
-  )
+  return np.dtype(np.int64) if config.enable_x64.value else np.dtype(np.int32)
 
 
 def default_uint_dtype() -> DType:
-  return (
-      np.dtype(np.uint64)
-      if config.enable_x64.value and config.default_dtype_bits.value == '64'
-      else np.dtype(np.uint32)
-  )
+  return np.dtype(np.uint64) if config.enable_x64.value else np.dtype(np.uint32)
 
 
 def default_float_dtype() -> DType:
   return (
-      np.dtype(np.float64)
-      if config.enable_x64.value and config.default_dtype_bits.value == '64'
-      else np.dtype(np.float32)
+      np.dtype(np.float64) if config.enable_x64.value else np.dtype(np.float32)
   )
 
 
 def default_complex_dtype() -> DType:
   return (
       np.dtype(np.complex128)
-      if config.enable_x64.value and config.default_dtype_bits.value == '64'
+      if config.enable_x64.value
       else np.dtype(np.complex64)
   )
 
@@ -266,10 +246,12 @@ _DEFAULT_TYPEMAP: dict[type, Callable[[], np.dtype]] = {
   complex: default_complex_dtype,
 }
 
-def bit_width(dtype: DTypeLike) -> int:
+def itemsize_bits(dtype: DTypeLike) -> int:
   """Number of bits per element for the dtype."""
   # Note: we cannot use dtype.itemsize here because this is
   # incorrect for sub-byte integer types.
+  if dtype is None:
+    raise ValueError("dtype cannot be None.")
   if dtype == np.dtype(bool):
     return 8  # physical bit layout for boolean dtype
   elif issubdtype(dtype, np.integer):
@@ -297,6 +279,7 @@ _dtype_to_32bit_dtype: dict[DType, DType] = {
 _dtype_to_inexact: dict[DType, DType] = {
     np.dtype(k): np.dtype(v) for k, v in [
         ('bool', 'float32'),
+        ('uint4', 'float32'), ('int4', 'float32'),
         ('uint8', 'float32'), ('int8', 'float32'),
         ('uint16', 'float32'), ('int16', 'float32'),
         ('uint32', 'float32'), ('int32', 'float32'),
@@ -677,27 +660,42 @@ def _type_promotion_lattice(strict: bool, x64: bool) -> dict[JAXType, list[JAXTy
     x64: allow promotions that form x64 types from non-x64 inputs?
   """
   b1, = _bool_types
-  uint2, uint4, u1, u2, u4, u8, int2, int4, i1, i2, i4, i8 = _int_types
-  *f1_types, bf, f2, f4, f8 = _float_types
-  c4, c8 = _complex_types
+  u2, u4, u8, u16, u32, u64, i2, i4, i8, i16, i32, i64 = _int_types
+  *small_float_types, bf16, f16, f32, f64 = _float_types
+  c64, c128 = _complex_types
   i_, f_, c_ = _weak_types
   if not strict:
-    out: dict[JAXType, list[JAXType]]
-    out = {
-      b1: [i_],
-      i_: [u1, uint2, uint4, i1, int2, int4],
-      uint2: [], uint4: [], u1: [i2, u2], u2: [i4, u4], u4: [i8, u8], u8: [f_],
-      int2: [], int4: [], i1: [i2], i2: [i4], i4: [i8], i8: [f_],
-      f_: [*f1_types, bf, f2, c_],
-      **{t: [] for t in f1_types}, bf: [f4], f2: [f4], f4: [f8, c4], f8: [c8],
-      c_: [c4], c4: [c8], c8: [],
+    out: dict[JAXType, list[JAXType]] = {
+        b1: [i_],
+        i_: [u8, u2, u4, i8, i2, i4],
+        u2: [],
+        u4: [],
+        u8: [i16, u16],
+        u16: [i32, u32],
+        u32: [i64, u64],
+        u64: [f_],
+        i2: [],
+        i4: [],
+        i8: [i16],
+        i16: [i32],
+        i32: [i64],
+        i64: [f_],
+        f_: [*small_float_types, bf16, f16, c_],
+        **{t: [] for t in small_float_types},
+        bf16: [f32],
+        f16: [f32],
+        f32: [f64, c64],
+        f64: [c128],
+        c_: [c64],
+        c64: [c128],
+        c128: [],
     }
     # If x64 mode is not enabled, then we want to avoid any promotions that form
     # 64-bit types from non-64-bit inputs. There's only one of these in the
     # entire promotion lattice, namely u4xi4->i8, which we can avoid by
     # replacing it with u4xi4->i4.
     if not x64:
-      out[u4] = [i4, u8]
+      out[u32] = [i32, u64]
     return out
   else:
     return {

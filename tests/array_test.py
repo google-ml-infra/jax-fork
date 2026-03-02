@@ -30,11 +30,10 @@ from jax._src import test_util as jtu
 from jax._src import xla_bridge as xb
 from jax._src.lib import xla_client as xc
 from jax._src.util import safe_zip
-from jax._src.mesh import AxisType, AbstractMesh
+from jax._src.mesh import AxisType, AbstractMesh, Mesh
 from jax._src.sharding import common_devices_indices_map
 from jax._src.sharding_impls import (
     pmap_sharding_devices_indices_map, NamedSharding, GSPMDSharding)
-from jax.experimental.pjit import pjit
 from jax.experimental import multihost_utils
 from jax.sharding import PartitionSpec as P
 from jax._src import array
@@ -221,6 +220,15 @@ class JaxArrayTest(jtu.JaxTestCase):
       arr._check_if_deleted()
     self.assertIsNone(arr._npy_value)
     self.assertIsNone(arr._arrays)
+
+  def test_device_put_to_cpu(self):
+    mesh = Mesh(jax.devices(), 'x')
+    mesh_cpu = Mesh(jax.devices('cpu'), 'x')
+    x = np.zeros(16)
+    y = jax.device_put(x, NamedSharding(mesh, P('x')))
+    z = jax.device_put(y, NamedSharding(mesh_cpu, P('x')))
+    for z_s in z.addressable_shards:
+      self.assertArraysEqual(z_s.data, x[z_s.index])
 
   def test_array_device_get(self):
     global_mesh = jtu.create_mesh((4, 2), ('x', 'y'))
@@ -662,29 +670,6 @@ class JaxArrayTest(jtu.JaxTestCase):
             output_shardings._to_xla_hlo_sharding(x_dummy.ndim),
             s._to_xla_hlo_sharding(x_dummy.ndim)))
 
-  def test_shape_dtype_struct_sharding_pjit(self):
-    mesh = jtu.create_mesh((4, 2), ('x', 'y'))
-    s = jax.sharding.NamedSharding(mesh, P('x', 'y'))
-
-    def f(x):
-      return x * 2.
-
-    x_dummy = jax.ShapeDtypeStruct(
-        shape=(8, 2),
-        dtype=jnp.dtype('float32'),
-        sharding=s)
-
-    c = pjit(f).lower(x_dummy).compile()
-    input_shardings, output_shardings = c.input_shardings, c.output_shardings
-    self.assertTrue(
-        op_shardings.are_hlo_shardings_equal(
-            input_shardings[0][0]._to_xla_hlo_sharding(x_dummy.ndim),
-            s._to_xla_hlo_sharding(x_dummy.ndim)))
-    self.assertTrue(
-        op_shardings.are_hlo_shardings_equal(
-            output_shardings._to_xla_hlo_sharding(x_dummy.ndim),
-            s._to_xla_hlo_sharding(x_dummy.ndim)))
-
   # TODO(b/399879011): GPU is the only platform that has an implementation for
   # this, which exists in py_client.cc. Ideally, this would be replaced with
   # some kind of auto-defrag-on-OOM.
@@ -771,6 +756,21 @@ class JaxArrayTest(jtu.JaxTestCase):
     self.assertEqual(x_bytes, y_bytes)
 
   @jtu.run_on_devices("cpu")
+  def test_buffer_protocol_donation(self):
+
+    @jax.jit(donate_argnums=(0,))
+    def add_one(x):
+      return x + 1;
+
+    rng = jtu.rand_default(self.rng())
+    x = rng((64, 64), np.float32)
+    y = jax.device_put(x)
+    # holds ref.
+    y_bytes = memoryview(y)
+    # doesn't crash
+    self.assertArraysEqual(add_one(y), x + 1)
+
+  @jtu.run_on_devices("cpu")
   def test_buffer_protocol_deletion(self):
     rng = jtu.rand_default(self.rng())
     x = rng((3, 4), np.float32)
@@ -787,8 +787,8 @@ class JaxArrayTest(jtu.JaxTestCase):
 
   def test_array_copy_to_host_async(self):
     global_mesh = jtu.create_mesh((2, 2), ('x', 'y'))
-    x = pjit(lambda: jnp.arange(8.),
-             out_shardings=jax.sharding.NamedSharding(global_mesh, P(None)))()
+    x = jax.jit(lambda: jnp.arange(8.),
+                out_shardings=jax.NamedSharding(global_mesh, P(None)))()
     self.assertLen(x.sharding.device_set, 4)
     x.copy_to_host_async()  # doesn't crash
     self.assertArraysEqual(np.arange(8.), x)
@@ -896,6 +896,13 @@ class JaxArrayTest(jtu.JaxTestCase):
       jax.make_array_from_single_device_arrays(
           shape, s, [arr], dtype=jnp.float32)
 
+  @jtu.with_explicit_mesh((2,), ('x',))
+  def test_unreduced_printing(self, mesh):
+    x = jax.device_put(jnp.arange(8., dtype='float32'), P('x'))
+    x = jax.lax.reduce_sum(x, [0], out_sharding=P(unreduced={'x'}))
+    self.assertIn('nreduced', str(x.sharding))
+    self.assertIn('Array(shape=(), dtype=float32, sharding=', str(x))
+
 
 class ShardingTest(jtu.JaxTestCase):
 
@@ -969,6 +976,7 @@ class ShardingTest(jtu.JaxTestCase):
         r"factors: \[4, 2\] should evenly divide the shape\)"):
       mps.shard_shape((8, 3))
 
+  @jtu.ignore_warning(category=DeprecationWarning)
   @jtu.thread_unsafe_test()  # cache_info isn't thread-safe
   def test_pmap_sharding_hash_eq(self):
     if jax.device_count() < 2:
@@ -1079,6 +1087,7 @@ class ShardingTest(jtu.JaxTestCase):
       ('sharded_dim_2', (4, 2, 4), 2),
       ('sharded_dim_1_1', (2, 4), 1)
   )
+  @jtu.ignore_warning(category=DeprecationWarning)
   def test_default_pmap_sharding(self, shape, sharded_dim):
     if jax.device_count() < 4:
       self.skipTest('Test needs >= 4 devices.')
@@ -1104,6 +1113,7 @@ class ShardingTest(jtu.JaxTestCase):
       self.assertEqual(actual_sharding.sharding_spec, expected_sharding.sharding_spec)
       self.assertEqual(actual_sharding._device_assignment, expected_sharding._device_assignment)
 
+  @jtu.ignore_warning(category=DeprecationWarning)
   def test_default_pmap_sharding_with_devices(self):
     if jax.device_count() < 4:
       self.skipTest('Test needs >= 4 devices.')
@@ -1113,6 +1123,7 @@ class ShardingTest(jtu.JaxTestCase):
     ps = jax.sharding.PmapSharding.default((4, 2), devices=new_order)
     self.assertEqual(ps._device_assignment, new_order)
 
+  @jtu.ignore_warning(category=DeprecationWarning)
   def test_default_pmap_sharding_replicated(self):
     x = np.zeros((len(jax.local_devices()), 8), dtype=np.float32)
     x = jax.pmap(lambda x: x, in_axes=0, out_axes=None, axis_name='x')(x)
@@ -1349,7 +1360,7 @@ class ShardingTest(jtu.JaxTestCase):
     self.assertEqual(mesh1, mesh2)
 
     mesh = jax.make_mesh((1, 1), ('x', 'y'))
-    self.assertTupleEqual(mesh.axis_types, (AxisType.Auto,) * 2)
+    self.assertTupleEqual(mesh.axis_types, (AxisType.Explicit,) * 2)
 
     mesh = jax.make_mesh((1, 1, 1), ('x', 'y', 'z'),
                          axis_types=(Explicit, Auto, Manual))
@@ -1398,11 +1409,8 @@ class ShardingTest(jtu.JaxTestCase):
     out = aval.update(sharding=NamedSharding(mesh, P(('a', 'b'), 'c', 'd')))
     self.assertEqual(out.sharding.spec, P(('a', 'b'), None, None, None))
 
-    with self.assertRaisesRegex(
-        ValueError,
-        'Tuple subset of `PartitionSpec` cannot contain `Manual` mixed with'
-        ' `Auto` or `Explicit`'):
-      aval.update(sharding=NamedSharding(mesh, P(('a', 'd'), 'b', 'c')))
+    out = aval.update(sharding=NamedSharding(mesh, P(('a', 'd'), 'b', 'c')))
+    self.assertEqual(out.sharding.spec, P('a', 'b', None, None))
 
   def test_aval_str_short(self):
     mesh = AbstractMesh(
@@ -1412,12 +1420,12 @@ class ShardingTest(jtu.JaxTestCase):
     s = NamedSharding(mesh, P(unreduced={'a'}, reduced={'b'}))
     aval = jax.core.ShapedArray((1, 1, 1, 1), np.float32, sharding=s,
                                 vma=frozenset('c'))
-    self.assertEqual(aval.str_short(True), 'f32[1,1,1,1]{U:a, R:b}{c}')
+    self.assertEqual(aval.str_short(True), 'f32[1,1,1,1]{V:c, U:a, R:b}')
 
     s = NamedSharding(mesh, P(unreduced={'a'}))
     aval = jax.core.ShapedArray((1, 1, 1, 1), np.float32, sharding=s,
                                 vma=frozenset('c'))
-    self.assertEqual(aval.str_short(True), 'f32[1,1,1,1]{U:a}{c}')
+    self.assertEqual(aval.str_short(True), 'f32[1,1,1,1]{V:c, U:a}')
 
     s = NamedSharding(mesh, P(unreduced={'a'}))
     aval = jax.core.ShapedArray((1, 1, 1, 1), np.float32, sharding=s)
@@ -1426,10 +1434,34 @@ class ShardingTest(jtu.JaxTestCase):
     s = NamedSharding(mesh, P())
     aval = jax.core.ShapedArray((1, 1, 1, 1), np.float32, sharding=s,
                                 vma=frozenset('c'))
-    self.assertEqual(aval.str_short(True), 'f32[1,1,1,1]{c}')
+    self.assertEqual(aval.str_short(True), 'f32[1,1,1,1]{V:c}')
 
     aval = jax.core.ShapedArray((1, 1, 1, 1), np.float32)
     self.assertEqual(aval.str_short(True), 'f32[1,1,1,1]')
+
+  def test_modify_spec_auto_unreduced(self):
+    mesh = AbstractMesh(
+        (2, 2, 2), ('a', 'b', 'c'),
+        axis_types=(AxisType.Explicit, AxisType.Explicit, AxisType.Auto))
+    spec = P(unreduced={'a', 'b', 'c'})
+    out = core.modify_spec_for_auto_manual(spec, mesh)
+    self.assertEqual(out, P(unreduced={'a', 'b'}))
+
+    spec = P(reduced={'a', 'b', 'c'})
+    out = core.modify_spec_for_auto_manual(spec, mesh)
+    self.assertEqual(out, P(reduced={'a', 'b'}))
+
+    spec = P(unreduced={'a', 'b'}, reduced={'c'})
+    out = core.modify_spec_for_auto_manual(spec, mesh)
+    self.assertEqual(out, P(unreduced={'a', 'b'}))
+
+    spec = P(unreduced={'a', 'c'}, reduced={'b'})
+    out = core.modify_spec_for_auto_manual(spec, mesh)
+    self.assertEqual(out, P(unreduced={'a'}, reduced={'b'}))
+
+    spec = P(unreduced={'c'}, reduced={'a', 'b'})
+    out = core.modify_spec_for_auto_manual(spec, mesh)
+    self.assertEqual(out, P(reduced={'a', 'b'}))
 
   def test_pspec_unreduced(self):
     pspec = P('a', 'b', None, unreduced={'c'}, reduced={'d'})

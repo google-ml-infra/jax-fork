@@ -18,7 +18,7 @@ from collections.abc import Callable, Hashable, Iterable, Sequence
 import dataclasses
 import difflib
 import functools
-from functools import partial
+from functools import partial, cached_property
 import operator as op
 import textwrap
 from typing import Any, TypeVar
@@ -38,6 +38,7 @@ Typ = TypeVar("Typ", bound=type[Any])
 H = TypeVar("H", bound=Hashable)
 
 Leaf = Any
+PyTree = Any
 PyTreeDef = pytree.PyTreeDef
 
 default_registry = pytree.default_registry()
@@ -93,6 +94,13 @@ def tree_leaves(tree: Any,
 
 
 @export
+def tree_leaves_checked(treedef_expected: PyTreeDef, tree: Any) -> list[Leaf]:
+  flat_vals, treedef_actual = tree_flatten(tree)
+  assert treedef_actual == treedef_expected
+  return flat_vals
+
+
+@export
 def tree_structure(tree: Any,
                    is_leaf: None | (Callable[[Any],
                                               bool]) = None) -> PyTreeDef:
@@ -123,7 +131,7 @@ def treedef_tuple(treedefs: Iterable[PyTreeDef]) -> PyTreeDef:
   See Also:
     - :func:`jax.tree_util.treedef_children`
   """
-  return pytree.tuple(default_registry, list(treedefs))
+  return pytree.treedef_tuple(default_registry, list(treedefs))
 
 
 @export
@@ -543,7 +551,7 @@ class Partial(functools.partial):
   >>> print_zero()
   0
   >>> call_func(print_zero)  # doctest:+ELLIPSIS
-  JitTracer<~int32[]>
+  JitTracer(~int32[])
   """
 
   def __new__(klass, func, *args, **kw):
@@ -995,7 +1003,7 @@ def register_dataclass(
   registries use the optimized C++ dataclass builtin instead of the argument
   functions.
 
-  See :ref:`extending-pytrees` for more information about registering pytrees.
+  See :ref:`pytrees-custom-pytree-nodes` for more information about registering pytrees.
 
   Args:
     nodetype: a Python type to treat as an internal pytree node. This is assumed
@@ -1093,10 +1101,16 @@ def register_dataclass(
     if not dataclasses.is_dataclass(nodetype):
       raise TypeError("register_dataclass: data_fields and meta_fields are required when"
                       f" nodetype is not a dataclass. Got {nodetype=}.")
-    data_fields = [f.name for f in dataclasses.fields(nodetype)
-                   if not f.metadata.get('static', False)]
-    meta_fields = [f.name for f in dataclasses.fields(nodetype)
-                   if f.metadata.get('static', False)]
+    data_fields = [
+        f.name
+        for f in dataclasses.fields(nodetype)
+        if not f.metadata.get("static", False)
+    ]
+    meta_fields = [
+        f.name
+        for f in dataclasses.fields(nodetype)
+        if f.metadata.get("static", False)
+    ]
 
   assert meta_fields is not None
   assert data_fields is not None
@@ -1123,6 +1137,12 @@ def register_dataclass(
       if unexpected := {*meta_fields, *data_fields} - init_fields:
         msg += f" Unexpected fields: {unexpected}."
       raise ValueError(msg)
+
+  if overlap := set(data_fields) & set(meta_fields):
+    raise ValueError(
+        "data_fields and meta_fields must not overlap. Overlapping fields:"
+        f" {overlap}."
+    )
 
   def unflatten_func(meta, data):
     meta_args = tuple(zip(meta_fields, meta))
@@ -1336,3 +1356,225 @@ def _prefix_error(
      f"{prefix_tree_keys} and {full_tree_keys}")
   for k, t1, t2 in zip(prefix_tree_keys, prefix_tree_children, full_tree_children):
     yield from _prefix_error((*key_path, k), t1, t2)
+
+# === flat tree ===
+
+class FlatTree:
+  """A FlatTree stores a treedef and a flat list of values. It's meant to be
+  isomorphic to the corresponding pytree but we can map over it more easily.
+  Compared to `tree_map`, FlatTree.map has these benefits:
+    1. It doesn't touch user flatten/unflatten code (which shouldn't have side
+       effects but sometimes does in practice).
+    2. It can be faster, because it skips the recursive traversal.
+    3. It actually obeys the functor rules. For example,
+       `flat_tree.map(lambda x: (f(x), g(x))).unzip2()[0]` will give
+       the same result as `flat_tree.map(f)`, whereas in the `tree_map` version
+       the tuple-returning function would change the tree structure and `unzip`
+       wouldn't be able to recover it.
+  """
+  # `FlatTree` constructor is private. Use `FlatTree.flatten` instead
+  def __init__(self, vals, treedef: PyTreeDef, statics):
+    assert isinstance(treedef, pytree.PyTreeDef)
+    if not isinstance(vals, tuple):
+      vals = tuple(vals)
+    self.vals = tuple(vals)
+    self.tree = treedef
+    self.statics = statics  # tree-prefix tuple-dict-tree of bools
+
+  def __eq__(self, other):
+    return (isinstance(other, FlatTree) and self.vals == other.vals
+            and self.tree == other.tree and self.statics == other.statics)
+
+  def __hash__(self):
+    return hash((self.vals, self.tree))
+
+  def map(self, f: Callable) -> FlatTree:
+    return self.update(f(x) for x in self.vals)
+
+  def map2(self: FlatTree, f: Callable, t2: FlatTree) -> FlatTree:
+    n = len(self)
+    assert len(t2) == n
+    return self.update(f(x1, x2) for x1, x2 in zip(self.vals, t2.vals))
+
+  def map3(
+      self: FlatTree, f: Callable, t2: FlatTree, t3: FlatTree) -> FlatTree:
+    n = len(self)
+    assert len(t2) == n and len(t3) == n
+    return self.update(f(x1, x2, x3)
+                       for x1, x2, x3 in zip(self.vals, t2.vals, t3.vals))
+
+  def unzip2(self: FlatTree) -> tuple[FlatTree, FlatTree]:
+    ys = []
+    zs = []
+    for y, z in self.vals:
+      ys.append(y)
+      zs.append(z)
+    return self.update(ys), self.update(zs)
+
+  # TODO: add other helpers like map3, zip, unzip3 etc. as needed
+
+  @staticmethod
+  def pack(tree):
+    # We could generalize this to arbitrary pytrees of FlatTree but tuples/dicts
+    # are sufficient for now.
+    if isinstance(tree, FlatTree):
+      return tree
+    elif isinstance(tree, tuple):
+      vals = []
+      trees = []
+      staticss = []
+      for child_tree in tree:
+        child = FlatTree.pack(child_tree)
+        vals.extend(child.vals)
+        trees.append(child.tree)
+        staticss.append(child.statics)
+      return FlatTree(vals, treedef_tuple(trees), tuple(staticss))
+    elif isinstance(tree, dict):
+      # only empty case handled for now
+      if tree == {}:
+        return FlatTree.flatten({})
+      else:
+        assert False
+    else:
+      assert False
+
+  def unpack(self: FlatTree) -> tuple[FlatTree, ...]:
+    # TODO: this is O(N) not O(1) (with N as the number of leaves). If it
+    # becomes a problem we can fix it with a fancier data tree.
+    trees = treedef_children(self.tree)
+    children = []
+    offset = 0
+    for i, tree in enumerate(trees):
+      statics = False if isinstance(self.statics, bool) else self.statics[i]
+      new_offset = offset + tree.num_leaves
+      children.append(FlatTree(self.vals[offset:new_offset], tree, statics))
+      offset = new_offset
+    return tuple(children)
+
+  @staticmethod
+  def flatten(tree: PyTree) -> FlatTree:
+    vals, tree = tree_flatten(tree)
+    return FlatTree(vals, tree, False)
+
+  @staticmethod
+  def flatten_static_argnums(args, static_argnums):
+    if not static_argnums:
+      return FlatTree.flatten(args)
+    else:
+      assert isinstance(args, tuple)
+      num_args = len(args)
+      static_argnums = [i % num_args if i < 0 else i for i in static_argnums]
+      statics = tuple(i in static_argnums for i, _ in enumerate(args))
+      tree_with_statics = tuple(
+          Static(x) if static else x for static, x in zip(statics, args))
+      vals, treedef = tree_flatten(tree_with_statics)
+      return FlatTree(vals, treedef, statics=statics)
+
+  @staticmethod
+  def flatten_static_argnames(kwargs, static_argnames):
+    if not static_argnames:
+      return FlatTree.flatten(kwargs)
+    else:
+      assert isinstance(kwargs, dict)
+      statics = {k : k in static_argnames for k, _ in kwargs.items()}
+      tree_with_statics = {k : Static(v) if statics[k] else v
+                           for k, v in kwargs.items()}
+      vals, treedef = tree_flatten(tree_with_statics)
+      return FlatTree(vals, treedef, statics=statics)
+
+  @staticmethod
+  def flatten_static_argnums_argnames(
+      args, kwargs, static_argnums, static_argnames):
+    return FlatTree.pack((
+        FlatTree.flatten_static_argnums(args, static_argnums),
+        FlatTree.flatten_static_argnames(kwargs, static_argnames)))
+
+  def unflatten(self) -> PyTree:
+    pytree = tree_unflatten(self.tree, self.vals)
+    return unwrap_statics(pytree, self.statics)
+
+  @property
+  def tree_without_statics(self):
+    # hardcodes default_registry because it's used implicitly in self.flatten
+    return filter_statics_from_treedef(default_registry, self.tree, self.statics)
+
+  def update(self, new_vals) -> FlatTree:
+    # `new_vals` can be a generator because `FlatTree` forces it to a tuple
+    new = FlatTree(new_vals, self.tree, self.statics)
+    assert len(self.vals) == len(new.vals)
+    return new
+
+  @cached_property
+  def paths(self) -> FlatTree:
+    # TODO(dougalm): find a way to do this without roundtripping
+    try:
+      paths, _ = unzip2(tree_leaves_with_path(self.unflatten()))
+      assert len(paths) == len(self.vals)
+      return self.update(paths)
+    except:
+      return self.update([()] * len(self.vals))  # not our fault
+
+  def __len__(self):
+    return self.len
+
+  @cached_property
+  def len(self):
+    return self.tree.num_leaves
+
+  def __iter__(self):
+    return self.vals.__iter__()
+
+def unwrap_statics(pytree, statics):
+  if statics is False:
+    return pytree
+  elif statics is True:
+    return pytree.val  # pytree should be a `Static` object
+  elif isinstance(pytree, tuple):
+    return tuple(unwrap_statics(p, s) for p, s in zip(pytree, statics))
+  elif isinstance(pytree, dict):
+    return {k : unwrap_statics(p, statics[k]) for k, p in pytree.items()}
+  else:
+    assert False, "unreachable"
+
+def filter_statics_from_treedef(registry, treedef, statics):
+  if statics is False:
+    return treedef
+  elif statics is True:
+    assert False, "unreachable"
+  elif isinstance(statics, tuple):
+    filtered = tuple(
+        filter_statics_from_treedef(registry, td, s)
+        for td, s in zip(treedef.children(), statics) if s is not True)
+    return treedef.from_node_data_and_children(registry, treedef.node_data(), filtered)  # type: ignore
+  elif isinstance(statics, dict):
+    ty, keys = treedef.node_data()  # type: ignore
+    filtered_keys, filtered_subtrees = unzip2(
+        (k, filter_statics_from_treedef(registry, td, statics[k]))
+        for td, k in zip(treedef.children(), keys) if statics[k] is not True)
+    return treedef.from_node_data_and_children(registry, (ty, filtered_keys), filtered_subtrees)  # type: ignore
+  else:
+    assert False, "unreachable"
+
+@register_static
+@dataclasses.dataclass(frozen=True)
+class Static:
+  val: Any
+
+  def __eq__(self, other):
+    return (type(other) is Static and type(self.val) is type(other.val) and
+            self.val == other.val)
+
+
+def _ensure_inbounds(allow_invalid: bool, num_args: int, argnums: Sequence[int]
+                     ) -> tuple[int, ...]:
+  """Ensure argnum is within bounds. Also resolves negative argnums."""
+  result = []
+  for i in argnums:
+    if i >= num_args and allow_invalid: continue
+    if not -num_args <= i < num_args:
+      raise ValueError(
+          "Positional argument indices, e.g. for `static_argnums`, must have "
+          "value greater than or equal to -len(args) and less than len(args), "
+          f"but got value {i} for len(args) == {num_args}.")
+    result.append(i % num_args)  # Resolve negative
+  return tuple(result)

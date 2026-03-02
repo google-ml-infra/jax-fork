@@ -20,6 +20,7 @@ from functools import partial
 import math
 import string
 from typing import Any, Literal, overload
+import warnings
 
 import numpy as np
 
@@ -40,6 +41,7 @@ from jax._src.lax import control_flow
 from jax._src.lax import lax
 from jax._src.lax import utils as lax_utils
 from jax._src.lax.lax import _float, _complex, _int
+from jax._src.lib import cuda_versions
 from jax._src.lib import gpu_linalg
 from jax._src.lib import gpu_solver
 from jax._src.lib import gpu_sparse
@@ -120,11 +122,19 @@ def cholesky_update(r_matrix: ArrayLike, w_vector: ArrayLike) -> Array:
   return cholesky_update_p.bind(r_matrix, w_vector)
 
 
+class EigImplementation(enum.Enum):
+  """Enum for eigendecomposition algorithm."""
+  CUSOLVER = "cusolver"
+  MAGMA = "magma"
+  LAPACK = "lapack"
+
+
 def eig(
     x: ArrayLike,
     *,
     compute_left_eigenvectors: bool = True,
     compute_right_eigenvectors: bool = True,
+    implementation: EigImplementation | None = None,
     use_magma: bool | None = None,
 ) -> list[Array]:
   """Eigendecomposition of a general matrix.
@@ -159,11 +169,22 @@ def eig(
     compute_left_eigenvectors: If true, the left eigenvectors will be computed.
     compute_right_eigenvectors: If true, the right eigenvectors will be
       computed.
-    use_magma: Locally override the ``jax_use_magma`` flag. If ``True``, the
-      eigendecomposition is computed using MAGMA. If ``False``, the computation
-      is done using LAPACK on to the host CPU. If ``None`` (default), the
-      behavior is controlled by the ``jax_use_magma`` flag. This argument
-      is only used on GPU.
+    use_magma: Deprecated, please use ``implementation`` instead. Locally
+      override the ``jax_use_magma`` flag. If ``True``, the eigendecomposition
+      is computed using MAGMA. If ``False``, the computation is done using
+      LAPACK on to the host CPU. If ``None`` (default), the behavior is
+      controlled by the ``jax_use_magma`` flag. This argument is only used on
+      GPU. Will be removed in JAX 0.9.
+    implementation: Controls the choice of eigendecomposition algorithm. If
+    ``LAPACK``, the computation will be performed using LAPACK on the host CPU.
+      If ``MAGMA``, the computation will be performed using the MAGMA library on
+      the GPU. If ``CUSOLVER``, the computation will be performed using the
+      Cusolver library on the GPU. The ``CUSOLVER`` implementation requires
+      Cusolver 11.7.1 (from CUDA 12.6 update 2) to be installed, and does not
+      support computing left eigenvectors.
+      If ``None`` (default), an automatic choice will be made, depending on the
+      Cusolver version, whether left eigenvectors were requested, and the
+      ``jax_use_magma`` configuration variable.
 
   Returns:
     The eigendecomposition of ``x``, which is a tuple of the form
@@ -175,9 +196,26 @@ def eig(
     If the eigendecomposition fails, then arrays full of NaNs will be returned
     for that batch element.
   """
+  if use_magma is not None:
+    warnings.warn(
+        "use_magma is deprecated, please use"
+        " implementation=EigImplementation.MAGMA instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    implementation = (
+        EigImplementation.MAGMA if use_magma else EigImplementation.LAPACK
+    )
   return eig_p.bind(x, compute_left_eigenvectors=compute_left_eigenvectors,
                     compute_right_eigenvectors=compute_right_eigenvectors,
-                    use_magma=use_magma)
+                    implementation=implementation)
+
+
+class EighImplementation(enum.Enum):
+  """Implementation for symmetric/Hermitian eigendecomposition."""
+  QR = "qr"
+  JACOBI = "jacobi"
+  QDWH = "qdwh"
 
 
 def eigh(
@@ -187,6 +225,7 @@ def eigh(
     symmetrize_input: bool = True,
     sort_eigenvalues: bool = True,
     subset_by_index: tuple[int, int] | None = None,
+    implementation: EighImplementation | None = None,
 ) -> tuple[Array, Array]:
   r"""Eigendecomposition of a Hermitian matrix.
 
@@ -209,6 +248,10 @@ def eigh(
       indices of eigenvalues to compute. For example, is ``range_select`` =
       [n-2,n], then ``eigh`` computes the two largest eigenvalues and their
       eigenvectors.
+    implementation: Optional implementation selection. ``QR`` uses QR-based
+      decomposition (default for CPU/GPU). ``JACOBI`` uses Jacobi iteration
+      (GPU/TPU only). ``QDWH`` uses QDWH spectral divide-and-conquer
+      (default on TPU, TPU only).
 
   Returns:
     A tuple ``(v, w)``.
@@ -229,6 +272,7 @@ def eigh(
       lower=lower,
       sort_eigenvalues=sort_eigenvalues,
       subset_by_index=subset_by_index,
+      algorithm=implementation,
   )
   return v, w
 
@@ -429,6 +473,7 @@ class SvdAlgorithm(enum.Enum):
   DEFAULT = "default"
   QR = "QR"
   JACOBI = "Jacobi"
+  POLAR = "polar"
 
 
 @overload
@@ -775,7 +820,7 @@ def linalg_primitive(result_dtype, accepted_dtypes, ranks, result_shape, name,
     prim.def_abstract_eval(
       partial(lax_utils.standard_abstract_eval, prim, shape_rule, dtype_rule,
               lax_utils._standard_weak_type_rule, sharding_rule,
-              partial(core.standard_vma_rule, name), None, None))
+              partial(core.standard_vma_rule, name), None, None, None))
   if supports_batching:
     batching.primitive_batchers[prim] = partial(
         batching.expand_dims_batcher, prim)
@@ -834,11 +879,27 @@ def _cholesky_cpu_lowering(ctx, operand):
   return [_replace_not_ok_with_nan(ctx, batch_dims, ok, result, out_aval)]
 
 
+def _cholesky_gpu_lowering(ctx, operand, *, target_name_prefix):
+  operand_aval, = ctx.avals_in
+  out_aval, = ctx.avals_out
+  batch_dims = operand_aval.shape[:-2]
+  info_aval = ShapedArray(batch_dims, np.int32)
+  rule = _linalg_ffi_lowering(f"{target_name_prefix}solver_potrf_ffi",
+                              avals_out=[operand_aval, info_aval],
+                              operand_output_aliases={0: 0})
+  result, info = rule(ctx, operand, lower=True)
+  ok = mlir.compare_hlo(info, mlir.full_like_aval(ctx, 0, info_aval), "EQ",
+                        "SIGNED")
+  return [_replace_not_ok_with_nan(ctx, batch_dims, ok, result, out_aval)]
+
+
 cholesky_p = standard_linalg_primitive(
     (_float | _complex,), (2,), _cholesky_shape_rule, "cholesky")
 ad.primitive_jvps[cholesky_p] = _cholesky_jvp_rule
 mlir.register_lowering(cholesky_p, _cholesky_lowering)
 mlir.register_lowering(cholesky_p, _cholesky_cpu_lowering, platform="cpu")
+register_cpu_gpu_lowering(cholesky_p, _cholesky_gpu_lowering,
+                          supported_platforms=("cuda", "rocm"))
 
 
 # Cholesky update
@@ -926,8 +987,9 @@ def _eig_compute_attr(compute):
   )
 
 def _eig_cpu_lowering(ctx, operand, *, compute_left_eigenvectors,
-                      compute_right_eigenvectors, use_magma):
-  del use_magma  # unused
+                      compute_right_eigenvectors, implementation):
+  if implementation and implementation != EigImplementation.LAPACK:
+    raise ValueError("Only the lapack implementation is supported on CPU.")
   operand_aval, = ctx.avals_in
   out_aval = ctx.avals_out[0]
   batch_dims = operand_aval.shape[:-2]
@@ -961,48 +1023,134 @@ def _eig_cpu_lowering(ctx, operand, *, compute_left_eigenvectors,
     output.append(vr)
   return output
 
+def _unpack_conjugate_pairs(w, vr):
+  # cusolver, like LAPACK, uses a packed representation of the complex
+  # eigenvectors, where the (re, im) vectors are adjacent and shared by the
+  # conjugate pair:
+  # https://docs.nvidia.com/cuda/cusolver/index.html?highlight=geev#cusolverdnxgeev
+  if w.size == 0:
+    return lax.complex(vr, lax.full_like(vr, 0))
+
+  is_real = ((w.imag == 0) | (w.imag == np.nan))
+  # Finds the positions at which each conjugate pair starts, via the parity of
+  # the count of the number of complex numbers seen.
+  conj_pair_start = control_flow.cumsum((~is_real).astype(int),
+                                        axis=len(w.shape) - 1)
+  conj_pair_start = conj_pair_start % 2 == 1
+  pads = [(0, 0, 0)] * (len(vr.shape))
+  pads[-1] = (-1, 1, 0)
+  vr_shifted_left = lax.pad(vr, lax._zero(vr), pads)
+  pads[-1] = (1, -1, 0)
+  vr_shifted_right = lax.pad(vr, lax._zero(vr), pads)
+  dims = np.delete(np.arange(len(vr.shape), dtype=np.int32), -2)
+  is_real = lax.broadcast_in_dim(is_real, vr.shape, broadcast_dimensions=dims)
+  conj_pair_start = lax.broadcast_in_dim(conj_pair_start, vr.shape,
+                                         broadcast_dimensions=dims)
+  re = lax.select(is_real | conj_pair_start, vr, vr_shifted_right)
+  im = lax.select(conj_pair_start, vr_shifted_left, -vr)
+  im = lax.select(is_real, lax.full_like(vr, 0), im)
+  return lax.complex(re, im)
+
+
 def _eig_gpu_lowering(ctx, operand, *,
                       compute_left_eigenvectors, compute_right_eigenvectors,
-                      use_magma, target_name_prefix):
+                      implementation, target_name_prefix):
   operand_aval, = ctx.avals_in
   batch_dims = operand_aval.shape[:-2]
   n, m = operand_aval.shape[-2:]
   assert n == m
 
-  gpu_solver.initialize_hybrid_kernels()
   dtype = operand_aval.dtype
-  is_real = dtype == np.float32 or dtype == np.float64
-  if is_real:
-    target_name = f"{target_name_prefix}hybrid_eig_real"
-    complex_dtype = np.complex64 if dtype == np.float32 else np.complex128
+  complex_dtype = np.result_type(dtype, 1j)
+  if dtype in (np.float32, np.float64):
+    is_real = True
+  elif dtype in (np.complex64, np.complex128):
+    is_real = False
   else:
-    target_name = f"{target_name_prefix}hybrid_eig_comp"
-    assert dtype == np.complex64 or dtype == np.complex128
-    complex_dtype = dtype
+    raise ValueError(f"Unsupported dtype: {dtype}")
 
-  avals_out = [
-      ShapedArray(batch_dims + (n,), dtype),
-      ShapedArray(batch_dims + (n, n), complex_dtype),
-      ShapedArray(batch_dims + (n, n), complex_dtype),
-      ShapedArray(batch_dims, np.int32),
-  ]
-  if is_real:
-    avals_out = [ShapedArray(batch_dims + (n,), dtype)] + avals_out
+  have_cusolver_geev = (
+      target_name_prefix == "cu"
+      and cuda_versions
+      and cuda_versions.cusolver_get_version() >= 11701
+  )
 
-  magma = config.gpu_use_magma.value
-  if use_magma is not None:
-    magma = "on" if use_magma else "off"
+  if (
+      implementation is None and have_cusolver_geev
+      and not compute_left_eigenvectors
+  ) or implementation == EigImplementation.CUSOLVER:
+    if not have_cusolver_geev:
+      raise RuntimeError(
+          "Nonsymmetric eigendecomposition requires cusolver 11.7.1 or newer"
+      )
+    if compute_left_eigenvectors:
+      raise NotImplementedError(
+          "Left eigenvectors are not supported by cusolver")
+    target_name = f"{target_name_prefix}solver_geev_ffi"
+    avals_out = [
+        ShapedArray(batch_dims + (n, n), dtype),
+        ShapedArray(batch_dims + (n,), complex_dtype),
+        ShapedArray(batch_dims + (n, n), dtype),
+        ShapedArray(batch_dims + (n, n), dtype),
+        ShapedArray(batch_dims, np.int32),
+    ]
 
-  rule = _linalg_ffi_lowering(target_name, avals_out=avals_out)
-  *w, vl, vr, info = rule(ctx, operand, magma=magma,
-                          left=compute_left_eigenvectors,
-                          right=compute_right_eigenvectors)
-  if is_real:
-    assert len(w) == 2
-    w = hlo.complex(*w)
+    rule = _linalg_ffi_lowering(target_name, avals_out=avals_out)
+    _, w, vl, vr, info = rule(ctx, operand, left=compute_left_eigenvectors,
+                              right=compute_right_eigenvectors)
+    if is_real:
+      unpack = mlir.lower_fun(_unpack_conjugate_pairs, multiple_results=False)
+      if compute_left_eigenvectors:
+        sub_ctx = ctx.replace(
+            primitive=None,
+            avals_in=[
+                ShapedArray(batch_dims + (n,), complex_dtype),
+                ShapedArray(batch_dims + (n, n), dtype),
+            ],
+            avals_out=[ShapedArray(batch_dims + (n, n), complex_dtype)],
+        )
+        vl, = unpack(sub_ctx, w, vl)
+      if compute_right_eigenvectors:
+        sub_ctx = ctx.replace(
+            primitive=None,
+            avals_in=[
+                ShapedArray(batch_dims + (n,), complex_dtype),
+                ShapedArray(batch_dims + (n, n), dtype),
+            ],
+            avals_out=[ShapedArray(batch_dims + (n, n), complex_dtype)],
+        )
+        vr, = unpack(sub_ctx, w, vr)
   else:
-    assert len(w) == 1
-    w = w[0]
+    magma = config.gpu_use_magma.value
+    if implementation is not None:
+      magma = "on" if implementation == EigImplementation.MAGMA else "off"
+    gpu_solver.initialize_hybrid_kernels()
+    if is_real:
+      target_name = f"{target_name_prefix}hybrid_eig_real"
+      complex_dtype = np.complex64 if dtype == np.float32 else np.complex128
+    else:
+      target_name = f"{target_name_prefix}hybrid_eig_comp"
+      assert dtype == np.complex64 or dtype == np.complex128
+      complex_dtype = dtype
+
+    avals_out = [
+        ShapedArray(batch_dims + (n,), dtype),
+        ShapedArray(batch_dims + (n, n), complex_dtype),
+        ShapedArray(batch_dims + (n, n), complex_dtype),
+        ShapedArray(batch_dims, np.int32),
+    ]
+    if is_real:
+      avals_out = [ShapedArray(batch_dims + (n,), dtype)] + avals_out
+    rule = _linalg_ffi_lowering(target_name, avals_out=avals_out)
+    *w, vl, vr, info = rule(ctx, operand, magma=magma,
+                            left=compute_left_eigenvectors,
+                            right=compute_right_eigenvectors)
+    if is_real:
+      assert len(w) == 2
+      w = hlo.complex(*w)
+    else:
+      assert len(w) == 1
+      w = w[0]
   zeros = mlir.full_like_aval(ctx, 0, ShapedArray(batch_dims, np.int32))
   ok = mlir.compare_hlo(info, zeros, "EQ", "SIGNED")
   w_aval = ShapedArray(batch_dims + (n,), complex_dtype)
@@ -1019,18 +1167,17 @@ def _eig_gpu_lowering(ctx, operand, *,
   return output
 
 def eig_jvp_rule(primals, tangents, *, compute_left_eigenvectors,
-                 compute_right_eigenvectors, use_magma):
-  del use_magma  # unused
+                 compute_right_eigenvectors, implementation):
   if compute_left_eigenvectors or compute_right_eigenvectors:
     raise NotImplementedError(
-        'The derivatives of eigenvectors are not implemented, only '
-        'eigenvalues. See '
+        'The derivatives of non-symmetric eigenvectors are not supported. '
+        'Only first-order derivatives of eigenvalues are supported. See '
         'https://github.com/jax-ml/jax/issues/2748 for discussion.')
   # Formula for derivative of eigenvalues w.r.t. a is eqn 4.60 in
   # https://arxiv.org/abs/1701.00392
   a, = primals
   da, = tangents
-  l, v = eig(a, compute_left_eigenvectors=False)
+  l, v = eig(a, compute_left_eigenvectors=False, implementation=implementation)
   return [l], [(_solve(v, da.astype(v.dtype)) * _T(v)).sum(-1)]
 
 eig_p = linalg_primitive(
@@ -1042,66 +1189,6 @@ register_cpu_gpu_lowering(eig_p, _eig_gpu_lowering, ("cuda", "rocm"))
 
 
 # Symmetric/Hermitian eigendecomposition
-
-def eigh_jacobi(x: ArrayLike, *, lower: bool = True,
-                sort_eigenvalues: bool = True) -> tuple[Array, Array]:
-  """Helper Jacobi eigendecomposition implemented by XLA.
-
-  Used as a subroutine of QDWH-eig on TPU.
-  """
-  return eigh_jacobi_p.bind(x, lower=lower, sort_eigenvalues=sort_eigenvalues)
-
-def _eigh_jacobi_shape_rule(shape, **_):
-  if shape[0] != shape[-1]:
-    raise ValueError(
-        "Argument to symmetric eigendecomposition must have shape [..., n, n], "
-        f"got shape {shape}"
-    )
-  n = shape[0]
-  return (n,), (n, n)
-
-def _eigh_jacobi_dtype_rule(dtype, **_):
-  return lax._complex_basetype(dtype), dtype
-
-def _eigh_jacobi_lowering_rule(ctx, operand, lower, sort_eigenvalues):
-  operand_aval, = ctx.avals_in
-  if operand_aval.shape[-1] == 0:
-    reshape_aval = operand_aval.update(shape=operand_aval.shape[:-1])
-    return [
-        hlo.real(mlir.reshape(ctx, operand, reshape_aval)),
-        operand,
-    ]
-
-  eigvals_type = mlir.aval_to_ir_type(ctx.avals_out[0])
-  eigvecs_type = mlir.aval_to_ir_type(ctx.avals_out[1])
-  result_types = [eigvecs_type, eigvals_type]
-
-  backend_config = f"{int(lower)},{int(sort_eigenvalues)},100,1e-6"
-
-  if any(not is_constant_shape(aval_out.shape)
-         for aval_out in ctx.avals_out):
-    result_shapes = [
-        mlir.eval_dynamic_shape_as_tensor(ctx, aval_out.shape)
-        # The custom call returns the results swapped
-        for aval_out in list(reversed(ctx.avals_out))
-    ]
-  else:
-    result_shapes = None
-  op = mlir.custom_call(
-      "Eigh",
-      result_types=result_types,
-      operands=[operand],
-      backend_config=backend_config,
-      api_version=1,
-      result_shapes=result_shapes,
-  )
-  return op.results[1], op.results[0]
-
-eigh_jacobi_p = linalg_primitive(
-    _eigh_jacobi_dtype_rule, (_float | _complex,), (2,),
-    _eigh_jacobi_shape_rule, "eigh_jacobi", multiple_results=True)
-mlir.register_lowering(eigh_jacobi_p, _eigh_jacobi_lowering_rule)
-
 
 def _eigh_shape_rule(shape, *, subset_by_index, **_):
   if shape[0] != shape[-1]:
@@ -1118,7 +1205,7 @@ def _eigh_dtype_rule(dtype, **_):
   return dtype, lax._complex_basetype(dtype)
 
 def _eigh_cpu_gpu_lowering(
-    ctx, operand, *, lower, sort_eigenvalues, subset_by_index,
+    ctx, operand, *, lower, sort_eigenvalues, subset_by_index, algorithm,
     target_name_prefix: str
 ):
   del sort_eigenvalues  # The CPU/GPU implementations always sort.
@@ -1128,6 +1215,12 @@ def _eigh_cpu_gpu_lowering(
   if not (subset_by_index is None or subset_by_index == (0, n)):
     raise NotImplementedError("subset_by_index not supported on CPU and GPU")
   batch_dims = operand_aval.shape[:-2]
+
+  if algorithm == EighImplementation.QDWH:
+    raise NotImplementedError("QDWH implementation is only supported on TPU")
+  if algorithm == EighImplementation.JACOBI and target_name_prefix == "cpu":
+    raise NotImplementedError("Jacobi implementation is not supported on CPU")
+
   if target_name_prefix == "cpu":
     dtype = operand_aval.dtype
     prefix = "he" if dtypes.issubdtype(dtype, np.complexfloating) else "sy"
@@ -1139,7 +1232,12 @@ def _eigh_cpu_gpu_lowering(
     }
   else:
     target_name = f"{target_name_prefix}solver_syevd_ffi"
-    kwargs = {"lower": lower, "algorithm": np.uint8(0)}
+    # Use Jacobi (algorithm=2) if requested, otherwise use QR (algorithm=1)
+    if algorithm is None:
+      algo_int = 0
+    else:
+      algo_int = 2 if algorithm == EighImplementation.JACOBI else 1
+    kwargs = {"lower": lower, "algorithm": np.uint8(algo_int)}
 
   info_aval = ShapedArray(batch_dims, np.int32)
   avals_out = [v_aval, w_aval, info_aval]
@@ -1155,7 +1253,7 @@ def _eigh_cpu_gpu_lowering(
 
 
 def _eigh_jvp_rule(
-    primals, tangents, *, lower, sort_eigenvalues, subset_by_index
+    primals, tangents, *, lower, sort_eigenvalues, subset_by_index, algorithm
 ):
   (a,) = primals
   n = a.shape[-1]
@@ -1178,6 +1276,7 @@ def _eigh_jvp_rule(
       lower=lower,
       sort_eigenvalues=sort_eigenvalues,
       subset_by_index=subset_by_index,
+      algorithm=algorithm,
   )
 
   # for complex numbers we need eigenvalues to be full dtype of v, a:
@@ -1516,7 +1615,7 @@ def _lu_solve_core(lu: Array, permutation: Array, b: Array, trans: int) -> Array
   return lax.reshape(x, b.shape)
 
 
-@partial(api.jit, static_argnums=(3,))
+@api.jit(static_argnums=(3,))
 def _lu_solve(lu: Array, permutation: Array, b: Array, trans: int) -> Array:
   if len(lu.shape) < 2 or lu.shape[-1] != lu.shape[-2]:
     raise ValueError("last two dimensions of LU decomposition must be equal, "
@@ -1924,7 +2023,11 @@ def _svd_jvp_rule(
       algorithm=algorithm,
   )
 
-  if compute_uv and full_matrices:
+  if (
+      compute_uv
+      and full_matrices
+      and not core.definitely_equal(A.shape[-2], A.shape[-1])
+  ):
     # TODO: implement full matrices case, documented here: https://people.maths.ox.ac.uk/gilesm/files/NA-08-01.pdf
     raise NotImplementedError(
       "Singular value decomposition JVP not implemented for full matrices")
@@ -2021,7 +2124,7 @@ def _svd_cpu_gpu_lowering(
       target_name = lapack.prepare_lapack_call("gesvd_ffi", operand_aval.dtype)
     else:
       raise NotImplementedError(
-          "The SVD Jacobi algorithm is not implemented on CPU.")
+          "The SVD Jacobi and Polar algorithms are not implemented on CPU.")
     mode = _svd_computation_attr(compute_uv, full_matrices)
     info_aval = ShapedArray(batch_dims, np.dtype(np.int32))
     if compute_uv:
@@ -2090,13 +2193,19 @@ def _svd_gpu_sub_lowering(ctx, operand, *, full_matrices, compute_uv,
   # TODO(danfm): Since this was originally implemented, hipSolver appears to
   # have added support for the Jacobi algorithm, so we should investigate
   # removing this condition.
+  # TODO(phawkins): Consider making polar decomposition the default.
+  use_jacobi = False
+  use_polar = False
   if algorithm is None or algorithm == SvdAlgorithm.DEFAULT:
     try:
       use_jacobi = target_name_prefix == "cu" and m <= 1024 and n <= 1024
     except core.InconclusiveDimensionOperation:
       use_jacobi = False
-  else:
-    use_jacobi = algorithm == SvdAlgorithm.JACOBI
+  elif algorithm == SvdAlgorithm.JACOBI:
+    use_jacobi = True
+  elif algorithm == SvdAlgorithm.POLAR:
+    use_polar = True
+
   column_major = True
   if use_jacobi:
     target_name = f"{target_name_prefix}solver_gesvdj_ffi"
@@ -2107,18 +2216,22 @@ def _svd_gpu_sub_lowering(ctx, operand, *, full_matrices, compute_uv,
       econ = not full_matrices and m > 32 and n > 32
     except core.InconclusiveDimensionOperation:
       econ = False
+  elif use_polar:
+    target_name = f"{target_name_prefix}solver_gesvdp_ffi"
+    econ = not full_matrices
   else:
     target_name = f"{target_name_prefix}solver_gesvd_ffi"
     econ = not full_matrices
-    # Because the base gesvd kernel only supports matrices where m >= n, we.
+    # Because the base gesvd kernel only supports matrices where m >= n, we
+    # conceptually transpose the matrix if m < n.
     transposed = m < n
     kwargs = {"transposed": transposed}
     if transposed:
       column_major = False
 
-  if use_jacobi:
-    # When using the Jacobi algorithm, the U and V matrices must always be
-    # allocated even if compute_uv is False.
+  if use_jacobi or use_polar:
+    # When using the Jacobi or polar algorithms, the U and V matrices must
+    # always be allocated even if compute_uv is False.
     u_aval = ShapedArray((*batch_dims, m, k if econ else m), u_aval.dtype)
     v_aval = ShapedArray((*batch_dims, n, k if econ else n), vt_aval.dtype)
     avals_out = [operand_aval, s_aval, u_aval, v_aval, info_aval]
@@ -2126,12 +2239,13 @@ def _svd_gpu_sub_lowering(ctx, operand, *, full_matrices, compute_uv,
     avals_out = [operand_aval, s_aval, vt_aval, u_aval, info_aval]
   else:
     avals_out = [operand_aval, s_aval, u_aval, vt_aval, info_aval]
+
   rule = _linalg_ffi_lowering(target_name, avals_out=avals_out,
                               operand_output_aliases={0: 0},
                               column_major=column_major)
   _, s, u, vt, info = rule(ctx, operand, full_matrices=not econ,
                            compute_uv=compute_uv, **kwargs)
-  if use_jacobi and compute_uv:
+  if (use_jacobi or use_polar) and compute_uv:
     vt = hlo.transpose(
         vt,
         mlir.dense_int_array(np.array(tuple(range(nb)) + (nb + 1, nb))))
@@ -2459,9 +2573,9 @@ def _tridiagonal_solve_transpose_rule(cotangent, dl, d, du, b):
   if type(cotangent) is ad_util.Zero:
     cotangent_b = ad_util.Zero(b.aval)
   else:
-    dl_trans = lax.concatenate((lax.zeros_like_array(du[..., -1:]), du[..., :-1]),
+    dl_trans = lax.concatenate((lax.full_like(du[..., -1:], 0), du[..., :-1]),
                                du.ndim-1)
-    du_trans = lax.concatenate((dl[..., 1:], lax.zeros_like_array(dl[..., :1])),
+    du_trans = lax.concatenate((dl[..., 1:], lax.full_like(dl[..., :1], 0)),
                                dl.ndim-1)
     cotangent_b = tridiagonal_solve(dl_trans, d, du_trans, cotangent)
   return [None, None, None, cotangent_b]
@@ -2591,12 +2705,12 @@ def symmetrize(x: Array) -> Array: return (x + _H(x)) / 2
 def _tril(m: Array, k:int = 0) -> Array:
   *_, N, M = m.shape
   mask = lax._tri(bool, (N, M), k)
-  return lax.select(lax.broadcast(mask, m.shape[:-2]), m, lax.zeros_like_array(m))
+  return lax.select(lax.broadcast(mask, m.shape[:-2]), m, lax.full_like(m, 0))
 
 def _triu(m: Array, k:int = 0) -> Array:
   *_, N, M = m.shape
   mask = lax._tri(bool, (N, M), k - 1)
-  return lax.select(lax.broadcast(mask, m.shape[:-2]), lax.zeros_like_array(m), m)
+  return lax.select(lax.broadcast(mask, m.shape[:-2]), lax.full_like(m, 0), m)
 
 def _construct_diagonal(s: Array) -> Array:
   """Construct a (batched) diagonal matrix"""

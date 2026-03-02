@@ -28,6 +28,7 @@ limitations under the License.
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_join.h"
+#include "absl/strings/string_view.h"
 #include "llvm/Support/Casting.h"
 #include "nanobind/nanobind.h"
 #include "nanobind/stl/optional.h"  // IWYU pragma: keep
@@ -40,10 +41,12 @@ limitations under the License.
 #include "jaxlib/py_memory_space.h"
 #include "jaxlib/python_ref_manager.h"
 #include "xla/pjrt/status_casters.h"
+#include "xla/python/ifrt/attribute_map.h"
 #include "xla/python/ifrt/device.h"
 #include "xla/python/nb_helpers.h"
 #include "xla/python/pjrt_ifrt/pjrt_client.h"
 #include "xla/python/pjrt_ifrt/pjrt_device.h"
+#include "xla/python/version.h"
 #include "xla/tsl/framework/allocator.h"
 #include "xla/tsl/platform/statusor.h"
 #include "xla/util.h"
@@ -67,11 +70,11 @@ std::string_view PyDevice::platform() const {
   // but we haven't yet updated JAX clients that
   // expect "gpu". Migrate users and remove this
   // code.
-  if (client_->platform_name() == "cuda" ||
-      client_->platform_name() == "rocm") {
+  absl::string_view platform_name = device_->PlatformName();
+  if (platform_name == "cuda" || platform_name == "rocm") {
     return std::string_view("gpu");
   } else {
-    return client_->platform_name();
+    return platform_name;
   }
 }
 
@@ -216,7 +219,7 @@ PyType_Slot PyDevice::slots_[] = {
     {0, nullptr},
 };
 
-/* static */ void PyDevice::RegisterPythonType(nb::module_& m) {
+/* static */ void PyDevice::Register(nb::module_& m) {
   nb::class_<PyDevice> device(
       m, "Device", nb::type_slots(PyDevice::slots_),
       "A descriptor of an available device.\n\nSubclasses are used to "
@@ -278,12 +281,13 @@ PyType_Slot PyDevice::slots_[] = {
         }
         try {
           auto device = nb::cast<PyDevice*>(nb::handle(self));
-          auto name = nb::cast<std::string_view>(nb::handle(key));
-          const auto& attrs = device->device_->Attributes().map();
-          auto it = attrs.find(name);
-          if (it != attrs.end()) {
-            auto result = std::visit([](auto&& v) { return nb::cast(v.value); },
-                                     it->second);
+          auto name = nb::cast<std::string>(nb::handle(key));
+          auto value =
+              device->device_->Attributes().Get<xla::ifrt::AttributeMap::Value>(
+                  name);
+          if (value.ok()) {
+            auto result =
+                std::visit([](auto&& v) { return nb::cast(v.value); }, *value);
             return result.release().ptr();
           }
           PyErr_SetNone(PyExc_AttributeError);

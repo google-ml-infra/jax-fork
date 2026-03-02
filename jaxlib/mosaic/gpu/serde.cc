@@ -18,6 +18,7 @@ limitations under the License.
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/LogicalResult.h"
+#include "mlir/Dialect/LLVMIR/NVVMDialect.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -43,11 +44,15 @@ constexpr llvm::StringRef kVersionAttrName = "stable_mosaic_gpu.version";
 // When this is bumped, we should file a TODO to update the forward-compatible
 // version in Mosaic GPU lowering in a month!
 //
-// TODO(bchetioui): Update the forward-compatible version to 2 in Mosaic GPU
-// lowering after 2025-09-08.
 // TODO(apaszke): Update the forward-compatible version to 3 in Mosaic GPU
 // lowering after 2025-10-08.
-constexpr int kVersion = 3;
+// TODO(apaszke): Update the forward-compatible version to 4 in Mosaic GPU
+// lowering after 2025-11-13.
+// TODO(apaszke): Update the forward-compatible version to 5 in Mosaic GPU
+// lowering after 2025-12-07.
+// TODO(apaszke): Update the forward-compatible version to 6 in Mosaic GPU
+// lowering after 2025-12-18.
+constexpr int kVersion = 6;
 
 using SerdeRuleType = jaxlib::mosaic::SerdeRuleType;
 
@@ -61,8 +66,8 @@ LogicalResult vector_extractelement_upgrade(Operation* op, int version,
     b.setInsertionPointAfter(op);
     Value vec = op->getOperand(0);
     Value position = op->getOperand(1);
-    Value extracted_value = b.create<mlir::vector::ExtractOp>(
-        op->getLoc(), vec, ArrayRef<mlir::OpFoldResult>{position});
+    Value extracted_value = mlir::vector::ExtractOp::create(
+        b, op->getLoc(), vec, ArrayRef<mlir::OpFoldResult>{position});
 
     op->replaceAllUsesWith(llvm::SmallVector<Value>{extracted_value});
     op->erase();
@@ -83,9 +88,9 @@ LogicalResult vector_insertelement_upgrade(Operation* op, int version,
     Value destination = op->getOperand(1);
     Value position = op->getOperand(2);
 
-    Value inserted_value = b.create<mlir::vector::InsertOp>(
-        op->getLoc(), source, destination,
-        ArrayRef<mlir::OpFoldResult>{position});
+    Value inserted_value =
+        mlir::vector::InsertOp::create(b, op->getLoc(), source, destination,
+                                       ArrayRef<mlir::OpFoldResult>{position});
     op->replaceAllUsesWith(llvm::SmallVector<Value>{inserted_value});
     op->erase();
     erased = true;
@@ -140,6 +145,72 @@ LogicalResult nvvm_cp_async_bulk_tensor_global_shared_cta_downgrade(
   return success();
 }
 
+LogicalResult vector_splat_upgrade(Operation* op, int version, bool& erased) {
+  if (version < 4) {
+    // vector.splat was removed in
+    // https://github.com/llvm/llvm-project/commit/ea291d0e8c93d47d7953eff5ca1048891a5fcc55.
+    // We replace it with a vector.broadcast.
+    mlir::OpBuilder b(op->getParentRegion());
+    b.setInsertionPointAfter(op);
+    Value inserted_value = mlir::vector::BroadcastOp::create(
+        b, op->getLoc(), op->getResult(0).getType(), op->getOperand(0));
+    op->replaceAllUsesWith(llvm::SmallVector<Value>{inserted_value});
+    op->erase();
+    erased = true;
+  }
+  return success();
+}
+
+LogicalResult nvvm_mbarrier_init_shared_upgrade(Operation* op, int version,
+                                                bool& erased) {
+  // https://github.com/llvm/llvm-project/commit/523706f2cd6a06bd9557bf0dca9986d867eddd79
+  if (version < 5) {
+    mlir::OpBuilder b(op->getParentRegion());
+    b.setInsertionPointAfter(op);
+    mlir::NVVM::MBarrierInitOp::create(
+        b, op->getLoc(), op->getOperand(0), op->getOperand(1),
+        op->getNumOperands() < 3 ? Value{} : op->getOperand(2));
+    op->erase();
+    erased = true;
+  }
+  return success();
+}
+
+LogicalResult nvvm_mbarrier_try_wait_parity_shared_upgrade(Operation* op,
+                                                           int version,
+                                                           bool& erased) {
+  // https://github.com/llvm/llvm-project/commit/7eeae8e41d7827d84de12df7b5ecfab3058900cb
+  if (version < 6) {
+    mlir::OpBuilder b(op->getParentRegion());
+    b.setInsertionPointAfter(op);
+    mlir::NVVM::MBarrierTryWaitParityOp::create(
+        b, op->getLoc(), op->getOperand(0), op->getOperand(1),
+        op->getOperand(2));
+    op->erase();
+    erased = true;
+  }
+  return success();
+}
+
+LogicalResult nvvm_mbarrier_arrive_expect_tx_shared_upgrade(Operation* op,
+                                                            int version,
+                                                            bool& erased) {
+  // https://github.com/llvm/llvm-project/commit/fddf7b0510e5df7a08c512a177ea9c1ec4307718
+  if (version < 6) {
+    mlir::ImplicitLocOpBuilder b(op->getLoc(), op->getParentRegion());
+    b.setInsertionPointAfter(op);
+    auto new_op = mlir::NVVM::MBarrierArriveExpectTxOp::create(
+        b, op->getResultTypes(), op->getOperand(0), op->getOperand(1),
+        mlir::NVVM::MemScopeKind::CTA,
+        /*relaxed=*/false,
+        op->getNumOperands() < 3 ? mlir::Value{} : op->getOperand(2));
+    op->replaceAllUsesWith(new_op);
+    op->erase();
+    erased = true;
+  }
+  return success();
+}
+
 const llvm::StringMap<SerdeRuleType>& upgrade_rules() {
   static auto rules = new llvm::StringMap<SerdeRuleType>{
       {::llvm::StringLiteral("vector.extractelement"),
@@ -147,7 +218,15 @@ const llvm::StringMap<SerdeRuleType>& upgrade_rules() {
       {::llvm::StringLiteral("vector.insertelement"),
        vector_insertelement_upgrade},
       {::llvm::StringLiteral("nvvm.cp.async.bulk.tensor.global.shared.cta"),
-       nvvm_cp_async_bulk_tensor_global_shared_cta_upgrade}};
+       nvvm_cp_async_bulk_tensor_global_shared_cta_upgrade},
+      {::llvm::StringLiteral("vector.splat"), vector_splat_upgrade},
+      {::llvm::StringLiteral("nvvm.mbarrier.init.shared"),
+       nvvm_mbarrier_init_shared_upgrade},
+      {::llvm::StringLiteral("nvvm.mbarrier.try_wait.parity.shared"),
+       nvvm_mbarrier_try_wait_parity_shared_upgrade},
+      {::llvm::StringLiteral("nvvm.mbarrier.arrive.expect_tx.shared"),
+       nvvm_mbarrier_arrive_expect_tx_shared_upgrade},
+  };
   return *rules;
 }
 
@@ -168,7 +247,7 @@ void SerdePass::runOnOperation() {
   }
   int serialize_version = -1;
   if (serialize) {
-     serialize_version = target_version.hasValue() ? target_version : kVersion;
+    serialize_version = target_version.hasValue() ? target_version : kVersion;
   }
   if (mlir::failed(jaxlib::mosaic::RunSerde(
           module, upgrade_rules(), downgrade_rules(), serialize,

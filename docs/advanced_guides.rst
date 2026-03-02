@@ -17,6 +17,7 @@ operations.
    notebooks/layout
    notebooks/host-offloading
    multi_process
+   fault_tolerance
    distributed_data_loading
    notebooks/colocated-python
 
@@ -31,9 +32,8 @@ operations.
    :maxdepth: 1
 
    notebooks/autodiff_cookbook
-   notebooks/Custom_derivative_rules_for_Python_code
    notebooks/autodiff_remat
-   advanced-autodiff
+   advanced_autodiff
 
 .. toctree::
    :maxdepth: 1
@@ -42,26 +42,27 @@ operations.
    errors
    debugging
    debugging/index
-   debugging/flags
    transfer_guard
 
 .. toctree::
    :maxdepth: 1
    :caption: Pytrees
 
-   pytrees
+   custom_pytrees
 
 .. toctree::
    :maxdepth: 1
    :caption: Performance optimizations
 
    persistent_compilation_cache
+   buffer_donation
    gpu_performance_tips
 
 .. toctree::
    :maxdepth: 1
    :caption: Performance benchmarking and profiling
 
+   benchmarking
    profiling
    device_memory_profiling
 
@@ -90,12 +91,6 @@ operations.
    gradient-checkpointing
    aot
    export/index
-
-.. toctree::
-   :caption: Pallas
-   :maxdepth: 1
-
-   pallas/index
 
 .. toctree::
    :caption: Example applications

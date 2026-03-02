@@ -65,6 +65,7 @@ limitations under the License.
 #include "xla/pjrt/plugin/xla_cpu/xla_cpu_pjrt_client.h"
 #include "xla/pjrt/status_casters.h"
 #include "xla/python/ifrt/array.h"
+#include "xla/python/ifrt/attribute_map.h"
 #include "xla/python/ifrt/device.h"
 #include "xla/python/ifrt/device_list.h"
 #include "xla/python/ifrt/executable.h"
@@ -90,6 +91,7 @@ limitations under the License.
 #include "xla/backends/cpu/collectives/mpi_collectives.h"
 #endif  // !_WIN32 && !PLATFORM_GOOGLE
 
+#include "jaxlib/call_location.h"
 #include "jaxlib/config.h"
 #include "jaxlib/custom_call_sharding.h"
 #include "jaxlib/dlpack.h"
@@ -113,10 +115,11 @@ limitations under the License.
 #include "jaxlib/traceback.h"
 #include "jaxlib/xla_compiler.h"
 #include "xla/hlo/builder/lib/approx_topk_shape.h"
+#include "xla/pjrt/c_api_client/pjrt_c_api_client.h"
 #include "xla/pjrt/distributed/key_value_store_interface.h"
+#include "xla/pjrt/distributed/preemption/preemption_sync_manager.h"
 #include "xla/pjrt/exceptions.h"
 #include "xla/pjrt/pjrt_api.h"
-#include "xla/pjrt/pjrt_c_api_client.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/pjrt/pjrt_common.h"
 #include "xla/pjrt/pjrt_executable.h"
@@ -147,25 +150,31 @@ bool IsOptimizedBuild() {
 
 // Is*san reports whether the build is under that particular sanitizer.
 bool IsAsan() {
-#if defined(ADDRESS_SANITIZER)
-  return true;
-#else  // defined(ADDRESS_SANITIZER)
+#if defined(__SANITIZE_ADDRESS__)
+  return true;  // GCC and newer MSVC
+#elif defined(__has_feature) && __has_feature(address_sanitizer)
+  return true;  // Clang
+#else
   return false;
 #endif
 }
 
 bool IsMsan() {
-#if defined(MEMORY_SANITIZER)
-  return true;
-#else  // defined(MEMORY_SANITIZER)
+#if defined(__has_feature) && __has_feature(memory_sanitizer)
+  return true;  // Clang (MSan is typically Clang-only)
+#elif defined(__SANITIZE_MEMORY__)
+  return true;  // GCC (rare, but future-proof)
+#else
   return false;
 #endif
 }
 
 bool IsTsan() {
-#if defined(THREAD_SANITIZER)
-  return true;
-#else  // defined(THREAD_SANITIZER)
+#if defined(__SANITIZE_THREAD__)
+  return true;  // GCC
+#elif defined(__has_feature) && __has_feature(thread_sanitizer)
+  return true;  // Clang
+#else
   return false;
 #endif
 }
@@ -198,9 +207,9 @@ NB_MODULE(_jax, m) {
   // Must be before PyClient.compile.
   xla::BuildXlaCompilerSubmodule(m);
 
-  PyDevice::RegisterPythonType(m);
-  PyMemorySpace::RegisterPythonType(m);
-  PyClient::RegisterPythonTypes(m);
+  PyDevice::Register(m);
+  PyMemorySpace::Register(m);
+  PyClient::Register(m);
 
   nb::enum_<xla::ifrt::ArrayCopySemantics>(m, "ArrayCopySemantics",
                                            nb::is_arithmetic())
@@ -406,7 +415,8 @@ NB_MODULE(_jax, m) {
          const absl::flat_hash_map<std::string, xla::PjRtValueType>& options,
          std::shared_ptr<xla::DistributedRuntimeClient> distributed_client,
          std::optional<xla::ifrt::TransferServerInterfaceFactory>
-             transfer_server_factory) -> nb_class_ptr<PyClient> {
+             transfer_server_factory,
+         bool force_dcn_cross_host_transfers) -> nb_class_ptr<PyClient> {
         std::unique_ptr<xla::ifrt::PjRtClient> ifrt_client;
         {
           nb::gil_scoped_release gil_release;
@@ -428,6 +438,8 @@ NB_MODULE(_jax, m) {
             ifrt_options.transfer_server_factory =
                 std::move(transfer_server_factory->factory_fn);
           }
+          ifrt_options.force_dcn_cross_host_transfers =
+              force_dcn_cross_host_transfers;
           ifrt_client = xla::ValueOrThrow(
               xla::ifrt::PjRtClient::Create(std::move(ifrt_options)));
         }
@@ -437,7 +449,8 @@ NB_MODULE(_jax, m) {
       nb::arg("options") =
           absl::flat_hash_map<std::string, xla::PjRtValueType>(),
       nb::arg("distributed_client").none() = nullptr,
-      nb::arg("transfer_server_factory").none() = std::nullopt);
+      nb::arg("transfer_server_factory").none() = std::nullopt,
+      nb::arg("force_dcn_cross_host_transfers") = false);
   // TODO(b/322357665): Delete this method after TPU plugin changes to use the
   // standard registration.
   m.def("get_default_c_api_topology",
@@ -482,7 +495,7 @@ NB_MODULE(_jax, m) {
               client->ifrt_client()->GetTopologyForDevices(device_list));
         });
 
-  TF_CHECK_OK(PyArray::RegisterTypes(m));
+  TF_CHECK_OK(PyArray::Register(m));
   PyDeviceList::Register(m);
   RegisterSharding(m);
 
@@ -516,65 +529,15 @@ NB_MODULE(_jax, m) {
               &xla::CompiledMemoryStats::peak_memory_in_bytes)
       .def("__str__", &xla::CompiledMemoryStats::DebugString);
 
-  nb::class_<PyExecuteResults>(m, "ExecuteResults")
-      .def("__len__", [](PyExecuteResults& results) { return results.Size(); })
-      .def("disassemble_into_single_device_arrays",
-           &PyExecuteResults::DisassembleIntoSingleDeviceArrays)
-      .def("disassemble_prefix_into_single_device_arrays",
-           &PyExecuteResults::DisassemblePrefixIntoSingleDeviceArrays)
-      .def("consume_with_handlers", &PyExecuteResults::ConsumeWithHandlers)
-      .def("consume_token", &PyExecuteResults::ConsumeToken);
-
   m.def("get_execution_stream_id", []() { return GetExecutionStreamId(); });
   m.def("set_execution_stream_id",
         [](int64_t id) { GetExecutionStreamId() = id; });
 
-  nb::class_<PyLoadedExecutable>(m, "LoadedExecutable")
-      .def_prop_ro("client", &PyLoadedExecutable::client)
-      .def("local_devices", &PyLoadedExecutable::AddressableDevices)
-      .def("size_of_generated_code_in_bytes",
-           &PyLoadedExecutable::SizeOfGeneratedCodeInBytes)
-      .def(
-          "get_compiled_memory_stats",
-          xla::ValueOrThrowWrapper(&PyLoadedExecutable::GetCompiledMemoryStats))
-      .def("execute_sharded",
-           xla::ValueOrThrowWrapper(&PyLoadedExecutable::ExecuteSharded),
-           nb::arg("arguments"), nb::arg("with_tokens") = false)
-      .def("hlo_modules",
-           xla::ValueOrThrowWrapper(&PyLoadedExecutable::HloModules))
-      .def("get_output_memory_kinds",
-           xla::ValueOrThrowWrapper(&PyLoadedExecutable::GetOutputMemoryKinds))
-      .def("get_output_shardings", &PyLoadedExecutable::GetOutputShardings)
-      .def("get_parameter_layouts",
-           xla::ValueOrThrowWrapper(&PyLoadedExecutable::GetParameterLayouts))
-      .def("get_output_layouts",
-           xla::ValueOrThrowWrapper(&PyLoadedExecutable::GetOutputLayouts))
-      .def("get_parameter_shardings",
-           &PyLoadedExecutable::GetParameterShardings)
-      .def("keep_alive", &PyLoadedExecutable::KeepAlive)
-      .def("cost_analysis",
-           [](const PyLoadedExecutable& self) {
-             auto map = xla::ValueOrThrow(self.GetCostAnalysis());
-             return xla::ifrt::ToPjRtAttributeMap(std::move(map));
-           })
-      .def_prop_ro("traceback", &PyLoadedExecutable::traceback)
-      .def_prop_ro("fingerprint", [](PyLoadedExecutable* exec) -> nb::object {
-        if (exec->fingerprint().has_value()) {
-          return nb::bytes(exec->fingerprint()->data(),
-                           exec->fingerprint()->size());
-        } else {
-          return nb::none();
-        }
-      });
-  nb::class_<PyToken> token(m, "Token");
-  token.def("block_until_ready",
-            [](PyToken& self) { xla::ThrowIfError(self.Await()); });
-
-  nb::class_<PyShardedToken> sharded_token(m, "ShardedToken");
-  sharded_token.def("block_until_ready", [](PyShardedToken& self) {
-    xla::ThrowIfError(self.Await());
-  });
-  sharded_token.def("get_token", &PyShardedToken::GetPyToken);
+  PyLoadedExecutable::Register(m);
+  PyExecuteResults::Register(m);
+  PyToken::Register(m);
+  PyShardedToken::Register(m);
+  PyExecutable::Register(m);
 
   m.def("buffer_to_dlpack_managed_tensor",
         xla::ValueOrThrowWrapper(BufferToDLPackManagedTensor),
@@ -582,24 +545,37 @@ NB_MODULE(_jax, m) {
   m.def(
       "dlpack_managed_tensor_to_buffer",
       [](const nb::capsule& tensor, nb_class_ptr<PyDevice> device,
-         std::optional<std::intptr_t> stream) {
+         std::optional<std::intptr_t> stream, std::optional<bool> copy) {
         return xla::ValueOrThrow(DLPackManagedTensorToBuffer(
-            tensor, device->device(), device->client(), stream));
+            tensor, device->device(), device->client(), stream, copy));
       },
       nb::arg("dlpack"), nb::arg("device"), nb::arg("stream").none(),
-    nb::sig(
-      // clang-format off
+      nb::arg("copy").none() = nb::none(),
+      nb::sig(
+          // clang-format off
       "def dlpack_managed_tensor_to_buffer("
       "dlpack: typing_extensions.CapsuleType, "
       "device: Device, "
-      "stream: int | None"
+      "stream: int | None, "
+      "copy: bool | None = ..."
       ") -> ArrayImpl"
-      // clang-format on
-    ));
+          // clang-format on
+          ));
   m.def("cuda_array_interface_to_buffer",
         xla::ValueOrThrowWrapper(CudaArrayInterfaceToBuffer), nb::arg("cai"),
         nb::arg("gpu_backend").none() = nb::none(),
         nb::arg("device_id").none() = nb::none());
+
+  nb::enum_<jax::RuntimeTracebackMode>(m, "RuntimeTracebackMode")
+      .value("OFF", jax::RuntimeTracebackMode::kOff)
+      .value("ON", jax::RuntimeTracebackMode::kOn)
+      .value("FULL", jax::RuntimeTracebackMode::kFull);
+  m.def("add_exclude_path", &jax::AddExcludePath,
+        "Adds a path to exclude from tracebacks.");
+  m.def("set_send_traceback_to_runtime_global",
+        &jax::SetSendTracebackToRuntimeGlobal);
+  m.def("set_send_traceback_to_runtime_thread_local",
+        &jax::SetSendTracebackToRuntimeThreadLocal, nb::arg("mode").none());
 
   BuildConfigSubmodule(m);
   BuildIfrtProgramsSubmodule(m);
@@ -608,36 +584,36 @@ NB_MODULE(_jax, m) {
   BuildJaxjitSubmodule(m);
   BuildPmapSubmodule(m);
   BuildPjitSubmodule(m);
-  Traceback::RegisterType(m);
+  Traceback::Register(m);
   BuildMlirSubmodule(m);
   BuildCustomCallShardingPybindAPI(m);
-  BuildFfiSubmodule(m);
+  RegisterFfiApis(m);
 #if defined(__linux__)
   aux::RegisterTransferServerTypes(m);
 #endif  // defined(__linux__)
 
-  nb::class_<tsl::PreemptionSyncManager> preemption_sync_manager(
+  nb::class_<xla::PreemptionSyncManager> preemption_sync_manager(
       m, "PreemptionSyncManager");
   preemption_sync_manager
       .def(
           "initialize",
-          [](tsl::PreemptionSyncManager& manager,
+          [](xla::PreemptionSyncManager& manager,
              xla::DistributedRuntimeClient* client) {
-            tsl::CoordinationServiceAgent* agent =
+            xla::CoordinationServiceAgent* agent =
                 xla::ValueOrThrow(client->GetCoordinationServiceAgent());
             xla::ThrowIfError(manager.Initialize(agent));
           },
           nb::arg("distributed_client"))
       .def("reached_sync_point",
-           [](tsl::PreemptionSyncManager& manager, int step_counter) {
+           [](xla::PreemptionSyncManager& manager, int step_counter) {
              return manager.ReachedSyncPoint(step_counter);
            })
-      .def("shutdown", [](tsl::PreemptionSyncManager& manager) {
+      .def("shutdown", [](xla::PreemptionSyncManager& manager) {
         nb::gil_scoped_release gil_release;
         manager.Shutdown();
       });
   m.def("create_preemption_sync_manager",
-        []() { return tsl::CreatePreemptionSyncManager(); });
+        []() { return xla::CreatePreemptionSyncManager(); });
 
   nb::class_<xla::DistributedRuntimeService> distributed_runtime_service(
       m, "DistributedRuntimeService");
@@ -727,7 +703,16 @@ NB_MODULE(_jax, m) {
           [](xla::DistributedRuntimeClient& client,
              std::vector<int32_t> process_ids) {
             nb::gil_scoped_release gil_release;
-            return xla::ValueOrThrow(client.GetLiveNodes(process_ids));
+            // Python doesn't understand the IncarnationId type, so we convert
+            // to regular integers before returning.
+            absl::flat_hash_map<int32_t, tsl::IncarnationId> nodes =
+                xla::ValueOrThrow(
+                    client.GetLiveNodesWithIncarnations(process_ids));
+            absl::flat_hash_map<int32_t, uint64_t> py_nodes;
+            for (const auto& [task_id, incarnation_id] : nodes) {
+              py_nodes[task_id] = incarnation_id.value();
+            }
+            return py_nodes;
           },
           nb::arg("process_ids"))
       // The key must be a string, but the value can either be a Python string
@@ -884,14 +869,14 @@ NB_MODULE(_jax, m) {
         "Decodes an uncompressed pprof Profile protocol buffer into a JSON "
         "representation");
 
-  RegisterCompileOnlyClient(m);
+  CompileOnlyPyClient::Register(m);
   nb::class_<xla::ifrt::Topology>(m, "DeviceTopology")
       .def("_make_compile_only_devices",
            [](std::shared_ptr<xla::ifrt::Topology> topology) {
              if (!llvm::isa<xla::ifrt::PjRtTopology>(*topology)) {
                throw xla::XlaRuntimeError("Only PjRtTopologies are supported.");
              }
-             return MakeCompileOnlyClient(
+             return CompileOnlyPyClient::Make(
                         std::dynamic_pointer_cast<xla::ifrt::PjRtTopology>(
                             topology))
                  ->Devices();
@@ -912,11 +897,12 @@ NB_MODULE(_jax, m) {
       .def("__getattr__",
            [](xla::ifrt::Topology& topology,
               std::string_view name) -> nb::object {
-             const auto& attrs = topology.Attributes().map();
-             auto it = attrs.find(name);
-             if (it != attrs.end()) {
+             auto value =
+                 topology.Attributes().Get<xla::ifrt::AttributeMap::Value>(
+                     std::string(name));
+             if (value.ok()) {
                return std::visit([](auto&& v) { return nb::cast(v.value); },
-                                 it->second);
+                                 *value);
              }
              throw nb::attribute_error(
                  absl::StrCat("Unknown attribute ", name).c_str());
@@ -924,29 +910,6 @@ NB_MODULE(_jax, m) {
 
   nb::class_<xla::ifrt::TransferServerInterfaceFactory>(
       m, "TransferServerInterfaceFactory");
-
-  nb::class_<PyExecutable>(m, "Executable")
-      .def("hlo_modules",
-           xla::ValueOrThrowWrapper(&PyExecutable::GetHloModules))
-      .def("get_output_memory_kinds",
-           xla::ValueOrThrowWrapper(&PyExecutable::GetOutputMemoryKinds))
-      .def("get_output_shardings", &PyExecutable::GetOutputShardings)
-      .def("get_parameter_layouts",
-           xla::ValueOrThrowWrapper(&PyExecutable::GetParameterLayouts))
-      .def("get_output_layouts",
-           xla::ValueOrThrowWrapper(&PyExecutable::GetOutputLayouts))
-      .def("get_parameter_shardings", &PyExecutable::GetParameterShardings)
-      .def("get_compiled_memory_stats",
-           xla::ValueOrThrowWrapper(&PyExecutable::GetCompiledMemoryStats))
-      .def("serialize",
-           [](const PyExecutable& exec) -> nb::bytes {
-             std::string serialized = xla::ValueOrThrow(exec.Serialize());
-             return nb::bytes(serialized.data(), serialized.size());
-           })
-      .def("cost_analysis", [](const PyExecutable& exec) {
-        auto attrs = xla::ValueOrThrow(exec.GetCostAnalysis());
-        return xla::ifrt::ToPjRtAttributeMap(std::move(attrs));
-      });
 
   m.def("is_asan", IsAsan);
   m.def("is_msan", IsMsan);

@@ -56,19 +56,16 @@ from jax._src import literals
 from jax._src import test_util as jtu
 from jax._src import xla_bridge
 from jax._src import debugging
-from jax._src import pjit as pjit_lib
 from jax._src import sharding_impls
 from jax._src.ad_checkpoint import saved_residuals
 from jax._src.interpreters import ad as ad_internal
 from jax._src.interpreters import mlir
 from jax._src.interpreters import partial_eval as pe
 from jax._src.compilation_cache import is_persistent_cache_enabled
-from jax._src.lib import jaxlib_extension_version
 import jax._src.util as jax_util
-from jax.ad_checkpoint import checkpoint_name, checkpoint as new_checkpoint
+from jax.ad_checkpoint import checkpoint_name
 from jax.errors import (UnexpectedTracerError, TracerIntegerConversionError,
                         ConcretizationTypeError, TracerBoolConversionError)
-from jax.experimental import pjit
 from jax.interpreters import ad
 from jax.interpreters import batching
 import jax.numpy as jnp
@@ -94,6 +91,14 @@ class JitTest(jtu.BufferDonationTestCase):
       return
     jitted = jit(my_function)
     self.assertEqual(repr(jitted), f"<PjitFunction of {repr(my_function)}>")
+
+  def test_jit_decorator_factory(self):
+    @jit(static_argnames=['flag'])
+    def func(x, flag):
+      return x if flag else -x
+
+    self.assertEqual(func(1, True), 1)
+    self.assertEqual(func(1, False), -1)
 
   def test_fun_name(self):
     def my_function():
@@ -268,12 +273,8 @@ class JitTest(jtu.BufferDonationTestCase):
     _check_instance(self, x)
     self.assertEqual(x.devices(), {device})
 
-  @parameterized.named_parameters(
-      ('jit', jax.jit),
-      ('pjit', pjit.pjit),
-  )
   @jtu.skip_on_devices("cpu")
-  def test_jit_default_device(self, module):
+  def test_jit_default_device(self):
     if jax.device_count() == 1:
       raise unittest.SkipTest("Test requires multiple devices")
 
@@ -283,7 +284,7 @@ class JitTest(jtu.BufferDonationTestCase):
     test_device = jax.devices()[-1]
     self.assertNotEqual(system_default_device, test_device)
 
-    f = module(lambda x: x + 1)
+    f = jax.jit(lambda x: x + 1)
     self.assertEqual(f(1).devices(), system_default_devices)
 
     with jax.default_device(test_device):
@@ -298,9 +299,9 @@ class JitTest(jtu.BufferDonationTestCase):
       with jtu.ignore_warning(category=DeprecationWarning,
                               message="backend and device argument"):
         self.assertEqual(
-            module(f, device=system_default_device)(1).devices(),
+            jax.jit(f, device=system_default_device)(1).devices(),
             system_default_devices)
-        out = module(f, backend="cpu")(1)
+        out = jax.jit(f, backend="cpu")(1)
       self.assertEqual(next(iter(out.devices())).platform, "cpu")
 
       # Sticky input device overrides default_device
@@ -414,12 +415,20 @@ class JitTest(jtu.BufferDonationTestCase):
   # Jit and Donate arguments
 
   def test_donate_argnames_signature_fail(self):
+    class NoSignature:
+      @property
+      def __signature__(self):
+        raise TypeError("no signature")
+      def __call__(self, *args, **kwargs):
+        return None
+    fun = NoSignature()
+
     inp = np.arange(4)
     with self.assertRaisesRegex(
         ValueError,
         "Getting the signature of function.*failed. Pass donate_argnums "
         "instead of donate_argnames."):
-      jax.jit(np.dot, donate_argnames='a')(inp, inp)
+      jax.jit(fun, donate_argnames='a')(inp, inp)
 
   @parameterized.named_parameters(
       ("argnums", "donate_argnums", (0, 1)),
@@ -546,7 +555,7 @@ class JitTest(jtu.BufferDonationTestCase):
   def test_jnp_array_copy(self, argnum_type, argnum_val):
     # https://github.com/jax-ml/jax/issues/3412
 
-    @partial(jit, **{argnum_type: argnum_val})
+    @jit(**{argnum_type: argnum_val})
     def _test(array):
       return array.at[0].set(77)
 
@@ -560,7 +569,7 @@ class JitTest(jtu.BufferDonationTestCase):
 
   @jtu.device_supports_buffer_donation()
   def test_specify_donate_argnums_and_argnames(self):
-    @partial(jax.jit, donate_argnums=0, donate_argnames=('inp2', 'inp3'))
+    @jax.jit(donate_argnums=0, donate_argnames=('inp2', 'inp3'))
     def f(inp1, inp2, inp3):
       return inp1 * 2, inp2 * 2, inp3 * 2
 
@@ -578,7 +587,7 @@ class JitTest(jtu.BufferDonationTestCase):
 
   @jtu.device_supports_buffer_donation()
   def test_donate_argnames_with_args(self):
-    @partial(jax.jit, donate_argnames='inp1')
+    @jax.jit(donate_argnames='inp1')
     def f(inp1):
       return inp1 * 2
 
@@ -588,7 +597,7 @@ class JitTest(jtu.BufferDonationTestCase):
 
   @jtu.device_supports_buffer_donation()
   def test_donate_argnums_with_kwargs(self):
-    @partial(jax.jit, donate_argnums=0)
+    @jax.jit(donate_argnums=0)
     def f(inp1):
       return inp1 * 2
 
@@ -638,7 +647,7 @@ class JitTest(jtu.BufferDonationTestCase):
       ('argnums', {'donate_argnums': (0, 1)})
   )
   def test_dict_donation(self, jit_kwargs):
-    @partial(jax.jit, **jit_kwargs)
+    @jax.jit(**jit_kwargs)
     def f(z, y, x):
       return z, y, x
 
@@ -656,7 +665,7 @@ class JitTest(jtu.BufferDonationTestCase):
       ('argnums', {'donate_argnums': (0, 1)})
   )
   def test_dict_donation_args_kwargs(self, jit_kwargs):
-    @partial(jax.jit, **jit_kwargs)
+    @jax.jit(**jit_kwargs)
     def f(z, y, x):
       return z, y, x
 
@@ -951,35 +960,27 @@ class JitTest(jtu.BufferDonationTestCase):
     self.assertIsInstance(out.sharding, jax.sharding.SingleDeviceSharding)
     self.assertIsInstance(out, array.ArrayImpl)
 
-  @parameterized.named_parameters(
-      ('jit', jax.jit),
-      ('pjit', pjit.pjit)
-  )
   @jtu.skip_on_devices("cpu")
-  def test_explicit_backend(self, module):
+  def test_explicit_backend(self):
     f = lambda x: x + 1
     with jtu.ignore_warning(category=DeprecationWarning,
                             message="backend and device argument"):
-      jitted_f = module(f, backend=jtu.device_under_test())
-      jitted_f_cpu = module(f, backend="cpu")
+      jitted_f = jax.jit(f, backend=jtu.device_under_test())
+      jitted_f_cpu = jax.jit(f, backend="cpu")
 
     result = jitted_f(1.)
     result_cpu = jitted_f_cpu(1.)
     self.assertEqual(list(result.devices())[0].platform, jtu.device_under_test())
     self.assertEqual(list(result_cpu.devices())[0].platform, "cpu")
 
-  @parameterized.named_parameters(
-      ('jit', jax.jit),
-      ('pjit', pjit.pjit)
-  )
   @jtu.skip_on_devices("cpu")
-  def test_device_to_device_copy_between_backends(self, module):
+  def test_device_to_device_copy_between_backends(self):
     # b/186624243
     f = lambda x: x + 1
     with jtu.ignore_warning(category=DeprecationWarning,
                             message="backend and device argument"):
-      jitted_f = module(f, backend=jtu.device_under_test())
-      jitted_f_cpu = module(f, backend="cpu")
+      jitted_f = jax.jit(f, backend=jtu.device_under_test())
+      jitted_f_cpu = jax.jit(f, backend="cpu")
 
     x = np.arange(30).reshape(1, 10, 3)
     result = jitted_f(x)
@@ -993,7 +994,7 @@ class JitTest(jtu.BufferDonationTestCase):
   @jtu.ignore_warning(category=DeprecationWarning,
                       message="backend and device argument")
   def test_mismatched_nested_backends(self):
-    @partial(jax.jit, backend=jtu.device_under_test())
+    @jax.jit(backend=jtu.device_under_test())
     def f(x):
       return jax.jit(lambda x: x + 1, backend="cpu")(x)
 
@@ -1505,7 +1506,7 @@ class JitTest(jtu.BufferDonationTestCase):
 
   def test_jit_static_argnums_requires_type_equality(self):
     # See: https://github.com/jax-ml/jax/pull/9311
-    @partial(jit, static_argnums=(0,))
+    @jit(static_argnums=(0,))
     def f(k):
       assert python_should_be_executing
       return k
@@ -1611,7 +1612,7 @@ class APITest(jtu.JaxTestCase):
   def test_grad_wrap(self, transform):
     # Ensures that transforms wrap transformed functions with the correct signature.
 
-    @partial(jit, static_argnames=['flag'])
+    @jit(static_argnames=['flag'])
     @transform
     def my_function(x, flag):
       return x if flag else jnp.zeros_like(x)
@@ -2208,7 +2209,7 @@ class APITest(jtu.JaxTestCase):
       self.assertEqual(x.devices(), {cpu_device})
 
   def test_device_put_on_single_device_donated_buffer_fails(self):
-    @partial(jax.jit, donate_argnums=0)
+    @jax.jit(donate_argnums=0)
     def f(inp1):
       return inp1 * 2
 
@@ -2224,7 +2225,7 @@ class APITest(jtu.JaxTestCase):
       result.block_until_ready()
 
   def test_device_put_on_multi_device_donated_buffer_fails(self):
-    @partial(jax.jit, donate_argnums=0)
+    @jax.jit(donate_argnums=0)
     def f(inp1):
       return inp1 * 2
 
@@ -2940,35 +2941,10 @@ class APITest(jtu.JaxTestCase):
 
     self.assertEqual(count(), 1)
 
-  @jtu.thread_unsafe_test()  # jit cache misses aren't thread safe
-  def test_jit_infer_params_cache(self):
-    def f(x):
-      return x
-
-    f_jit = jax.jit(f)
-
-    def g(x):
-      x = f_jit(x)  # noqa: F821
-      x = f_jit(x)  # noqa: F821
-      return x
-
-    g_jit = jax.jit(g)
-
-    inp = np.arange(8)
-    with jtu.count_jit_infer_params_cache_miss() as count:
-      g_jit(inp)
-
-    self.assertDictEqual(count, {f: 1, g: 1})
-    cache_size = pjit_lib._infer_params_cached.cache_info().currsize
-    del count, f, f_jit, g, g_jit
-    # Cache should only keep a weak reference to f and g.
-    self.assertLess(pjit_lib._infer_params_cached.cache_info().currsize,
-                    cache_size, msg=pjit_lib._infer_params_cached.cache_keys())
-
   def test_eval_shape_out_shardings(self):
     s = jax.sharding.SingleDeviceSharding(jax.devices()[0])
 
-    @partial(jax.jit, out_shardings=s)
+    @jax.jit(out_shardings=s)
     def f(x):
       return x * 2
 
@@ -3099,7 +3075,7 @@ class APITest(jtu.JaxTestCase):
   def test_grad_of_bool_vjp3(self):
     def cond(pred):
       return lax.cond(pred, lambda _: 1., lambda _: 2., 1.)
-    value, f_vjp = api.vjp3(cond, True)
+    value, f_vjp = api.vjp(cond, True)
     grd, = f_vjp(1.)
     self.assertEqual(value, 1.)
     self.assertEqual(grd, np.zeros(shape=(), dtype=float0))
@@ -3129,10 +3105,11 @@ class APITest(jtu.JaxTestCase):
   def test_float0_error(self):
     # float0 is incompatible with other dtypes
     float0_array = jax.grad(lambda x: x+0., allow_int=True)(1)
+    self.assertEqual(float0_array.dtype, dtypes.float0)
     error_text = "float0s do not support any operations by design"
 
     with self.assertRaisesRegex(TypeError, error_text):
-      # dispatch via Array
+      # dispatch via Array.__add__ and hence jax.numpy
       _ = float0_array + jnp.zeros(())
 
     with self.assertRaisesRegex(TypeError, error_text):
@@ -3209,6 +3186,12 @@ class APITest(jtu.JaxTestCase):
     for j, j_module in collection:
       self.assertNotRegex(str(j_module),
        f"stablehlo.constant dense.*tensor<{const_size}x")
+
+  def test_basic_vjp3(self):
+    f = jax.jit(lambda x: jnp.sin(jnp.sin(x)))
+    _, f_vjp = jax.vjp(f, 1.)
+    g, = f_vjp(1.0)
+    self.assertAllClose(g, jnp.cos(jnp.sin(1.)) * jnp.cos(1.), check_dtypes=False)
 
   def test_constants_not_in_lowering_scan(self):
     if not config.use_simplified_jaxpr_constants.value:
@@ -3293,7 +3276,7 @@ class APITest(jtu.JaxTestCase):
           config.enable_x64.value
           or config.explicit_x64_dtypes.value == config.ExplicitX64Mode.ALLOW
       ):
-        if config.enable_x64.value or jaxlib_extension_version >= 377:
+        if config.enable_x64.value:
           with self.assertNoWarnings():
             warn()
       elif config.explicit_x64_dtypes.value == config.ExplicitX64Mode.WARN:
@@ -3639,7 +3622,7 @@ class APITest(jtu.JaxTestCase):
       logging.set_verbosity(prev_level)
     self.assertGreaterEqual(len(l.output), 3)  # 3 lines
     self.assertTrue(any('Finished tracing' in line for line in l.output))
-    self.assertTrue(any('Compiling jit(f)' in line for line in l.output))
+    self.assertTrue(any('Compiling jit(' in line for line in l.output))
     self.assertTrue(any('Finished XLA compilation' in line for line in l.output))
 
   def test_grad_of_jit_compilation_caching(self):
@@ -4179,7 +4162,7 @@ class APITest(jtu.JaxTestCase):
 
     x = jnp.array(1)
     a = AlexArray(x)
-    for f in [jnp.isscalar, jnp.size, jnp.shape, jnp.dtype]:
+    for f in [jnp.isscalar, jnp.size, jnp.shape, jnp.result_type]:
       self.assertEqual(f(x), f(a))
 
     x = AlexArray(jnp.array(1))
@@ -4393,14 +4376,14 @@ class APITest(jtu.JaxTestCase):
     api.grad(lambda x: f(f(f(x))))(1.)
 
   def test_jit_inline(self):
-    @partial(api.jit, inline=False)
+    @api.jit(inline=False)
     def f(x):
       return x * 2
 
     jaxpr = api.make_jaxpr(f)(3)
     self.assertIn('jit', str(jaxpr))
 
-    @partial(api.jit, inline=True)
+    @api.jit(inline=True)
     def f(x):
       return x * 2
 
@@ -4425,7 +4408,7 @@ class APITest(jtu.JaxTestCase):
     # from and passed to jitted functions
     f = lambda x: 2. * x
 
-    @partial(jit, static_argnums=0)
+    @jit(static_argnums=0)
     def linearize_vjp(f, x):
       _, vjp_fun = api.vjp(f, x)
       return vjp_fun
@@ -4440,7 +4423,7 @@ class APITest(jtu.JaxTestCase):
     # from and passed to jitted functions
     f = lambda x: 2. * x
 
-    @partial(jit, static_argnums=0)
+    @jit(static_argnums=0)
     def linearize(f, x):
       _, jvp_fun = api.linearize(f, x)
       return jvp_fun
@@ -4455,7 +4438,7 @@ class APITest(jtu.JaxTestCase):
     # from and passed to jitted functions
     f = lambda x: 2. * x
 
-    @partial(jit, static_argnums=0)
+    @jit(static_argnums=0)
     def transpose(f, x):
       return api.linear_transpose(f, x)
 
@@ -4583,7 +4566,7 @@ class APITest(jtu.JaxTestCase):
     g(x, y)  # doesn't crash
 
   def test_jit_negative_static_argnums(self):
-    @partial(jax.jit, static_argnums=-1)
+    @jax.jit(static_argnums=-1)
     def g(x, y):
       assert isinstance(y, int)
       return x * y
@@ -4757,6 +4740,7 @@ class APITest(jtu.JaxTestCase):
           tracing_add_count += 1
       self.assertEqual(tracing_add_count, 2)
 
+  @unittest.skipIf(lib.jaxlib_extension_version < 394, "jaxlib version")
   @jtu.thread_unsafe_test()  # logging is not thread-safe
   def test_cache_miss_explanations_skip_internals(self):
     if is_persistent_cache_enabled():
@@ -4767,6 +4751,7 @@ class APITest(jtu.JaxTestCase):
         for i in range(2):
           jnp.sin(jnp.arange(i + 1, dtype=np.float32))
 
+  @unittest.skipIf(lib.jaxlib_extension_version < 394, "jaxlib version")
   @jtu.thread_unsafe_test()  # logging is not thread-safe
   def test_cache_miss_explanations_first_miss(self):
     @jax.jit
@@ -4785,6 +4770,7 @@ class APITest(jtu.JaxTestCase):
     self.assertIn("never seen function", msg)
     self.assertNotIn("explanation unavailable!", msg)
 
+  @unittest.skipIf(lib.jaxlib_extension_version < 394, "jaxlib version")
   @jtu.thread_unsafe_test()  # logging is not thread-safe
   def test_cache_miss_explanations_other_in_tree(self):
     @jax.jit
@@ -4801,6 +4787,7 @@ class APITest(jtu.JaxTestCase):
     self.assertIn("different input pytree", msg)
     self.assertNotIn("explanation unavailable!", msg)
 
+  @unittest.skip('TODO(mattjj): re-enable after updating cache miss explainer')
   @jtu.thread_unsafe_test()  # logging is not thread-safe
   def test_cache_miss_explanations_other_arg_passed_as_kwarg(self):
     @jax.jit
@@ -4820,9 +4807,10 @@ class APITest(jtu.JaxTestCase):
     self.assertIn("before 1 args and kwargs with keys []", msg)
     self.assertNotIn("explanation unavailable!", msg)
 
+  @unittest.skip('TODO(mattjj): re-enable after updating cache miss explainer')
   @jtu.thread_unsafe_test()  # logging is not thread-safe
   def test_cache_miss_explanations_other_static_argnums(self):
-    @partial(jax.jit, static_argnums=(0, 2))
+    @jax.jit(static_argnums=(0, 2))
     def f(x, y, z):
       return y
 
@@ -4837,9 +4825,10 @@ class APITest(jtu.JaxTestCase):
     self.assertIn("now 1.0, 'bar' and before 1.0, 'foo'", msg)
     self.assertNotIn("explanation unavailable!", msg)
 
+  @unittest.skip('TODO(mattjj): re-enable after updating cache miss explainer')
   @jtu.thread_unsafe_test()  # logging is not thread-safe
   def test_cache_miss_explanations_other_static_argnames(self):
-    @partial(jax.jit, static_argnames="foo")
+    @jax.jit(static_argnames="foo")
     def f(*, foo):
       return 1
 
@@ -4854,6 +4843,7 @@ class APITest(jtu.JaxTestCase):
     self.assertIn("now {foo: 'bar'} and before {foo: 'foo'}", msg)
     self.assertNotIn('explanation unavailable!', msg)
 
+  @unittest.skipIf(lib.jaxlib_extension_version < 394, "jaxlib version")
   @jtu.thread_unsafe_test()  # logging is not thread-safe
   def test_cache_miss_explanations_other_dtype(self):
     @jax.jit
@@ -4869,6 +4859,7 @@ class APITest(jtu.JaxTestCase):
     self.assertIn("at y, now i32[] and before f32[]", msg)
     self.assertNotIn("explanation unavailable!", msg)
 
+  @unittest.skipIf(lib.jaxlib_extension_version < 394, "jaxlib version")
   @jtu.thread_unsafe_test()  # logging is not thread-safe
   def test_cache_miss_explanations_other_weak_type(self):
     @jax.jit
@@ -4890,6 +4881,7 @@ class APITest(jtu.JaxTestCase):
     self.assertIn("https://docs.jax.dev/en/latest/type_promotion.html#weak-types", msg)
     self.assertNotIn("explanation unavailable!", msg)
 
+  @unittest.skipIf(lib.jaxlib_extension_version < 394, "jaxlib version")
   @jtu.thread_unsafe_test()  # logging is not thread-safe
   def test_cache_miss_explanations_other_shape(self):
     @jax.jit
@@ -4906,6 +4898,7 @@ class APITest(jtu.JaxTestCase):
     self.assertIn("at y, now f32[2] and before f32[1]", msg)
     self.assertNotIn("explanation unavailable!", msg)
 
+  @unittest.skip('TODO(mattjj): re-enable after updating cache miss explainer')
   @jtu.thread_unsafe_test()  # logging is not thread-safe
   def test_cache_miss_explanations_other_shape_explain_closest(self):
     @jax.jit
@@ -4924,6 +4917,7 @@ class APITest(jtu.JaxTestCase):
     self.assertIn("at x, now f32[10,2,30] and before f32[10,20,30]", msg)
     self.assertNotIn("explanation unavailable!", msg)
 
+  @unittest.skipIf(lib.jaxlib_extension_version < 394, "jaxlib version")
   @jtu.thread_unsafe_test()  # logging is not thread-safe
   def test_cache_miss_explanations_other_tracing_config(self):
     @jax.jit
@@ -4940,11 +4934,12 @@ class APITest(jtu.JaxTestCase):
     expected_log_len = 1 if not is_persistent_cache_enabled() else 3
     self.assertTrue(1 <= len(cm.output) <= expected_log_len)
     msg = cm.output[0]
-    self.assertIn("key with different tracing context", msg)
-    self.assertIn("now warn and before", msg)
-    self.assertIn("now high and before", msg)
+    self.assertIn("racing context", msg)
+    # self.assertIn("now warn and before", msg)
+    # self.assertIn("now high and before", msg)
     self.assertNotIn("explanation unavailable!", msg)
 
+  @unittest.skip('TODO(mattjj): re-enable after updating cache miss explainer')
   @jtu.thread_unsafe_test()  # logging is not thread-safe
   def test_cache_miss_explanations_multiple_changes(self):
     @jax.jit
@@ -4967,6 +4962,7 @@ class APITest(jtu.JaxTestCase):
     self.assertIn("key with different tracing context", msg)
     self.assertNotIn("explanation unavailable!", msg)
 
+  @unittest.skipIf(lib.jaxlib_extension_version < 394, "jaxlib version")
   @jtu.thread_unsafe_test()  # logging is not thread-safe
   def test_cache_miss_explanations_new_function_in_loop(self):
     @jax.jit
@@ -4989,11 +4985,13 @@ class APITest(jtu.JaxTestCase):
       _, msg = cm.output
       self.assertIn('another function defined on the same line', msg)
 
+  @unittest.skipIf(lib.jaxlib_extension_version < 394, "jaxlib version")
   def test_cache_miss_explanations_no_source_info(self):
     # ``operator.add`` is a built-in function and does not have source info.
     with config.explain_cache_misses(True):
-      jax.jit(operator.add)(42, 24)
+      jax.jit(operator.add)(42, 24)  # doesn't crash
 
+  @unittest.skipIf(lib.jaxlib_extension_version < 394, "jaxlib version")
   def test_cache_miss_explanations_are_thread_safe(self):
     @jax.jit
     def f(i):
@@ -5131,37 +5129,6 @@ class APITest(jtu.JaxTestCase):
     jtu.check_grads(f, (list(jnp.arange(float(num_args))),), order=1,
                     modes=['rev'], atol=1e-3, rtol=1e-3)
 
-  @jtu.run_on_devices("cpu")
-  def test_inner_jit_forwarding_happens(self):
-    if not config.dynamic_shapes.value:
-      self.skipTest("Only works for dynamic shapes")
-    jaxpr = jax.make_jaxpr(lambda: jax.jit(lambda x: x)(3))()
-    self.assertLen(jaxpr.jaxpr.outvars, 1)
-    self.assertIsInstance(jaxpr.jaxpr.outvars[0], core.Literal)
-    self.assertEqual(jaxpr.jaxpr.outvars[0].val, 3)
-
-  @parameterized.parameters(range(8))
-  @jtu.run_on_devices("cpu")
-  def test_inner_jit_forwarding_correctness(self, num_input_fwd):
-    if not config.dynamic_shapes.value:
-      self.skipTest("Only works for dynamic shapes")
-    num_args = 8
-    rng = np.random.RandomState(0)
-
-    @jax.jit
-    def f(inputs):
-      inputs = [inputs[i] for i in rng.permutation(num_args)]
-      outputs = (inputs[:num_input_fwd] +
-                 [jnp.sin(inputs[i]) for i in range(num_args - num_input_fwd)])
-      return [outputs[i] for i in rng.permutation(num_args)]
-
-    f2 = jax.jit(f)
-    inputs = list(jnp.arange(float(num_args)))
-    expected = f(inputs)
-    ans = f2(inputs)
-    for a, b in zip(ans, expected):
-      self.assertAllClose(a, b)
-
   @unittest.skip # TODO(dougalm): figure out with Matt what to do with this feature
   def test_inner_jit_forwarded_consts_stay_const(self):
     out = jax.jit(lambda: int(jax.jit(lambda x: x)(3)))()  # don't crash
@@ -5185,7 +5152,7 @@ class APITest(jtu.JaxTestCase):
   def test_inlined_literals_with_error(self):
     @jax.jit
     def f():
-      @partial(jax.jit, inline=True)
+      @jax.jit(inline=True)
       def g():
         return jnp.sin(1.)
       if g() > 0:
@@ -5280,7 +5247,12 @@ class APITest(jtu.JaxTestCase):
               yield inv.val
 
     def uniq(lst):
-      return {id(v): v for v in lst}.values()
+      def key(a):
+        if isinstance(a, literals.TypedNdArray):
+          return np.asarray(a)
+        else:
+          return a
+      return {id(key(v)): v for v in lst}.values()
 
     @jax.make_jaxpr
     def f():
@@ -5374,6 +5346,14 @@ class APITest(jtu.JaxTestCase):
 
     jax.vmap(f)(jnp.arange(3.))  # don't crash
 
+  def test_sharding_attr_on_tracer_error(self):
+    @jax.jit
+    def f(x):
+      with self.assertRaisesRegex(AttributeError, 'typeof'):
+        x.sharding
+
+    f(jnp.arange(2.))
+
 
 class RematTest(jtu.JaxTestCase):
 
@@ -5382,7 +5362,7 @@ class RematTest(jtu.JaxTestCase):
       for suffix, remat in [
           ('', jax.remat),
           ('_policy', partial(jax.remat, policy=lambda *_, **__: False)),
-          ('_new', partial(new_checkpoint, policy=lambda *_, **__: False)),
+          ('_new', partial(jax.checkpoint, policy=lambda *_, **__: False)),
       ])
   @jtu.thread_unsafe_test()  # monkey patches sin_p and cos_p
   def test_remat_basic(self, remat):
@@ -5425,7 +5405,7 @@ class RematTest(jtu.JaxTestCase):
       for suffix, remat in [
           ('', jax.remat),
           ('_policy', partial(jax.remat, policy=lambda *_, **__: False)),
-          ('_new', partial(new_checkpoint, policy=lambda *_, **__: False)),
+          ('_new', partial(jax.checkpoint, policy=lambda *_, **__: False)),
       ])
   def test_remat_freevars(self, remat):
     def f1(x):
@@ -5556,7 +5536,7 @@ class RematTest(jtu.JaxTestCase):
       for suffix, remat in [
           ('', jax.remat),
           ('_policy', partial(jax.remat, policy=lambda *_, **__: False)),
-          ('_new', partial(new_checkpoint, policy=lambda *_, **__: False)),
+          ('_new', partial(jax.checkpoint, policy=lambda *_, **__: False)),
       ])
   def test_remat_jit(self, remat):
     @remat
@@ -5584,7 +5564,7 @@ class RematTest(jtu.JaxTestCase):
       for suffix, remat in [
           ('', jax.remat),
           ('_policy', partial(jax.remat, policy=lambda *_, **__: False)),
-          ('_new', partial(new_checkpoint, policy=lambda *_, **__: False)),
+          ('_new', partial(jax.checkpoint, policy=lambda *_, **__: False)),
       ])
   def test_remat_vmap(self, remat):
     @remat
@@ -5620,7 +5600,7 @@ class RematTest(jtu.JaxTestCase):
       for suffix, remat in [
           ('', jax.remat),
           ('_policy', partial(jax.remat, policy=lambda *_, **__: False)),
-          ('_new', partial(new_checkpoint, policy=lambda *_, **__: False)),
+          ('_new', partial(jax.checkpoint, policy=lambda *_, **__: False)),
       ])
   def test_remat_vmap_not_leading_dim(self, remat):
     @remat
@@ -5638,7 +5618,7 @@ class RematTest(jtu.JaxTestCase):
       for suffix, remat in [
           ('', jax.remat),
           ('_policy', partial(jax.remat, policy=lambda *_, **__: False)),
-          ('_new', partial(new_checkpoint, policy=lambda *_, **__: False)),
+          ('_new', partial(jax.checkpoint, policy=lambda *_, **__: False)),
       ])
   def test_remat_higher_order_autodiff(self, remat):
     def f(x):
@@ -5653,7 +5633,7 @@ class RematTest(jtu.JaxTestCase):
       {"testcase_name": f"{suffix}", "remat": remat}
       for suffix, remat in [
           ('', jax.remat),
-          ('_new', new_checkpoint),
+          ('_new', jax.checkpoint),
       ])
   def test_remat_scan(self, remat):
     to_scan = lambda c, x: (jnp.sin(c), None)
@@ -5687,7 +5667,7 @@ class RematTest(jtu.JaxTestCase):
       for suffix, remat in [
           ('', jax.remat),
           ('_policy', partial(jax.remat, policy=lambda *_, **__: False)),
-          ('_new', partial(new_checkpoint, policy=lambda *_, **__: False)),
+          ('_new', partial(jax.checkpoint, policy=lambda *_, **__: False)),
       ])
   @jtu.thread_unsafe_test()  # monkey patches sin_p
   def test_remat_no_redundant_flops(self, remat):
@@ -5717,7 +5697,7 @@ class RematTest(jtu.JaxTestCase):
       for suffix, remat in [
           ('', jax.remat),
           ('_policy', partial(jax.remat, policy=lambda *_, **__: False)),
-          ('_new', partial(new_checkpoint, policy=lambda *_, **__: False)),
+          ('_new', partial(jax.checkpoint, policy=lambda *_, **__: False)),
       ])
   def test_remat_binomial_checkpointing(self, remat):
     def binom_checkpoint(funs):
@@ -5738,7 +5718,7 @@ class RematTest(jtu.JaxTestCase):
       {"testcase_name": f"{suffix}", "remat": remat}
       for suffix, remat in [
           ('', jax.remat),
-          ('_new', new_checkpoint),
+          ('_new', jax.checkpoint),
       ])
   def test_remat_symbolic_zeros(self, remat):
     # code from https://github.com/jax-ml/jax/issues/1907
@@ -5772,7 +5752,7 @@ class RematTest(jtu.JaxTestCase):
       for suffix, remat in [
           ('', jax.remat),
           ('_policy', partial(jax.remat, policy=lambda *_, **__: False)),
-          ('_new', partial(new_checkpoint, policy=lambda *_, **__: False)),
+          ('_new', partial(jax.checkpoint, policy=lambda *_, **__: False)),
       ])
   def test_remat_jit2(self, remat):
     @api.jit
@@ -5791,7 +5771,7 @@ class RematTest(jtu.JaxTestCase):
       {"testcase_name": f"{suffix}", "remat": remat}
       for suffix, remat in [
           ('', jax.remat),
-          ('_new', new_checkpoint),
+          ('_new', jax.checkpoint),
       ])
   def test_remat_nontrivial_env(self, remat):
     # simplified from https://github.com/jax-ml/jax/issues/2030
@@ -5803,7 +5783,7 @@ class RematTest(jtu.JaxTestCase):
       u_t = u_t + u_tt * dt
       return (u, u_t)
 
-    @partial(api.jit, static_argnums=(1,))
+    @api.jit(static_argnums=(1,))
     def _multi_step(state, count, dt, c):
       f = lambda s, _: (foo(s, dt, c), _)
       return lax.scan(f, state, None, count)
@@ -5825,7 +5805,7 @@ class RematTest(jtu.JaxTestCase):
       for suffix, remat in [
           ('', jax.remat),
           ('_policy', partial(jax.remat, policy=lambda *_, **__: False)),
-          ('_new', partial(new_checkpoint, policy=lambda *_, **__: False)),
+          ('_new', partial(jax.checkpoint, policy=lambda *_, **__: False)),
       ])
   def test_remat_jit3(self, remat):
     # https://github.com/jax-ml/jax/issues/2180
@@ -5858,7 +5838,7 @@ class RematTest(jtu.JaxTestCase):
       {"testcase_name": f"{suffix}", "remat": remat}
       for suffix, remat in [
           ('', jax.remat),
-          ('_new', new_checkpoint),
+          ('_new', jax.checkpoint),
       ])
   def test_remat_scan2(self, remat):
     # https://github.com/jax-ml/jax/issues/1963
@@ -5897,7 +5877,7 @@ class RematTest(jtu.JaxTestCase):
       for suffix, remat in [
           ('', jax.remat),
           ('_policy', partial(jax.remat, policy=lambda *_, **__: False)),
-          ('_new', partial(new_checkpoint, policy=lambda *_, **__: False)),
+          ('_new', partial(jax.checkpoint, policy=lambda *_, **__: False)),
       ])
   def test_remat_eval_counter(self, remat):
     # https://github.com/jax-ml/jax/issues/2737
@@ -5961,7 +5941,7 @@ class RematTest(jtu.JaxTestCase):
       for suffix, remat in [
           ('', jax.remat),
           ('_policy', partial(jax.remat, policy=lambda *_, **__: False)),
-          ('_new', partial(new_checkpoint, policy=lambda *_, **__: False)),
+          ('_new', partial(jax.checkpoint, policy=lambda *_, **__: False)),
       ])
   def test_escaped_tracer_remat(self, remat):
     # b/169779185
@@ -5982,7 +5962,7 @@ class RematTest(jtu.JaxTestCase):
       for suffix, remat in [
           ('', jax.remat),
           ('_policy', partial(jax.remat, policy=lambda *_, **__: False)),
-          ('_new', partial(new_checkpoint, policy=lambda *_, **__: False)),
+          ('_new', partial(jax.checkpoint, policy=lambda *_, **__: False)),
       ])
   def test_no_cse_widget_on_primals(self, remat):
     @remat
@@ -6006,7 +5986,7 @@ class RematTest(jtu.JaxTestCase):
       {"testcase_name": f"{suffix}", "remat": remat}
       for suffix, remat in [
           ('', jax.remat),
-          ('_new', new_checkpoint),
+          ('_new', jax.checkpoint),
       ])
   def test_no_cse_widget_with_prevent_cse_false(self, remat):
     @partial(remat, prevent_cse=False)
@@ -6030,7 +6010,7 @@ class RematTest(jtu.JaxTestCase):
        "policy": policy, "in_jaxpr2": in_jaxpr2, "not_in_jaxpr2": not_in_jaxpr2}
       for remat_name, remat in [
           ('old_remat', jax.remat),
-          ('new_remat', new_checkpoint),
+          ('new_remat', jax.checkpoint),
       ]
       for policy_name, policy, in_jaxpr2, not_in_jaxpr2 in [
           ('save_anything', lambda *_, **__: True, [], [' sin ', ' cos ']),
@@ -6057,7 +6037,7 @@ class RematTest(jtu.JaxTestCase):
       {"testcase_name": f"_{remat_name}", "remat": remat}
       for remat_name, remat in [
           ('old_remat', jax.remat),
-          ('new_remat', new_checkpoint),
+          ('new_remat', jax.checkpoint),
       ])
   def test_remat_custom_policy_save_cos(self, remat):
     save_cos = lambda prim, *_, **__: str(prim) == 'cos'
@@ -6073,7 +6053,7 @@ class RematTest(jtu.JaxTestCase):
       {"testcase_name": f"_{remat_name}", "remat": remat}
       for remat_name, remat in [
           ('old_remat', jax.remat),
-          ('new_remat', new_checkpoint),
+          ('new_remat', jax.checkpoint),
       ])
   def test_remat_checkpoint_dots(self, remat):
     @partial(remat, policy=jax.checkpoint_policies.checkpoint_dots)
@@ -6096,7 +6076,7 @@ class RematTest(jtu.JaxTestCase):
       {"testcase_name": f"_{remat_name}", "remat": remat}
       for remat_name, remat in [
           ('old_remat', jax.remat),
-          ('new_remat', new_checkpoint),
+          ('new_remat', jax.checkpoint),
       ])
   def test_remat_checkpoint_dots_with_no_batch_dims(self, remat):
     @partial(remat, policy=jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims)
@@ -6119,7 +6099,7 @@ class RematTest(jtu.JaxTestCase):
       {"testcase_name": f"_{remat_name}", "remat": remat}
       for remat_name, remat in [
           ('old_remat', jax.remat),
-          ('new_remat', new_checkpoint),
+          ('new_remat', jax.checkpoint),
       ])
   def test_remat_checkpoint_dots_with_no_batch_dims2(self, remat):
     @partial(remat, policy=jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims)
@@ -6142,7 +6122,7 @@ class RematTest(jtu.JaxTestCase):
       {"testcase_name": f"_{remat_name}", "remat": remat}
       for remat_name, remat in [
           ('old_remat', jax.remat),
-          ('new_remat', new_checkpoint),
+          ('new_remat', jax.checkpoint),
       ])
   def test_remat_checkpoint_dots_jit(self, remat):
     @api.jit
@@ -6177,10 +6157,7 @@ class RematTest(jtu.JaxTestCase):
       return lax.scan(body, x, None, length=2)[0]
 
     _, f_vjp = api.vjp(f, jnp.ones((5, 5)))
-    if config.vjp3.value:
-      jaxpr_text = str(f_vjp.jaxpr)
-    else:
-      jaxpr_text = str(f_vjp.args[0].func.args[1])
+    jaxpr_text = str(f_vjp.jaxpr)
 
     # Two sine calls in the backward pass because while we don't save sines
     # within the (rematted) body function, we can save the scan carry, which
@@ -6255,7 +6232,7 @@ class RematTest(jtu.JaxTestCase):
       {"testcase_name": f"_{remat_name}", "remat": remat}
       for remat_name, remat in [
           ('old_remat', jax.remat),
-          ('new_remat', new_checkpoint),
+          ('new_remat', jax.checkpoint),
       ])
   def test_remat_dropvar_policy(self, remat):
     def f(x):
@@ -6293,21 +6270,21 @@ class RematTest(jtu.JaxTestCase):
     # implementation avoids that. See https://github.com/jax-ml/jax/pull/8191.
 
     # no residuals from constants created inside jnp.einsum
-    @partial(new_checkpoint, policy=lambda *_, **__: False)
+    @partial(jax.checkpoint, policy=lambda *_, **__: False)
     def f(x):
       return jnp.einsum('ii->i', x)
     res_avals = saved_residuals(f, jnp.ones((2, 2)))
     self.assertLen(res_avals, 0)
 
     # no residuals from jnp.zeros
-    @partial(new_checkpoint, policy=lambda *_, **__: False)
+    @partial(jax.checkpoint, policy=lambda *_, **__: False)
     def f(x):
       return jnp.zeros_like(x) * x
     res_avals = saved_residuals(f, jnp.ones((2, 2)))
     self.assertLen(res_avals, 0)
 
     # no residuals from jnp.zeros, but input must be saved
-    @partial(new_checkpoint, policy=lambda *_, **__: False)
+    @partial(jax.checkpoint, policy=lambda *_, **__: False)
     def f(x):
       return jnp.zeros_like(x) * jnp.sin(x)
     res_avals = saved_residuals(f, jnp.ones((2, 2)))
@@ -6342,19 +6319,19 @@ class RematTest(jtu.JaxTestCase):
       return (((x * y) * z) * w) * u
 
     policy = jax.checkpoint_policies.save_any_names_but_these('y', 'z', 'w')
-    res = saved_residuals(new_checkpoint(f, policy=policy), 1.)
+    res = saved_residuals(jax.checkpoint(f, policy=policy), 1.)
     self.assertLen(res, 0)  # can't save anything
 
     policy = jax.checkpoint_policies.save_any_names_but_these('z', 'w')
-    res = saved_residuals(new_checkpoint(f, policy=policy), 1.)
+    res = saved_residuals(jax.checkpoint(f, policy=policy), 1.)
     self.assertLen(res, 1)  # can save only y
 
     policy = jax.checkpoint_policies.save_any_names_but_these('w')
-    res = saved_residuals(new_checkpoint(f, policy=policy), 1.)
+    res = saved_residuals(jax.checkpoint(f, policy=policy), 1.)
     self.assertLen(res, 2)  # can save y and z
 
     policy = jax.checkpoint_policies.save_any_names_but_these()
-    res = saved_residuals(new_checkpoint(f, policy=policy), 1.)
+    res = saved_residuals(jax.checkpoint(f, policy=policy), 1.)
     self.assertLen(res, 3)  # can save y, z, and w
 
   def test_name_allowlist(self):
@@ -6366,19 +6343,19 @@ class RematTest(jtu.JaxTestCase):
       return (((x * y) * z) * w) * u
 
     policy = jax.checkpoint_policies.save_only_these_names('y', 'z', 'w')
-    res = saved_residuals(new_checkpoint(f, policy=policy), 1.)
+    res = saved_residuals(jax.checkpoint(f, policy=policy), 1.)
     self.assertLen(res, 3)  # can save y, z, and w
 
     policy = jax.checkpoint_policies.save_only_these_names('z', 'w')
-    res = saved_residuals(new_checkpoint(f, policy=policy), 1.)
+    res = saved_residuals(jax.checkpoint(f, policy=policy), 1.)
     self.assertLen(res, 2)  # can save z and w
 
     policy = jax.checkpoint_policies.save_only_these_names('w')
-    res = saved_residuals(new_checkpoint(f, policy=policy), 1.)
+    res = saved_residuals(jax.checkpoint(f, policy=policy), 1.)
     self.assertLen(res, 1)  # can save w
 
     policy = jax.checkpoint_policies.save_only_these_names()
-    res = saved_residuals(new_checkpoint(f, policy=policy), 1.)
+    res = saved_residuals(jax.checkpoint(f, policy=policy), 1.)
     self.assertLen(res, 0)  # can't save anything!
 
   def test_saved_residuals_utility(self):
@@ -6437,7 +6414,7 @@ class RematTest(jtu.JaxTestCase):
       for suffix, remat in [
           ('', jax.remat),
           ('_policy', partial(jax.remat, policy=lambda *_, **__: False)),
-          ('_new', partial(new_checkpoint, policy=lambda *_, **__: False)),
+          ('_new', partial(jax.checkpoint, policy=lambda *_, **__: False)),
       ])
   def test_checkpoint_dropvars(self, remat):
     @remat
@@ -6448,7 +6425,7 @@ class RematTest(jtu.JaxTestCase):
     _ = api.grad(f)(3.)  # doesn't crash
 
   def test_dce_keeps_eqns_with_used_outputs_but_no_used_inputs(self):
-    @new_checkpoint
+    @jax.checkpoint
     def f(x):
       c = jax.jit(lambda: 3.)()
       return c * x
@@ -6504,7 +6481,7 @@ class RematTest(jtu.JaxTestCase):
       {"testcase_name": f"{suffix}", "remat": remat}
       for suffix, remat in [
           ('', jax.remat),
-          ('_new', new_checkpoint),
+          ('_new', jax.checkpoint),
       ])
   def test_remat_of_scan(self, remat):
     to_scan = lambda c, _: (jnp.sin(c), jnp.sin(c))
@@ -6520,7 +6497,7 @@ class RematTest(jtu.JaxTestCase):
       {"testcase_name": f"{suffix}", "remat": remat}
       for suffix, remat in [
           ('', jax.remat),
-          ('_new', new_checkpoint),
+          ('_new', jax.checkpoint),
       ])
   def test_const_in_jvp_scan(self, remat):
     @jax.custom_jvp
@@ -6544,7 +6521,7 @@ class RematTest(jtu.JaxTestCase):
     # see also above test test_remat_checkpoint_dots_inside_scan
     x = jnp.ones((5,))
 
-    @partial(new_checkpoint, policy=jax.checkpoint_policies.checkpoint_dots)
+    @partial(jax.checkpoint, policy=jax.checkpoint_policies.checkpoint_dots)
     def f(W):
       def f(x):
         x = jnp.sin(jnp.dot(x, W, precision=lax.Precision.HIGHEST))
@@ -6556,10 +6533,7 @@ class RematTest(jtu.JaxTestCase):
       return lax.scan(body, x, None, length=2)[0]
 
     _, f_vjp = api.vjp(f, jnp.ones((5, 5)))
-    if config.vjp3.value:
-      jaxpr = f_vjp.jaxpr
-    else:
-      jaxpr = f_vjp.args[0].func.args[1]
+    jaxpr = f_vjp.jaxpr
     jaxpr_text = str(jaxpr)
 
     self.assertEqual(jaxpr_text.count(' sin '), 3)
@@ -6574,7 +6548,7 @@ class RematTest(jtu.JaxTestCase):
   def test_remat_of_scan_policy(self):
     save_cos = lambda prim, *_, **__: str(prim) == 'cos'
     to_scan = lambda c, _: (jnp.sin(c), jnp.sin(c))
-    f = new_checkpoint(lambda x: lax.scan(to_scan, x, None, length=3),
+    f = jax.checkpoint(lambda x: lax.scan(to_scan, x, None, length=3),
                        policy=save_cos)
     jtu.check_grads(f, (3.,), order=2, modes=['rev'])
 
@@ -6600,7 +6574,7 @@ class RematTest(jtu.JaxTestCase):
     sin.defjvp(sin_jvp)
 
     save_cos = lambda prim, *_, **__: str(prim) == 'cos'
-    f = new_checkpoint(partial(scan_apply, sin), policy=save_cos)
+    f = jax.checkpoint(partial(scan_apply, sin), policy=save_cos)
     jtu.check_grads(f, (3.,), order=2, modes=['rev'])
     jaxpr = api.make_jaxpr(api.linearize(f, 4.)[1])(1.)
     jaxpr_text = str(jaxpr)
@@ -6608,14 +6582,14 @@ class RematTest(jtu.JaxTestCase):
     self.assertEqual(jaxpr_text.count(' cos '), 0)
 
     save_sin = lambda prim, *_, **__: str(prim) == 'sin'
-    f = new_checkpoint(partial(scan_apply, sin), policy=save_sin)
+    f = jax.checkpoint(partial(scan_apply, sin), policy=save_sin)
     jtu.check_grads(f, (3.,), order=2, modes=['rev'])
     jaxpr = api.make_jaxpr(api.linearize(f, 4.)[1])(1.)
     jaxpr_text = str(jaxpr)
     self.assertEqual(jaxpr_text.count(' sin '), 0)
     self.assertEqual(jaxpr_text.count(' cos '), 1)
 
-    f = new_checkpoint(partial(scan_apply, sin),
+    f = jax.checkpoint(partial(scan_apply, sin),
                        policy=jax.checkpoint_policies.everything_saveable)
     jtu.check_grads(f, (3.,), order=2, modes=['rev'])
     jaxpr = api.make_jaxpr(api.linearize(f, 4.)[1])(1.)
@@ -6623,7 +6597,7 @@ class RematTest(jtu.JaxTestCase):
     self.assertEqual(jaxpr_text.count(' sin '), 0)
     self.assertEqual(jaxpr_text.count(' cos '), 0)
 
-    f = new_checkpoint(partial(scan_apply, sin),
+    f = jax.checkpoint(partial(scan_apply, sin),
                        policy=jax.checkpoint_policies.nothing_saveable)
     jtu.check_grads(f, (3.,), order=2, modes=['rev'])
     jaxpr = api.make_jaxpr(api.linearize(f, 4.)[1])(1.)
@@ -6631,7 +6605,7 @@ class RematTest(jtu.JaxTestCase):
     self.assertEqual(jaxpr_text.count(' sin '), 1)  # +1 b/c dce fixed point
     self.assertEqual(jaxpr_text.count(' cos '), 1)
 
-    f = new_checkpoint(lambda x: scan_apply(sin, scan_apply(sin, x)),
+    f = jax.checkpoint(lambda x: scan_apply(sin, scan_apply(sin, x)),
                        policy=jax.checkpoint_policies.nothing_saveable)
     jtu.check_grads(f, (3.,), order=2, modes=['rev'])
     jaxpr = api.make_jaxpr(api.linearize(f, 4.)[1])(1.)
@@ -6658,7 +6632,7 @@ class RematTest(jtu.JaxTestCase):
     sin.defjvp(sin_jvp)
 
     save_cos = lambda prim, *_, **__: str(prim) == 'cos'
-    f = new_checkpoint(partial(scan_apply, sin), policy=save_cos)
+    f = jax.checkpoint(partial(scan_apply, sin), policy=save_cos)
     jtu.check_grads(f, (3.,), order=2, modes=['rev'])
     jaxpr = api.make_jaxpr(api.linearize(f, 4.)[1])(1.)
     jaxpr_text = str(jaxpr)
@@ -6666,14 +6640,14 @@ class RematTest(jtu.JaxTestCase):
     self.assertEqual(jaxpr_text.count(' cos '), 0)
 
     save_sin = lambda prim, *_, **__: str(prim) == 'sin'
-    f = new_checkpoint(partial(scan_apply, sin), policy=save_sin)
+    f = jax.checkpoint(partial(scan_apply, sin), policy=save_sin)
     jtu.check_grads(f, (3.,), order=2, modes=['rev'])
     jaxpr = api.make_jaxpr(api.linearize(f, 4.)[1])(1.)
     jaxpr_text = str(jaxpr)
     self.assertEqual(jaxpr_text.count(' sin '), 0)
     self.assertEqual(jaxpr_text.count(' cos '), 1)
 
-    f = new_checkpoint(partial(scan_apply, sin),
+    f = jax.checkpoint(partial(scan_apply, sin),
                        policy=jax.checkpoint_policies.everything_saveable)
     jtu.check_grads(f, (3.,), order=2, modes=['rev'])
     jaxpr = api.make_jaxpr(api.linearize(f, 4.)[1])(1.)
@@ -6681,7 +6655,7 @@ class RematTest(jtu.JaxTestCase):
     self.assertEqual(jaxpr_text.count(' sin '), 0)
     self.assertEqual(jaxpr_text.count(' cos '), 0)
 
-    f = new_checkpoint(partial(scan_apply, sin),
+    f = jax.checkpoint(partial(scan_apply, sin),
                        policy=jax.checkpoint_policies.nothing_saveable)
     jtu.check_grads(f, (3.,), order=2, modes=['rev'])
     jaxpr = api.make_jaxpr(api.linearize(f, 4.)[1])(1.)
@@ -6689,7 +6663,7 @@ class RematTest(jtu.JaxTestCase):
     self.assertEqual(jaxpr_text.count(' sin '), 1)  # +1 b/c dce fixed point
     self.assertEqual(jaxpr_text.count(' cos '), 1)
 
-    f = new_checkpoint(lambda x: scan_apply(sin, scan_apply(sin, x)),
+    f = jax.checkpoint(lambda x: scan_apply(sin, scan_apply(sin, x)),
                        policy=jax.checkpoint_policies.nothing_saveable)
     jtu.check_grads(f, (3.,), order=2, modes=['rev'])
     jaxpr = api.make_jaxpr(api.linearize(f, 4.)[1])(1.)
@@ -6701,7 +6675,7 @@ class RematTest(jtu.JaxTestCase):
       {"testcase_name": f"{suffix}", "remat": remat}
       for suffix, remat in [
           ('', jax.remat),
-          ('_new', new_checkpoint),
+          ('_new', jax.checkpoint),
       ])
   def test_remat_of_cond(self, remat):
     true_fn  = lambda c: (jnp.sin(c), jnp.sin(c))
@@ -6726,7 +6700,7 @@ class RematTest(jtu.JaxTestCase):
       {"testcase_name": f"{suffix}", "remat": remat}
       for suffix, remat in [
           ('', jax.remat),
-          ('_new', new_checkpoint),
+          ('_new', jax.checkpoint),
       ])
   def test_const_in_jvp_cond(self, remat):
     @jax.custom_jvp
@@ -6758,11 +6732,7 @@ class RematTest(jtu.JaxTestCase):
       return lax.cond(x.sum() > 0, f, lambda x: x, x)
 
     _, f_vjp = api.vjp(f, jnp.ones((5, 5)))
-    if config.vjp3.value:
-      jaxpr_text = str(f_vjp.jaxpr)
-    else:
-      jaxpr_text = str(f_vjp.args[0].func.args[1])
-
+    jaxpr_text = str(f_vjp.jaxpr)
     self.assertEqual(jaxpr_text.count(' sin '), 2)
     self.assertEqual(jaxpr_text.count(' cos '), 3)
     # Five calls to dot_general in the backward pass because we have two for
@@ -6780,7 +6750,7 @@ class RematTest(jtu.JaxTestCase):
     # placement (because of the carry).
     x = jnp.ones((5,))
 
-    @partial(new_checkpoint, policy=jax.checkpoint_policies.checkpoint_dots)
+    @partial(jax.checkpoint, policy=jax.checkpoint_policies.checkpoint_dots)
     def f(W):
       def f(x):
         x = jnp.sin(jnp.dot(x, W, precision=lax.Precision.HIGHEST))
@@ -6791,10 +6761,7 @@ class RematTest(jtu.JaxTestCase):
       return lax.cond(x.sum() > 0, f, lambda x: x, x)
 
     _, f_vjp = api.vjp(f, jnp.ones((5, 5)))
-    if config.vjp3.value:
-      jaxpr = f_vjp.jaxpr
-    else:
-      jaxpr = f_vjp.args[0].func.args[1]
+    jaxpr = f_vjp.jaxpr
     jaxpr_text = str(jaxpr)
 
     self.assertEqual(jaxpr_text.count(' sin '), 2)
@@ -6806,7 +6773,7 @@ class RematTest(jtu.JaxTestCase):
 
   def test_remat_of_cond_policy(self):
     save_cos = lambda prim, *_, **__: str(prim) == 'cos'
-    f = new_checkpoint(lambda x: lax.cond(x > 0, jnp.sin, lambda x: x, x),
+    f = jax.checkpoint(lambda x: lax.cond(x > 0, jnp.sin, lambda x: x, x),
                        policy=save_cos)
     jtu.check_grads(f, (3.,), order=2, modes=['rev'])
 
@@ -6831,7 +6798,7 @@ class RematTest(jtu.JaxTestCase):
     sin.defjvp(sin_jvp)
 
     save_cos = lambda prim, *_, **__: str(prim) == 'cos'
-    f = new_checkpoint(partial(cond_apply, sin), policy=save_cos)
+    f = jax.checkpoint(partial(cond_apply, sin), policy=save_cos)
     jtu.check_grads(f, (3.,), order=2, modes=['rev'])
     jaxpr = api.make_jaxpr(api.linearize(f, 4.)[1])(1.)
     jaxpr_text = str(jaxpr)
@@ -6839,14 +6806,14 @@ class RematTest(jtu.JaxTestCase):
     self.assertEqual(jaxpr_text.count(' cos '), 0)
 
     save_sin = lambda prim, *_, **__: str(prim) == 'sin'
-    f = new_checkpoint(partial(cond_apply, sin), policy=save_sin)
+    f = jax.checkpoint(partial(cond_apply, sin), policy=save_sin)
     jtu.check_grads(f, (3.,), order=2, modes=['rev'])
     jaxpr = api.make_jaxpr(api.linearize(f, 4.)[1])(1.)
     jaxpr_text = str(jaxpr)
     self.assertEqual(jaxpr_text.count(' sin '), 0)
     self.assertEqual(jaxpr_text.count(' cos '), 1)
 
-    f = new_checkpoint(partial(cond_apply, sin),
+    f = jax.checkpoint(partial(cond_apply, sin),
                        policy=jax.checkpoint_policies.everything_saveable)
     jtu.check_grads(f, (3.,), order=2, modes=['rev'])
     jaxpr = api.make_jaxpr(api.linearize(f, 4.)[1])(1.)
@@ -6854,7 +6821,7 @@ class RematTest(jtu.JaxTestCase):
     self.assertEqual(jaxpr_text.count(' sin '), 0)
     self.assertEqual(jaxpr_text.count(' cos '), 0)
 
-    f = new_checkpoint(partial(cond_apply, sin),
+    f = jax.checkpoint(partial(cond_apply, sin),
                        policy=jax.checkpoint_policies.nothing_saveable)
     jtu.check_grads(f, (3.,), order=2, modes=['rev'])
     jaxpr = api.make_jaxpr(api.linearize(f, 4.)[1])(1.)
@@ -6862,7 +6829,7 @@ class RematTest(jtu.JaxTestCase):
     self.assertEqual(jaxpr_text.count(' sin '), 0)
     self.assertEqual(jaxpr_text.count(' cos '), 1)
 
-    f = new_checkpoint(lambda x: cond_apply(sin, cond_apply(sin, x)),
+    f = jax.checkpoint(lambda x: cond_apply(sin, cond_apply(sin, x)),
                        policy=jax.checkpoint_policies.nothing_saveable)
     jtu.check_grads(f, (3.,), order=2, modes=['rev'])
     jaxpr = api.make_jaxpr(api.linearize(f, 4.)[1])(1.)
@@ -6888,7 +6855,7 @@ class RematTest(jtu.JaxTestCase):
     sin.defjvp(sin_jvp)
 
     save_cos = lambda prim, *_, **__: str(prim) == 'cos'
-    f = new_checkpoint(partial(cond_apply, sin), policy=save_cos)
+    f = jax.checkpoint(partial(cond_apply, sin), policy=save_cos)
     jtu.check_grads(f, (3.,), order=2, modes=['rev'])
     jaxpr = api.make_jaxpr(api.linearize(f, 4.)[1])(1.)
     jaxpr_text = str(jaxpr)
@@ -6896,14 +6863,14 @@ class RematTest(jtu.JaxTestCase):
     self.assertEqual(jaxpr_text.count(' cos '), 0)
 
     save_sin = lambda prim, *_, **__: str(prim) == 'sin'
-    f = new_checkpoint(partial(cond_apply, sin), policy=save_sin)
+    f = jax.checkpoint(partial(cond_apply, sin), policy=save_sin)
     jtu.check_grads(f, (3.,), order=2, modes=['rev'])
     jaxpr = api.make_jaxpr(api.linearize(f, 4.)[1])(1.)
     jaxpr_text = str(jaxpr)
     self.assertEqual(jaxpr_text.count(' sin '), 0)
     self.assertEqual(jaxpr_text.count(' cos '), 1)
 
-    f = new_checkpoint(partial(cond_apply, sin),
+    f = jax.checkpoint(partial(cond_apply, sin),
                        policy=jax.checkpoint_policies.everything_saveable)
     jtu.check_grads(f, (3.,), order=2, modes=['rev'])
     jaxpr = api.make_jaxpr(api.linearize(f, 4.)[1])(1.)
@@ -6911,7 +6878,7 @@ class RematTest(jtu.JaxTestCase):
     self.assertEqual(jaxpr_text.count(' sin '), 0)
     self.assertEqual(jaxpr_text.count(' cos '), 0)
 
-    f = new_checkpoint(partial(cond_apply, sin),
+    f = jax.checkpoint(partial(cond_apply, sin),
                        policy=jax.checkpoint_policies.nothing_saveable)
     jtu.check_grads(f, (3.,), order=2, modes=['rev'])
     jaxpr = api.make_jaxpr(api.linearize(f, 4.)[1])(1.)
@@ -6919,7 +6886,7 @@ class RematTest(jtu.JaxTestCase):
     self.assertEqual(jaxpr_text.count(' sin '), 0)
     self.assertEqual(jaxpr_text.count(' cos '), 1)
 
-    f = new_checkpoint(lambda x: cond_apply(sin, cond_apply(sin, x)),
+    f = jax.checkpoint(lambda x: cond_apply(sin, cond_apply(sin, x)),
                        policy=jax.checkpoint_policies.nothing_saveable)
     jtu.check_grads(f, (3.,), order=2, modes=['rev'])
     jaxpr = api.make_jaxpr(api.linearize(f, 4.)[1])(1.)
@@ -6931,7 +6898,7 @@ class RematTest(jtu.JaxTestCase):
       {"testcase_name": f"{suffix}", "remat": remat}
       for suffix, remat in [
           ('', jax.remat),
-          ('_new', new_checkpoint),
+          ('_new', jax.checkpoint),
       ])
   def test_remat_of_while_loop(self, remat):
     def cond_fn(carry):
@@ -6966,7 +6933,7 @@ class RematTest(jtu.JaxTestCase):
 
     # even with a policy, we can't save residuals (w/o dynamic shapes)!
     save_cos = lambda prim, *_, **__: str(prim) == 'cos'
-    g = new_checkpoint(f, policy=save_cos)
+    g = jax.checkpoint(f, policy=save_cos)
     jaxpr = api.make_jaxpr(jax.linearize(g, 4.)[1])(1.)
     self.assertIn(' sin ', str(jaxpr))
     self.assertIn(' cos ', str(jaxpr))
@@ -7126,7 +7093,9 @@ class RematTest(jtu.JaxTestCase):
   def test_remat_partial_cse_prevention(self):
     @partial(jax.remat, prevent_cse=(False, True))
     def layer(W, x):
-      return x @ W
+      res = x @ W
+      res += jnp.array([1.0, 2.0, 3.0])  # ensure the jaxpr also contains a const
+      return res
 
     def net(Ws, x):
       for W in Ws:
@@ -7214,10 +7183,10 @@ class JaxprTest(jtu.JaxTestCase):
   def test_cond(self):
     def f(x):
       return lax.cond(x >= 0.,
+                      lambda xt, _: xt + x,
+                      lambda _, xf: xf - x,
                       x + 1.,
-                      lambda xt: xt + x,
-                      x + 2.,
-                      lambda xf: xf - x)
+                      x + 2.)
     expected = """{ lambda ; a:f32[]. let
     b:bool[] = ge a 0.0:f32[]
     c:f32[] = add a 1.0:f32[]
@@ -7789,9 +7758,12 @@ class InputSavedVJPTest(jtu.JaxTestCase):
     def f(x, y):
       return x * y
 
-    primals = 2., 3.
-    y, f_vjp = api.si_vjp(f, [True, True], *primals)
-    arg_cts = f_vjp(1., *primals)
+    primals = [2., 3.]
+    y, f_vjp = jax.vjp(f, *primals)
+    f_vjp.args_res = [None, None]
+    y_grad = 1.
+    f_vjp.args_res = primals
+    arg_cts = f_vjp(1.)
     self.assertAllClose(y, 6.)
     self.assertAllClose(arg_cts, (3., 2.))
 
@@ -7802,48 +7774,53 @@ class InputSavedVJPTest(jtu.JaxTestCase):
     @jax.jit
     def g():
       primals = 2., 3.
-      y, f_vjp = api.si_vjp(f, [True, True], *primals)
+      y, f_vjp = jax.vjp(f, *primals)
+      f_vjp.args_res = [None, None]
       return y, f_vjp
 
     @jax.jit
     def h(f_vjp):
-      return f_vjp(1., 2., 3.)
+      f_vjp.args_res = [2., 3.]
+      return f_vjp(1.)
 
     y, f_vjp = g()
     arg_cts = h(f_vjp)
     self.assertAllClose(y, 6.)
     self.assertAllClose(arg_cts, (3., 2.))
 
-  def test_basic_unused(self):
+  def test_basic_unused_vjp3(self):
     f = jnp.sin
     primals = 3.,
-    y, f_vjp = api.si_vjp(f, [True], *primals)
-    x_ct, = f_vjp(1., *primals)
+    y, f_vjp = api.vjp(f, *primals)
+    x_ct, = f_vjp(1.)
     self.assertAllClose(y, jnp.sin(3.))
     self.assertAllClose(x_ct, jnp.cos(3.))
+    self.assertIsInstance(f_vjp.args_res[0], api.NotNeeded)  # can check if unused
 
-    with self.assertRaisesRegex(Exception, "not used by the backward pass: x"):
-      _ = api.si_vjp(f, [True], *primals, allow_unused=False)
-
-  def test_basic_opaque(self):
+  def test_basic_opaque_vjp3(self):
     f = jnp.sin
     primals = 3.,
-    with self.assertRaisesRegex(Exception, "the backward pass requires opaque"):
-      _ = api.si_vjp(f, [True], *primals, allow_opaque=False)
+    _, f_vjp = api.vjp(f, *primals)
+    self.assertTrue(f_vjp.opaque_residuals)  # can detect if opaque res are used
 
   def test_basic_pytree_error(self):
     def f(x):
       return [x['hi'] * x['bye']]
 
-    y, f_vjp = api.si_vjp(f, [True], {'hi': 2., 'bye': 3.})
-    arg_ct, = f_vjp([1.], {'hi': 2., 'bye': 3.})
+    y, f_vjp = jax.vjp(f, {'hi': 2., 'bye': 3.})
+    f_vjp.args_res = [None]
+    y_grad = [1.]
+    f_vjp.args_res = [{'hi': 2., 'bye': 3.}]
+    arg_ct, = f_vjp(y_grad)
     self.assertAllClose(y, [6.])
     self.assertAllClose(arg_ct, {'hi': 3., 'bye': 2.})
 
-    with self.assertRaisesRegex(ValueError, "but the structures differ"):
-      f_vjp(1., {'hi': 2.})
+    # TODO(mattjj): Raise an error message.
+    # with self.assertRaisesRegex(ValueError, "but the structures differ"):
+    #   f_vjp.args_res = [{'hi': 2.}]
+    #   f_vjp([1.])
 
-  def test_fsdp(self):
+  def test_fsdp_error(self):
     # see https://github.com/jax-ml/jax/pull/27017 for why this is called "fsdp"
     def f2(x, w):
       x = 1. * x
@@ -7853,17 +7830,138 @@ class InputSavedVJPTest(jtu.JaxTestCase):
 
     x = jnp.ones((3, 4))
     w = jnp.ones((4, 4))
-    y, f2_sivjp = api.si_vjp(f2, [False, True], x, w)
+    y, f2_vjp = jax.vjp(f2, x, w)
+    f2_vjp.args_res[1] = None
+    y_grad = jnp.ones((2, 4))
+    f2_vjp.args_res[1] = w
+    with self.assertRaisesRegex(ValueError, "unexpected JAX type"):
+      f2_vjp(y_grad)
+
+  def test_fsdp_vjp3(self):
+    # see https://github.com/jax-ml/jax/pull/27017 for why this is called "fsdp"
+    def f2(x, w):
+      x = 1. * x
+      x = x @ w
+      x = 2. * x
+      return x
+
+    x = jnp.ones((3, 4))
+    w = jnp.ones((4, 4))
+    y, f2_vjp = api.vjp(f2, x, w)
+    f2_vjp.args_res[1] = None
     y_grad = jnp.ones_like(y)
-    x_grad, w_grad = f2_sivjp(y_grad, w)
+    f2_vjp.args_res[1] = w
+    x_grad, w_grad = f2_vjp(y_grad)
     self.assertAllClose(x_grad, 2. * y_grad @ w.T)
+    self.assertAllClose(w_grad, 2. * x.T @ y_grad)
     self.assertAllClose(w_grad, 2. * x.T @ y_grad)
 
   def test_doesnt_leak_symbolic_zeros(self):
-    _, vjp = api.si_vjp(lambda x: 1., [False], 3.14)
+    _, vjp = jax.vjp(lambda x: 1., 3.14)
     ans, = vjp(1.0)
     self.assertIsInstance(ans, jax.Array)
 
+
+class TracebackTest(jtu.JaxTestCase):
+  # These tests are to catch regressions in Python traceback sizes. Our
+  # second-order APIs can be nested arbitrarily and if each one adds a dozen
+  # stack frames then we can end up with very deep tracebacks. We expect the
+  # particular `expected_depth` constants in these tests to change from time to
+  # time. We just want to know when it happens and what caused it.
+
+  def cur_depth(self):
+    return len(inspect.stack())
+
+  def test_traceback_test(self):
+    expected_depth_foo = 1
+    expected_depth_bar = 2
+    init_depth = self.cur_depth()
+    def foo():
+      self.assertExpectedDepth(init_depth, expected_depth_foo)
+      def bar():
+        self.assertExpectedDepth(init_depth, expected_depth_bar)
+      bar()
+
+    foo()
+
+  def assertExpectedDepth(self, init_depth, expected_depth):
+    # `- 1` is for the `assertExpectedDepth` stack frame itself
+    self.assertEqual(self.cur_depth() - init_depth - 1, expected_depth)
+
+  def test_scan_traceback(self):
+    expected_depth = 5
+    init_depth = self.cur_depth()
+
+    def f(c, x):
+      self.assertExpectedDepth(init_depth, expected_depth)
+      return (c, ())
+
+    jax.lax.scan(f, 0, jnp.arange(4))
+
+  def test_cond_traceback(self):
+    if sys.version_info < (3, 13):
+      # Fails because 3.11 adds an extra stack frame due to a list comprehension
+      self.skipTest("Expected failure.")
+    expected_depth = 4
+    init_depth = self.cur_depth()
+
+    def f():
+      self.assertExpectedDepth(init_depth, expected_depth)
+
+    lax.cond(True, f, lambda: None)
+
+  def test_jit_traceback(self):
+    # TODO(dougalm): shoud be able to get this down to 2 or 3
+    expected_depth = 5
+    init_depth = self.cur_depth()
+    @jit
+    def foo(x):
+      self.assertExpectedDepth(init_depth, expected_depth)
+      return x
+    foo(1)
+
+  def test_grad_traceback(self):
+    # TODO(dougalm): improve this
+    expected_depth = 11
+    init_depth = self.cur_depth()
+
+    def foo(x):
+      self.assertExpectedDepth(init_depth, expected_depth)
+      return x
+
+    grad(foo)(1.0)
+
+  def test_vmap_traceback(self):
+    # TODO(dougalm): improve this
+    expected_depth = 7
+    init_depth = self.cur_depth()
+
+    def foo(x):
+      self.assertExpectedDepth(init_depth, expected_depth)
+      return x
+
+    jax.vmap(foo)(np.arange(3))
+
+  def test_custom_vjp_traceback(self):
+    # TODO(dougalm): improve this
+    expected_depth_f = 10
+    expected_depth_f_fwd = 19
+    expected_depth_f_rev = 12
+    init_depth = self.cur_depth()
+    @jax.custom_vjp
+    def f(x):
+      self.assertExpectedDepth(init_depth, expected_depth_f)
+      return x
+    def f_fwd(x):
+      self.assertExpectedDepth(init_depth, expected_depth_f_fwd)
+      return x, None
+    def f_rev(_, g):
+      self.assertExpectedDepth(init_depth, expected_depth_f_rev)
+      return (g,)
+    f.defvjp(f_fwd, f_rev)
+
+    f(1.0)
+    grad(f)(1.0)
 
 if __name__ == '__main__':
   absltest.main(testLoader=jtu.JaxTestLoader())

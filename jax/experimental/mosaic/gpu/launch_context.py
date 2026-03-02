@@ -32,13 +32,30 @@ from jaxlib.mlir.dialects import memref
 from jaxlib.mlir.dialects import nvvm
 import numpy as np
 
+from . import fragmented_array as fa
 from . import profiler
 from . import utils
-from . import fragmented_array as fa
 
 TMA_DESCRIPTOR_BYTES = 128
 TMA_DESCRIPTOR_ALIGNMENT = 64
-TMAReductionOp = Literal["add", "min", "max", "inc", "dec", "and", "or", "xor"]
+TMAReductionOp = Literal[
+    "add",
+    "min",
+    "max",
+    "inc",
+    "dec",
+    "and",
+    "or",
+    "xor",
+    "umin",
+    "umax",
+    "smin",
+    "smax",
+]
+
+def _reduction_op_to_ptx(reduction_op: TMAReductionOp) -> str:
+  # convert [s|u]min|max to min|max
+  return reduction_op[-3:]
 
 c = utils.c  # This is too common to fully qualify.
 
@@ -425,6 +442,81 @@ def _find_kernel_argument_for_gmem_ref(
   return gmem_ref
 
 
+def _is_tma_reduction_op_supported(
+    reduction_op: TMAReductionOp | None, dtype: ir.Type,
+) -> bool:
+  """Returns whether the given TMA reduction op supports the given dtype.
+
+  This function essentially implements the table at:
+  https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cp-reduce-async-bulk-tensor
+  with the following differences:
+  - For `add` reductions, we also support int64, treating it as uint64.
+  - For `and`, `or`, and `xor` reductions, we support signed integer types.
+  - For `inc` and `dec` reductions, we support both signed and unsigned i32
+    treating both as unsigned.
+  """
+  i32 = ir.IntegerType.get_signless(32)
+  i64 = ir.IntegerType.get_signless(64)
+  f16 = ir.F16Type.get()
+  f32 = ir.F32Type.get()
+  bf16 = ir.BF16Type.get()
+
+  match reduction_op:
+    case None:
+      return True
+    case "add":
+      return dtype in (f16, f32, bf16, i32, i64)
+    case "max" | "min":
+      return dtype in (f16, bf16)
+    case "umax" | "umin" | "smax" | "smin":
+      return dtype in (i32, i64)
+    case "inc" | "dec":
+      return dtype == i32
+    case "and" | "or" | "xor":
+      return dtype in (i32, i64)
+
+
+def _tma_dma_type(
+    element_type: ir.Type,
+    reduction_op: TMAReductionOp | None,
+) -> int:
+  """Returns the TMA DMA type for the given element type and signedness."""
+  if isinstance(element_type, ir.IntegerType):
+    bitwidth = utils.bitwidth_impl(element_type)
+    if bitwidth == 2:
+      tma_dtype = 8
+    elif bitwidth == 4:
+      tma_dtype = 0
+    elif bitwidth == 8:
+      tma_dtype = 1
+    elif bitwidth == 16:
+      tma_dtype = 2
+    elif bitwidth == 32:
+      tma_dtype = 9 if reduction_op in ("smin", "smax") else 3
+    elif bitwidth == 64:
+      tma_dtype = 10 if reduction_op in ("smin", "smax") else 4
+    else:
+      raise ValueError(f"Unsupported integer bitwidth: {bitwidth}")
+  elif isinstance(element_type, ir.F16Type):
+    tma_dtype = 5
+  elif isinstance(element_type, ir.F32Type):
+    tma_dtype = 6
+  elif isinstance(element_type, ir.BF16Type):
+    tma_dtype = 7
+  # We treat narrow floats as integers
+  elif isinstance(element_type, ir.Float8E5M2Type):
+    tma_dtype = 1
+  elif isinstance(element_type, ir.Float8E4M3FNType):
+    tma_dtype = 1
+  elif isinstance(element_type, ir.Float8E8M0FNUType):
+    tma_dtype = 1
+  elif isinstance(element_type, ir.Float4E2M1FNType):
+    tma_dtype = 0
+  else:
+    raise ValueError(f"unsupported TMA dtype {element_type}")
+  return tma_dtype
+
+
 class AsyncCopyImplementation(enum.Enum):
   TMA = enum.auto()
   CP_ASYNC = enum.auto()
@@ -437,7 +529,7 @@ class LaunchContext:
   cluster_size: tuple[int, int, int]
   profiler: OnDeviceProfiler | None = None
   tma_descriptors: dict[
-      tuple[ir.Value, tuple[int, ...], int | None, tuple[MemRefTransform, ...], Any],
+      tuple[ir.Value, tuple[int, ...], int | None, tuple[MemRefTransform, ...], Any, int],
       ir.Value,
   ] = dataclasses.field(default_factory=dict, init=False)
   is_device_collective: bool = False
@@ -451,22 +543,60 @@ class LaunchContext:
       yield
 
   def cluster_idx(
-      self, dim: gpu.Dimension | Sequence[gpu.Dimension] | None = None
+      self,
+      dim: gpu.Dimension | Sequence[gpu.Dimension] | None = None,
+      dim_idx: ir.Value | Sequence[ir.Value] | None = None,
   ) -> ir.Value:
-    """Returns the index of a block within a subset of the cluster spanned by the given dimensions."""
+    """Returns the linear index of a block within a subset of the cluster spanned by the given dimensions.
+
+    dim_idx can be used to specify the index of another block along the selected
+    dimensions. If not provided, the current block's index is used.
+    """
     if dim is None:
       dim = gpu.Dimension
     elif isinstance(dim, gpu.Dimension):
       dim = (dim,)
+    if dim_idx is None:
+      dim_idx = [gpu.cluster_block_id(d) for d in dim]
+    elif isinstance(dim_idx, ir.Value):
+      if len(dim) != 1:
+        raise ValueError(
+            "Expected a single dimension when passing a single index"
+        )
+      dim_idx = [dim_idx]
     index = ir.IndexType.get()
     stride = 1
-    idx = c(0, index)
-    for d in sorted(dim):
+    lin_idx = c(0, index)
+    for d, idx in sorted(zip(dim, dim_idx, strict=True), key=lambda x: x[0]):
       if self.cluster_size[d] == 1:  # Optimize a multiply by 0.
         continue
-      idx = arith.addi(idx, arith.muli(gpu.cluster_block_id(d), c(stride, index)))
+      lin_idx = arith.addi(lin_idx, arith.muli(idx, c(stride, index)))
       stride *= self.cluster_size[d]
-    return idx
+    return lin_idx
+
+  def get_cluster_ref(self, ref: ir.Value, dim: gpu.Dimension, idx: ir.Value):
+    i32 = ir.IntegerType.get_signless(32)
+    # We replace the offset in the ref type by 0, because memref_ptr always
+    # folds the offset into the pointer.
+    ref_ty = ir.MemRefType(ref.type)
+    strides, _ = ref_ty.get_strides_and_offset()
+    result_type = ir.MemRefType.get(
+        ref_ty.shape,
+        ref_ty.element_type,
+        ir.StridedLayoutAttr.get(0, strides),
+        None,
+    )
+    if ref_ty.memory_space != ir.Attribute.parse("#gpu.address_space<workgroup>"):
+      raise ValueError(f"Expected SMEM but got: {ref.memory_space}")
+    idxs = [gpu.cluster_block_id(d) for d in gpu.Dimension]
+    idxs[dim] = idx
+    flat_block = arith.index_cast(i32, self.cluster_idx(gpu.Dimension, idxs))  # type: ignore
+    return utils.ptr_as_memref(
+        utils.get_cluster_ptr(
+            utils.memref_ptr(ref, memory_space=3), flat_block
+        ),
+        result_type,
+    )
 
   def _alloc_scratch(
       self,
@@ -511,10 +641,11 @@ class LaunchContext:
       reduction_op: TMAReductionOp | None,
   ):
     gmem_ref = _find_kernel_argument_for_gmem_ref(gmem_ref)
+    tma_dtype = _tma_dma_type(ir.MemRefType(gmem_ref.type).element_type, reduction_op)
     # Using ir.Values in cache keys is a little sketchy, but I think it should
     # be fine. Having it in the key will keep it alive, and if comparison and
     # hashing is by identity then it should work out.
-    tma_desc_key = (gmem_ref, transformed_slice_shape, swizzle, gmem_transform, gmem_peer_id)
+    tma_desc_key = (gmem_ref, transformed_slice_shape, swizzle, gmem_transform, gmem_peer_id, tma_dtype)
     if (tma_desc := self.tma_descriptors.get(tma_desc_key, None)) is None:
       i32 = ir.IntegerType.get_signless(32)
       i64 = ir.IntegerType.get_signless(64)
@@ -579,43 +710,6 @@ class LaunchContext:
         )
         # TODO(apaszke): Better verification (e.g. slice is non-zero)
         # TODO(apaszke): We always know strides statically.
-        if isinstance(ref_ty.element_type, ir.IntegerType):
-          if reduction_op is not None:
-            raise ValueError(
-                f"TMA with reduction_op={reduction_op} is not supported with Integers"
-            )
-          bitwidth = utils.bitwidth_impl(ref_ty.element_type)
-          if bitwidth == 2:
-            tma_dtype = 8
-          elif bitwidth == 4:
-            tma_dtype = 0
-          elif bitwidth == 8:
-            tma_dtype = 1
-          elif bitwidth == 16:
-            tma_dtype = 2
-          elif bitwidth == 32:
-            tma_dtype = 3
-          elif bitwidth == 64:
-            tma_dtype = 4
-          else:
-            raise ValueError(f"Unsupported integer bitwidth: {bitwidth}")
-        elif ir.F16Type.isinstance(ref_ty.element_type):
-          tma_dtype = 5
-        elif ir.F32Type.isinstance(ref_ty.element_type):
-          tma_dtype = 6
-        elif ir.BF16Type.isinstance(ref_ty.element_type):
-          tma_dtype = 7
-        # We treat narrow floats as integers
-        elif ir.Float8E5M2Type.isinstance(ref_ty.element_type):
-          tma_dtype = 1
-        elif ir.Float8E4M3FNType.isinstance(ref_ty.element_type):
-          tma_dtype = 1
-        elif ir.Float8E8M0FNUType.isinstance(ref_ty.element_type):
-          tma_dtype = 1
-        elif ir.Float4E2M1FNType.isinstance(ref_ty.element_type):
-          tma_dtype = 0
-        else:
-          raise ValueError(f"unsupported TMA dtype {ref_ty.element_type}")
         dtype_or_bitwidth = c(tma_dtype, i64)
         args = [
             host_ptr,
@@ -675,7 +769,10 @@ class LaunchContext:
       if len(gather_indices.shape) != 1:
         raise ValueError("Gather/scatter indices must be 1D")
       idx_dtype = gather_indices.mlir_dtype
-      if not ir.IntegerType.isinstance(idx_dtype) or utils.bitwidth(idx_dtype) > 32:
+      if (
+          not isinstance(idx_dtype, ir.IntegerType)
+          or utils.bitwidth(idx_dtype) > 32
+      ):
         raise ValueError("Gather/scatter indices must be integers that are at most 32-bit wide")
       if gather_indices.is_signed:
         raise ValueError("Gather/scatter indices must be unsigned")
@@ -829,7 +926,14 @@ class LaunchContext:
           )
       idx = self.cluster_idx(collective)
       rem_collective_size = collective_size
-      for dim, slice_size in enumerate(slice_shape[:-1]):
+      has_swizzle = (
+          swizzle is not None
+          and swizzle != mgpu_dialect.SwizzlingMode.kNoSwizzle
+      )
+      # We can partition the minormost dim if there's no swizzling.
+      for dim, slice_size in enumerate(
+          slice_shape[:-1] if has_swizzle else slice_shape
+      ):
         if slice_size % rem_collective_size == 0:
           partition_dim(dim, idx, rem_collective_size)
           rem_collective_size = 1
@@ -854,7 +958,7 @@ class LaunchContext:
     if max(slice_shape) > 256:
       raise ValueError(
           "Async copies only support copying <=256 elements along each"
-          " dimension"
+          f" dimension, got {tuple(slice_shape)}"
       )
     if (zeroth_bw := slice_shape[-1] * element_bitwidth) % 128 != 0:
       raise ValueError(
@@ -945,16 +1049,10 @@ class LaunchContext:
     if reduction_op is not None:
       if implementation != AsyncCopyImplementation.TMA:
         raise ValueError("Only the TMA implementation supports reductions")
-      if not any(
-          t.isinstance(element_type)
-          for t in (ir.F32Type, ir.BF16Type, ir.F16Type)
-      ):
+      if not _is_tma_reduction_op_supported(reduction_op, element_type):
         raise ValueError(
-            "TMA with reduction is only supported with f32, f16 and bf16"
-        )
-      if reduction_op != "add":
-        raise ValueError(
-            "TMA with reduction is only supported with add operation"
+            f"Reduction op {reduction_op} not supported by the TMA"
+            f" implementation for element type {element_type}"
         )
 
     if src_ref_ty.memory_space is None and utils.is_smem_ref(dst_ref_ty):
@@ -1011,7 +1109,7 @@ class LaunchContext:
       raise ValueError(
           "Expected the SMEM reference to have the same shape as the"
           f" transformed slice: {tuple(smem_ref_ty.shape)} !="
-          f" {slice_shape[len(squeezed_dims):]}"
+          f" {tuple(slice_shape[len(squeezed_dims):])}"
       )
 
     if implementation == AsyncCopyImplementation.CP_ASYNC:
@@ -1047,7 +1145,10 @@ class LaunchContext:
       offset_scale = 1 if element_bitwidth >= 8 else 8 // element_bitwidth
       if element_bitwidth < 8:
         gep_type = i8
-      elif ir.FloatType.isinstance(element_type) and ir.FloatType(element_type).width == 8:
+      elif (
+          isinstance(element_type, ir.FloatType)
+          and ir.FloatType(element_type).width == 8
+      ):
         gep_type = i8  # LLVM has no support for f8.
       else:
         gep_type = element_type
@@ -1149,8 +1250,10 @@ class LaunchContext:
 
       if arrive:
         arrive_predicate = utils.single_thread_predicate(utils.ThreadSubset.WARPGROUP)
-        nvvm.mbarrier_arrive_expect_tx_shared(
-            barrier_ptr, transfer_bytes, predicate=arrive_predicate,
+        utils.nvvm_mbarrier_arrive_expect_tx(
+            barrier_ptr,
+            transfer_bytes,
+            predicate=arrive_predicate,
         )
 
       gmem_strides, _ = gmem_ref_ty.get_strides_and_offset()
@@ -1278,7 +1381,7 @@ class LaunchContext:
               arith.CmpIPredicate.eq, self.cluster_idx(collective), c(0, index),
           )
           arrive_predicate = arith.andi(predicate, first_block)
-          nvvm.mbarrier_arrive_expect_tx_shared(
+          utils.nvvm_mbarrier_arrive_expect_tx(
               barrier_ptr, transfer_bytes, predicate=arrive_predicate
           )
         rank = len(slice_shape)
@@ -1299,7 +1402,7 @@ class LaunchContext:
         )
       else:
         if arrive:
-          nvvm.mbarrier_arrive_expect_tx_shared(
+          utils.nvvm_mbarrier_arrive_expect_tx(
               barrier_ptr, transfer_bytes, predicate=predicate
           )
         if collective_size > 1:
@@ -1319,7 +1422,7 @@ class LaunchContext:
         llvm.inline_asm(
           ir.Type.parse("!llvm.void"),
           [predicate,smem_ptr,tma_desc,*rev_dyn_base_indices],
-          f"@$0 cp.reduce.async.bulk.tensor.{rank}d.global.shared::cta.{reduction_op}.tile.bulk_group [$2,{{{idx_operands}}}], [$1];",
+          f"@$0 cp.reduce.async.bulk.tensor.{rank}d.global.shared::cta.{_reduction_op_to_ptx(reduction_op)}.tile.bulk_group [$2,{{{idx_operands}}}], [$1];",
           "b,r,l" + ",r" * rank,
           has_side_effects=True,
         )
@@ -1446,7 +1549,7 @@ class LaunchContext:
 
   def to_remote(self, ref: ir.Value, peer: ir.Value):
     self._ensure_nvshmem_decls()
-    if ir.MemRefType.isinstance(ref.type):
+    if isinstance(ref.type, ir.MemRefType):
       # We replace the offset in the ref type by 0, because memref_ptr always
       # folds the offset into the pointer.
       ref_ty = ir.MemRefType(ref.type)
@@ -1469,7 +1572,7 @@ class LaunchContext:
   def to_remote_multicast(self, ref: ir.Value):
     i32 = ir.IntegerType.get_signless(32)
     self._ensure_nvshmem_decls()
-    if not ir.MemRefType.isinstance(ref.type):
+    if not isinstance(ref.type, ir.MemRefType):
       raise ValueError(f"Unsupported type for to_remote_multicast: {ref.type}")
       # We replace the offset in the ref type by 0, because memref_ptr always
       # folds the offset into the pointer.
@@ -1509,7 +1612,7 @@ def _recompute_peer_id(peer_id: ir.Value, fuel=8) -> ir.Value:
   if op.OPERATION_NAME.startswith("arith."):
     new_operands = [_recompute_peer_id(x, fuel - 1) for x in op.operands]
     result_types = [r.type for r in op.results]
-    new_attributes = {na.name: na.attr for na in op.attributes}
+    new_attributes = {na: op.attributes[na] for na in op.attributes}
     new_op = ir.Operation.create(
         op.OPERATION_NAME, result_types, new_operands, new_attributes
     )

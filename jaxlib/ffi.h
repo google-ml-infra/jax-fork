@@ -98,8 +98,7 @@ class PyFfiAnyBuffer {
 };
 
 template <DLDeviceType DeviceType>
-ffi::Error XlaBufferCallback(int32_t device_ordinal, const XLA_FFI_Api* api,
-                             XLA_FFI_ExecutionContext* ctx,
+ffi::Error XlaBufferCallback(ffi::Context ctx, int32_t device_ordinal,
                              xla::FfiLoadedHostCallbacks* callbacks,
                              uint64_t index, ffi::RemainingArgs args,
                              ffi::RemainingRets rets) {
@@ -109,7 +108,7 @@ ffi::Error XlaBufferCallback(int32_t device_ordinal, const XLA_FFI_Api* api,
   auto nb_args =
       nb::steal<nb::tuple>(PyTuple_New(1 + args.size() + rets.size()));
 
-  PyFfiContext py_ctx(api, ctx, XLA_FFI_ExecutionStage_EXECUTE);
+  PyFfiContext py_ctx(ctx.api(), ctx.ctx(), XLA_FFI_ExecutionStage_EXECUTE);
   PyTuple_SET_ITEM(nb_args.ptr(), 0, nb::cast(py_ctx).release().ptr());
 
   size_t offset = 1;
@@ -133,19 +132,18 @@ ffi::Error XlaBufferCallback(int32_t device_ordinal, const XLA_FFI_Api* api,
                      nb::cast(py_buffer).release().ptr());
   }
 
-  xla::EnterHostCallback();
+  xla::HostCallbackScope cleanup;
   try {
     callback(*nb::borrow<nb::args>(nb_args));
   } catch (nb::python_error& e) {
     return ffi::Error::Internal(
         absl::StrFormat("Error when calling buffer callback: %s", e.what()));
   }
-  xla::LeaveHostCallback();
 
   return ffi::Error::Success();
 }
 
-void BuildFfiSubmodule(nanobind::module_& m);
+void RegisterFfiApis(nanobind::module_& m);
 
 }  // namespace jax
 

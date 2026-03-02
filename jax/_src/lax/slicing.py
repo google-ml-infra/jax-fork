@@ -26,11 +26,11 @@ import numpy as np
 
 from jax._src import ad_util
 from jax._src import api
-from jax._src import config
 from jax._src import core
 from jax._src import dispatch
 from jax._src import dtypes
 from jax._src import source_info_util
+from jax._src.traceback_util import api_boundary
 from jax._src import util
 from jax._src import mesh as mesh_lib
 from jax._src.interpreters import ad
@@ -49,12 +49,14 @@ from jax._src.lib.mlir.dialects import hlo
 from jax._src.named_sharding import NamedSharding
 from jax._src.partition_spec import PartitionSpec as P
 from jax._src.typing import Array, ArrayLike, Shape
+from jax._src.state.indexing import ds
 from jax._src.util import safe_map, safe_zip
 
 map, unsafe_map = safe_map, map
 zip, unsafe_zip = safe_zip, zip
 
 _dtype = dtypes.dtype
+_slice = slice
 
 
 def slice(operand: ArrayLike, start_indices: Sequence[int],
@@ -171,15 +173,9 @@ def dynamic_slice(
   """
   start_indices = _dynamic_slice_indices(
       operand, start_indices, allow_negative_indices)
-  if config.dynamic_shapes.value:
-    dynamic_sizes, static_sizes = lax._extract_tracers_dyn_shape(slice_sizes)
-  else:
-    dynamic_sizes = []
-    static_sizes = core.canonicalize_shape(slice_sizes)  # type: ignore
-  operand, *start_indices = core.standard_insert_pvary(
-      operand, *start_indices)
-  return dynamic_slice_p.bind(operand, *start_indices, *dynamic_sizes,
-                              slice_sizes=tuple(static_sizes))
+  sizes = core.canonicalize_shape(slice_sizes)  # type: ignore
+  operand, *start_indices = core.standard_insert_pvary(operand, *start_indices)
+  return dynamic_slice_p.bind(operand, *start_indices, slice_sizes=tuple(sizes))
 
 
 def dynamic_update_slice(
@@ -419,6 +415,8 @@ def gather(operand: ArrayLike, start_indices: ArrayLike,
         fill_value = dtypes.iinfo(dtype).max
       elif dtype == dtypes.bool_:
         fill_value = True
+      elif dtypes.issubdtype(dtype, dtypes.prng_key):
+        fill_value = np.iinfo('uint32').max
       else:
         raise ValueError(f"Unsupported dtype for gather fill_value {dtype}")
   else:
@@ -472,6 +470,7 @@ class ScatterDimensionNumbers(NamedTuple):
   operand_batching_dims: Sequence[int] = ()
   scatter_indices_batching_dims: Sequence[int] = ()
 
+@partial(api_boundary, repro_api_name="lax.scatter_add")
 def scatter_add(
   operand: ArrayLike, scatter_indices: ArrayLike, updates: ArrayLike,
   dimension_numbers: ScatterDimensionNumbers, *,
@@ -557,7 +556,7 @@ def scatter_add(
       indices_are_sorted=indices_are_sorted, unique_indices=unique_indices,
       mode=GatherScatterMode.from_any(mode))
 
-
+@partial(api_boundary, repro_api_name="lax.scatter_sub")
 def scatter_sub(
     operand: ArrayLike,
     scatter_indices: ArrayLike,
@@ -621,6 +620,7 @@ def scatter_sub(
   )
 
 
+@partial(api_boundary, repro_api_name="lax.scatter_mul")
 def scatter_mul(
   operand: ArrayLike, scatter_indices: ArrayLike, updates: ArrayLike,
   dimension_numbers: ScatterDimensionNumbers, *,
@@ -670,6 +670,7 @@ def scatter_mul(
       indices_are_sorted=indices_are_sorted, unique_indices=unique_indices,
       mode=GatherScatterMode.from_any(mode))
 
+@partial(api_boundary, repro_api_name="lax.scatter_min")
 def scatter_min(
   operand: ArrayLike, scatter_indices: ArrayLike, updates: ArrayLike,
   dimension_numbers: ScatterDimensionNumbers, *,
@@ -719,6 +720,7 @@ def scatter_min(
       indices_are_sorted=indices_are_sorted, unique_indices=unique_indices,
       mode=GatherScatterMode.from_any(mode))
 
+@partial(api_boundary, repro_api_name="lax.scatter_max")
 def scatter_max(
   operand: ArrayLike, scatter_indices: ArrayLike, updates: ArrayLike,
   dimension_numbers: ScatterDimensionNumbers, *,
@@ -1140,7 +1142,7 @@ def dynamic_slice_in_dim(operand: Array | np.ndarray,
 
 
 def dynamic_index_in_dim(operand: Array | np.ndarray,
-                         index: int | Array,
+                         index: ArrayLike,
                          axis: int = 0, keepdims: bool = True,
                          *,
                          allow_negative_indices: bool = True) -> Array:
@@ -1360,11 +1362,10 @@ def _slice_shape_rule(operand, *, start_indices, limit_indices, strides):
     msg = ("slice start_indices must be greater than or equal to zero, "
            "got start_indices of {}.")
     raise TypeError(msg.format(start_indices))
-  if not config.dynamic_shapes.value:
-    if not all(map(operator.ge, limit_indices, start_indices)):
-      msg = ("slice limit_indices must be greater than or equal to start_indices,"
-            " got start_indices {} and limit_indices {}.")
-      raise TypeError(msg.format(start_indices, limit_indices))
+  if not all(map(operator.ge, limit_indices, start_indices)):
+    msg = ("slice limit_indices must be greater than or equal to start_indices,"
+          " got start_indices {} and limit_indices {}.")
+    raise TypeError(msg.format(start_indices, limit_indices))
   diff = tuple(map(operator.sub, limit_indices, start_indices))
   if strides is None or tuple(strides) == (1,) * len(operand.shape):
     return diff
@@ -1415,7 +1416,6 @@ def _slice_sharding_rule(operand, *, start_indices, limit_indices, strides):
   return _get_sharding_for_varying_out_shape(out_shape, operand, 'slicing')
 
 def _slice_transpose_rule(t, operand, *, start_indices, limit_indices, strides):
-  assert ad.is_undefined_primal(operand)
   operand_shape = operand.aval.shape
   if strides is None or np.all(np.equal(strides, 1)):
     pads = zip(start_indices, np.subtract(operand_shape, limit_indices),
@@ -1430,6 +1430,25 @@ def _slice_transpose_rule(t, operand, *, start_indices, limit_indices, strides):
   result = lax.pad(t, lax._const(t, 0), pads)
   assert result.shape == operand_shape, f"{result.shape=} {operand_shape=}"
   return [result]
+
+def _slice_transpose_fancy(out_ct, operand, *, start_indices, limit_indices, strides):
+  assert isinstance(operand, ad.GradAccum)
+  if type(out_ct) is ad_util.Zero: return
+  if isinstance(operand, ad.RefAccum):
+    slices = map(_slice, start_indices, limit_indices, strides)
+    operand.ref.addupdate(out_ct, tuple(slices))
+  else:
+    if strides is None or np.all(np.equal(strides, 1)):
+      pads = zip(start_indices, np.subtract(operand.aval.shape, limit_indices),
+                 (0,) * len(start_indices))
+    else:
+      real_limits = np.add(
+        start_indices,
+        np.where(np.array(out_ct.shape) == 0, 0,
+                 np.add(1, np.multiply(np.subtract(out_ct.shape, 1), strides))))
+      pads = zip(start_indices, np.subtract(operand.aval.shape, real_limits),
+                 np.subtract(strides, 1))
+    operand.accum(lax.pad(out_ct, lax._const(out_ct, 0), pads))
 
 
 def _slice_batching_rule(batched_args, batch_dims, *, start_indices,
@@ -1456,10 +1475,8 @@ slice_p = standard_primitive(_slice_shape_rule, input_dtype, 'slice',
                              sharding_rule=_slice_sharding_rule,
                              vma_rule=partial(core.standard_vma_rule, 'slice'))
 ad.deflinear2(slice_p, _slice_transpose_rule)
+ad.fancy_transposes[slice_p] = _slice_transpose_fancy
 batching.primitive_batchers[slice_p] = _slice_batching_rule
-# TODO(mvoz): A better slice rule for ragged prop, enforcing boundaries
-# or supporting nested jumbles. NYI.
-batching.ragged_prop_rules[slice_p] = batching.ragged_mask_no_op_rule
 
 # Override the standard impl to defer to dynamic_slice whenever possible.
 # This lets us reuse the same program for many applications of slicing for as
@@ -1486,34 +1503,29 @@ def _slice_lower(ctx, x, *, start_indices, limit_indices, strides):
 mlir.register_lowering(slice_p, _slice_lower)
 
 
-def _dynamic_slice_shape_rule(operand, *starts_and_dyn_sizes, slice_sizes):
-  start_indices, dyn = util.split_list(starts_and_dyn_sizes, [operand.ndim])
-  if operand.ndim != len(start_indices):
-    msg = ("dynamic_slice start_indices must have length equal to the number "
-           "of dimensions of the operand, got indices {} for operand shape {}.")
-    raise TypeError(msg.format(start_indices, operand.shape))
-  if len(start_indices) != len(slice_sizes):
-    msg = ("dynamic_slice slice_sizes must have the same length as "
-           "start_indices, got start_indices length {} and slice_sizes {}.")
-    raise TypeError(msg.format(len(start_indices), slice_sizes))
-  if not dyn and not all(map(operator.ge, operand.shape, slice_sizes)):
+def _dynamic_slice_shape_rule(operand, *start_indices, slice_sizes):
+  if not all(map(operator.ge, operand.shape, slice_sizes)):
     msg = ("slice slice_sizes must be less than or equal to operand shape, "
            "got slice_sizes {} for operand shape {}.")
     raise TypeError(msg.format(slice_sizes, operand.shape))
-  if not dyn and not all(ssz >= 0 for ssz in slice_sizes):
+  if not all(ssz >= 0 for ssz in slice_sizes):
     msg = ("slice slice_sizes must be greater than or equal to zero, "
            "got slice_sizes of {}.")
     raise TypeError(msg.format(slice_sizes))
   if any(idx.ndim != 0 for idx in start_indices):
     raise TypeError("start_indices arguments to dynamic_slice must be scalars, "
                     f" got indices {start_indices}")
-  return tuple(lax._merge_dyn_shape(slice_sizes, dyn))
+  return tuple(slice_sizes)
 
 def _dynamic_slice_sharding_rule(operand, *starts_and_dyn_sizes, slice_sizes):
   out_shape = _dynamic_slice_shape_rule(
       operand, *starts_and_dyn_sizes, slice_sizes=slice_sizes)
   return _get_sharding_for_varying_out_shape(out_shape, operand, 'dynamic_slice')
 
+def _dynamic_slice_reduced_rule(out_s, operand, *starts_and_dyn_sizes,
+                                slice_sizes):
+  return out_s.update(spec=out_s.spec.update(
+      reduced=operand.sharding.spec.reduced))
 
 def _dynamic_slice_dtype_rule(operand, *starts_and_dyn_sizes, slice_sizes):
   start_indices, dyn = util.split_list(starts_and_dyn_sizes, [operand.ndim])
@@ -1542,19 +1554,34 @@ def _dynamic_slice_transpose_rule(t, operand, *start_indices, slice_sizes):
     return ([dynamic_update_slice_p.bind(zeros, t, *start_indices)] +
             [None] * len(start_indices))
 
+def _dynamic_slice_transpose_fancy(out_ct, operand, *start_indices, slice_sizes):
+  assert isinstance(operand, ad.GradAccum)
+  assert all(not isinstance(s, ad.GradAccum) for s in start_indices)
+  if type(out_ct) is ad_util.Zero: return
+  if isinstance(operand, ad.RefAccum):
+    operand.ref.addupdate(out_ct, tuple(map(ds, start_indices, slice_sizes)))
+  else:
+    zeros = lax.full(operand.aval.shape, 0, operand.aval.dtype,
+                     sharding=operand.aval.sharding)
+    zeros = core.pvary(zeros, tuple(operand.aval.vma))
+    operand.accum(dynamic_update_slice_p.bind(zeros, out_ct, *start_indices))
+
 def _batch_dynamic_slice_indices(indices, bdims):
   if len(indices) == 0:
     return np.array([], 'int32'), None
   empty_marker = object()
   size = next((x.shape[i] for x, i in zip(indices, bdims) if i is not None),
               empty_marker)
+  out = next(((core.typeof(x).sharding.mesh, core.typeof(x).sharding.spec[i])
+              for x, i in zip(indices, bdims) if i is not None), None)
   if size is empty_marker:
     return lax.concatenate([lax.broadcast(i, (1,)) for i in indices], 0), None
+  out_s = None if out is None else NamedSharding(out[0], P(out[1], None))
   indices = lax.concatenate(
-    [lax.broadcast_in_dim(x, (size, 1),
-                          broadcast_dimensions=((0,) if i is not None else ()))
-     for x, i in zip(indices, bdims)],
-    dimension=1)
+    [lax.broadcast_in_dim(
+        x, (size, 1), broadcast_dimensions=((0,) if i is not None else ()),
+        out_sharding=out_s)
+     for x, i in zip(indices, bdims)], dimension=1)
   return indices, 0
 
 def _dynamic_slice_batching_rule(batched_args, batch_dims, *, slice_sizes):
@@ -1580,63 +1607,35 @@ def _dynamic_slice_batching_rule(batched_args, batch_dims, *, slice_sizes):
     [operand, index, *dyn_slice_sizes],
     [operand_bd, index_bdim, *dyn_slice_size_bds], dimension_numbers=dnums,
     slice_sizes=slice_sizes, unique_indices=True, indices_are_sorted=True,
-    mode=GatherScatterMode.PROMISE_IN_BOUNDS, fill_value=None)
+    mode=GatherScatterMode.CLIP, fill_value=None)
 
-def _dynamic_slice_staging_rule(trace, source_info, x, *starts_and_dyn_sizes,
+def _dynamic_slice_staging_rule(trace, source_info, x, *start_indices,
                                 slice_sizes):
-  start_indices, dyn = util.split_list(starts_and_dyn_sizes, [x.ndim])
-  if not dyn:
-    return trace.default_process_primitive(
-        dynamic_slice_p, (x, *start_indices), dict(slice_sizes=slice_sizes),
-        source_info=source_info)
-  shape = lax._merge_dyn_shape(slice_sizes, dyn)
-  aval = core.DShapedArray(shape, x.dtype, False)
-  return lax._dyn_shape_staging_rule(trace, source_info, dynamic_slice_p, aval,
-                                     x, *starts_and_dyn_sizes,
-                                     slice_sizes=slice_sizes)
+  return trace.default_process_primitive(
+      dynamic_slice_p, (x, *start_indices), dict(slice_sizes=slice_sizes),
+      source_info=source_info)
 
-def _dynamic_slice_typecheck_rule(_, x, *starts_and_dyn_sizes, slice_sizes):
-  start_indices, dyn = util.split_list(starts_and_dyn_sizes, [x.aval.ndim])
-  if not dyn:
-    out_aval, effects = dynamic_slice_p.abstract_eval(
-        x.aval, *(d.aval for d in start_indices), slice_sizes=slice_sizes)
-    return [out_aval], effects
-  else:
-    # TODO(mattjj): perform more checks
-    out_shape = lax._merge_dyn_shape(slice_sizes, dyn)
-    out_shape = [d.val if type(d) is core.Literal else d for d in out_shape]
-    out_aval = core.DShapedArray(tuple(out_shape), x.aval.dtype,
-                                 x.aval.weak_type)
-    return [out_aval], core.no_effects
-
-def _dynamic_slice_padding_rule(in_avals, out_avals, x, *starts_and_dyn,
-                                slice_sizes):
-  x_aval, start_indices_avals, dyn_avals = util.split_list(in_avals, [1, x.ndim])
-  start_indices, dyn = util.split_list(starts_and_dyn, [x.ndim])
-  dyn_ = [a.dtype.bound if type(a.dtype) is core.bint else d
-          for a, d in zip(dyn_avals, dyn)]
-  slice_sizes_ = lax._merge_dyn_shape(slice_sizes, dyn_)
-  start_idx = [d.val if type(d) is core.DArray else d for d in start_indices]
-  return [dynamic_slice(x, start_idx, slice_sizes_)]
+def _dynamic_slice_typecheck_rule(_, x, *start_indices, slice_sizes):
+  out_aval, effects = dynamic_slice_p.abstract_eval(
+      x.aval, *(d.aval for d in start_indices), slice_sizes=slice_sizes)
+  return [out_aval], effects
 
 dynamic_slice_p = standard_primitive(
     _dynamic_slice_shape_rule, _dynamic_slice_dtype_rule, 'dynamic_slice',
     weak_type_rule=_argnum_weak_type(0),
     sharding_rule=_dynamic_slice_sharding_rule,
-    vma_rule=partial(core.standard_vma_rule, 'dynamic_slice'))
+    vma_rule=partial(core.standard_vma_rule, 'dynamic_slice'),
+    reduced_rule=_dynamic_slice_reduced_rule)
 ad.primitive_jvps[dynamic_slice_p] = _dynamic_slice_jvp
 ad.primitive_transposes[dynamic_slice_p] = _dynamic_slice_transpose_rule
+ad.fancy_transposes[dynamic_slice_p] = _dynamic_slice_transpose_fancy
 batching.primitive_batchers[dynamic_slice_p] = _dynamic_slice_batching_rule
 pe.custom_staging_rules[dynamic_slice_p] = _dynamic_slice_staging_rule
 core.custom_typechecks[dynamic_slice_p] = _dynamic_slice_typecheck_rule
-pe.padding_rules[dynamic_slice_p] = _dynamic_slice_padding_rule
 
-def _dynamic_slice_lower(ctx, x, *starts_and_dyn_sizes, slice_sizes):
+def _dynamic_slice_lower(ctx, x, *start_indices, slice_sizes):
   x_aval, *_ = ctx.avals_in
-  start_indices, dyn = util.split_list(starts_and_dyn_sizes, [x_aval.ndim])
   aval_out, = ctx.avals_out
-  if dyn:
-    aval_out = aval_out.update(shape=lax._merge_dyn_shape(slice_sizes, dyn))
   out = mlir.dynamic_slice(ctx, aval_out, x, start_indices=start_indices)
   return [mlir.lower_with_sharding_in_types(ctx, out, aval_out)]
 
@@ -1677,7 +1676,18 @@ def _dynamic_update_slice_unreduced_rule(out_s, operand, update, *start_indices)
         " same axes. Got operand sharding"
         f" {operand.str_short(mesh_axis_types=True)} and update sharding"
         f" {update.str_short(mesh_axis_types=True)}.")
-  return out_s
+  return out_s.update(spec=out_s.spec.update(
+      unreduced=operand.sharding.spec.unreduced))
+
+def _dynamic_update_slice_reduced_rule(out_s, operand, update, *start_indices):
+  if operand.sharding.spec.reduced != update.sharding.spec.reduced:
+    raise core.ShardingTypeError(
+        "dynamic_update_slice operand and update must be reduced along the"
+        " same axes. Got operand sharding"
+        f" {operand.str_short(mesh_axis_types=True)} and update sharding"
+        f" {update.str_short(mesh_axis_types=True)}.")
+  return out_s.update(spec=out_s.spec.update(
+      reduced=operand.sharding.spec.reduced))
 
 def _dynamic_update_slice_dtype_rule(operand, update, *start_indices):
   lax.check_same_dtypes("dynamic_update_slice", operand, update)
@@ -1745,7 +1755,8 @@ dynamic_update_slice_p = standard_primitive(
     _dynamic_update_slice_shape_rule, _dynamic_update_slice_dtype_rule,
     'dynamic_update_slice', sharding_rule=_dynamic_update_slice_sharding_rule,
     vma_rule=partial(core.standard_vma_rule, 'dynamic_update_slice'),
-    unreduced_rule=_dynamic_update_slice_unreduced_rule)
+    unreduced_rule=_dynamic_update_slice_unreduced_rule,
+    reduced_rule=_dynamic_update_slice_reduced_rule)
 ad.primitive_jvps[dynamic_update_slice_p] = _dynamic_update_slice_jvp
 ad.primitive_transposes[dynamic_update_slice_p] = \
     _dynamic_update_slice_transpose_rule
@@ -1937,8 +1948,9 @@ def _gather_shape_rule(operand, indices, *, dimension_numbers,
     slice_size = slice_sizes[i]
     corresponding_input_size = operand.shape[i]
 
-    if not (slice_size >= 0 and
-            corresponding_input_size >= slice_size):
+    if not core.is_empty_shape(indices.shape) and not (
+        slice_size >= 0 and corresponding_input_size >= slice_size
+    ):
       raise TypeError(f"Slice size at index {i} in gather op is out of range, "
                       f"must be within [0, {corresponding_input_size} + 1), "
                       f"got {slice_size}.")
@@ -2114,7 +2126,8 @@ def _gather_sharding_rule(operand, indices, *, dimension_numbers,
     raise core.ShardingTypeError(
         "Use `.at[...].get(out_sharding=)` to provide output PartitionSpec for"
         " the gather indexing as out sharding could not be resolved"
-        " unambiguously (or would require collectives on inputs).")
+        " unambiguously (or would require collectives on inputs). Got"
+        f" {operand=}, {indices=}")
   return NamedSharding(out_mesh, out_spec)
 
 def _gather_fill(operand, indices, *, dimension_numbers, slice_sizes,
@@ -2170,7 +2183,7 @@ def _gather_transpose_rule(t, operand, indices, *, dimension_numbers,
   if type(t) is ad_util.Zero:
     out = ad_util.Zero(operand.aval)
   else:
-    zeros = lax.full(operand.aval.shape, 0, operand.aval.dtype,
+    zeros = lax.full(operand.aval.shape, 0, core.typeof(t).dtype,
                      sharding=operand.aval.sharding)
     zeros = core.pvary(zeros, tuple(operand.aval.vma))
     scatter_dnums = ScatterDimensionNumbers(
@@ -2189,12 +2202,12 @@ def _gather_transpose_rule(t, operand, indices, *, dimension_numbers,
 def _gather_batching_rule(batched_args, batch_dims, *, dimension_numbers,
                           slice_sizes, unique_indices, indices_are_sorted,
                           mode, fill_value):
-  operand, indices, *dyn_slice_sizes = batched_args
-  operand_bdim, indices_bdim, *dyn_slice_size_bds = batch_dims
-  dyn_slice_size_bounds = [b.dtype.bound for b in dyn_slice_sizes]
+  operand, indices = batched_args
+  operand_bdim, indices_bdim = batch_dims
 
   if operand_bdim is not None and indices_bdim is None:
-    operand, operand_bdim = batching.move_stacked_axis(operand, operand_bdim, 0)
+    operand = batching.moveaxis(operand, operand_bdim, 0)
+    operand_bdim = 0
     slice_sizes = (operand.shape[0],) + slice_sizes
     offset_dims = (0,) + tuple(np.add(1, dimension_numbers.offset_dims))
     collapsed_slice_dims = tuple(np.add(1, dimension_numbers.collapsed_slice_dims))
@@ -2209,29 +2222,10 @@ def _gather_batching_rule(batched_args, batch_dims, *, dimension_numbers,
         operand_batching_dims=operand_batching_dims,
         start_indices_batching_dims=dimension_numbers.start_indices_batching_dims,
     )
-    if isinstance(operand_bdim, batching.RaggedAxis):
-      ragged_slice_sizes = batching.bdim_as_shape(operand_bdim, slice_sizes)
-      for orig, fabricated in zip(
-          lax._merge_dyn_shape(slice_sizes, dyn_slice_sizes),
-          ragged_slice_sizes):
-        if isinstance(fabricated, batching.IndexedAxisSize):
-          if not core.same_referent(orig, fabricated.lengths):
-            # Don't know what to do when slicing a ragged dimension with a
-            # different size.  To wit, if the client tries to index outside the
-            # ragged size, the resulting element should be determined by the
-            # out of bounds `mode`, but the underlying gather will only do that
-            # if the client tries to index outside the _padded_ array.  I guess
-            # we should read the mode and apply a mask that writes the correct
-            # fill element into all out-of-bounds locations?
-            raise NotImplementedError
-      bdim_out = batching.shape_as_bdim(
-          operand_bdim.stacked_axis,
-          _gather_shape_computation(indices, dnums, ragged_slice_sizes))
-    else:
-      bdim_out = operand_bdim
+    bdim_out = operand_bdim
     return gather(
         operand, indices, dimension_numbers=dnums,
-        slice_sizes=lax._merge_dyn_shape(slice_sizes, dyn_slice_size_bounds),
+        slice_sizes=slice_sizes,
         unique_indices=unique_indices,
         indices_are_sorted=indices_are_sorted, mode=mode,
         fill_value=fill_value), bdim_out
@@ -2288,18 +2282,6 @@ def _gather_batching_rule(batched_args, batch_dims, *, dimension_numbers,
                   indices_are_sorted=indices_are_sorted, mode=mode,
                   fill_value=fill_value), 0
 
-def _gather_pad_rule(in_avals, out_avals, operand, indices, *,
-                     dimension_numbers, slice_sizes, unique_indices,
-                     indices_are_sorted, mode, fill_value):
-  operand_aval, indices_aval = in_avals
-  if any(isinstance(d, pe.BoundedAxisSize) for d in operand_aval.shape):
-    raise NotImplementedError
-  if mode != GatherScatterMode.PROMISE_IN_BOUNDS:
-    # with fill, jnp.where on operand; with clip, jnp.where on indices
-    raise NotImplementedError
-  return [gather(operand, indices, dimension_numbers=dimension_numbers,
-                 slice_sizes=slice_sizes, mode=mode, fill_value=fill_value)]
-
 gather_p = standard_primitive(
     _gather_shape_rule, _gather_dtype_rule, 'gather',
     weak_type_rule=_argnum_weak_type(0), sharding_rule=_gather_sharding_rule,
@@ -2307,7 +2289,6 @@ gather_p = standard_primitive(
 ad.defjvp(gather_p, _gather_jvp_rule, None)
 ad.primitive_transposes[gather_p] = _gather_transpose_rule
 batching.primitive_batchers[gather_p] = _gather_batching_rule
-pe.padding_rules[gather_p] = _gather_pad_rule
 
 
 def _gather_lower_opaque(ctx, operand, indices, *,
@@ -2333,6 +2314,7 @@ def _gather_lower_opaque(ctx, operand, indices, *,
 def _gather_lower(ctx, operand, indices, *,
                   dimension_numbers, slice_sizes, unique_indices,
                   indices_are_sorted, mode, fill_value):
+  _, indices_aval = ctx.avals_in
   aval_out, = ctx.avals_out
   if dtypes.issubdtype(aval_out.dtype, dtypes.extended):
     return [_gather_lower_opaque(
@@ -2357,7 +2339,7 @@ def _gather_lower(ctx, operand, indices, *,
       start_indices_batching_dims=list(
           dimension_numbers.start_indices_batching_dims
       ),
-      index_vector_dim=len(ctx.avals_in[1].shape) - 1,
+      index_vector_dim=len(indices_aval.shape) - 1,
       offset_dims=list(dimension_numbers.offset_dims),
       start_index_map=list(dimension_numbers.start_index_map),
   )
@@ -2376,6 +2358,9 @@ def _gather_lower(ctx, operand, indices, *,
     }
     return hlo.DynamicGatherOp.build_generic(
         results=results, operands=operands, attributes=attributes).results
+  elif core.is_empty_shape(aval_out.shape):
+    out = mlir.full_like_aval(ctx, 0, aval_out)
+    return [mlir.lower_with_sharding_in_types(ctx, out, aval_out)]
   else:
     out = hlo.gather(operand, indices, dnums, mlir.dense_int_array(slice_sizes),
                      indices_are_sorted=ir.BoolAttr.get(indices_are_sorted))

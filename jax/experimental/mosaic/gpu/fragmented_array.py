@@ -29,12 +29,14 @@ from jaxlib.mlir import ir
 from jaxlib.mlir.dialects import arith
 from jaxlib.mlir.dialects import gpu
 from jaxlib.mlir.dialects import llvm
+from jaxlib.mlir.dialects import nvvm
 from jaxlib.mlir.dialects import math as mlir_math
 from jaxlib.mlir.dialects import memref
 from jaxlib.mlir.dialects import vector
 import numpy as np
 
 from . import utils
+
 
 T = TypeVar("T")
 WARPGROUP_SIZE = utils.WARPGROUP_SIZE
@@ -46,7 +48,7 @@ c = utils.c
 
 
 @dataclasses.dataclass(frozen=True)
-class Tiling:
+class TilingImpl:
   """A tiling expression describing a permutation of elements of an nd-array.
 
   To apply one level of tiling to an array, each of the trailing dimensions (up
@@ -110,23 +112,23 @@ class Tiling:
       shape = (*untiled_dims, *(d * t for d, t in zip(tiled_dims, tile)))
     return shape
 
-  def canonicalize(self) -> Tiling:
+  def canonicalize(self) -> TilingImpl:
     """Returns a canonicalized version of the tiling.
 
     We define a tiling to be canonical if, at each step (except the first one,
     which defines the base tile shape):
 
     1. The tiling partitions at least one dimension in more than 1 tile. For
-       example, the tiling `(8, 8)(8, 8)` is not canonical, as applying it
-       yields a shape `(1, 1, 8, 8)`. We canonicalize it to `(8, 8)`, which
-       allows getting rid of the unnecessary `1` dimensions.
+      example, the tiling `(8, 8)(8, 8)` is not canonical, as applying it
+      yields a shape `(1, 1, 8, 8)`. We canonicalize it to `(8, 8)`, which
+      allows getting rid of the unnecessary `1` dimensions.
     2. The leading dimensions of each tile are not `1`. If canonicalizing a
-       tile in this way leads to an empty tile, then the tile is given shape
-       `(1,)`---which is still a meaningful (final) tile. For example, the
-       tiling `(8, 8)(1, 4)` is not canonical, as applying it yields a shape
-       `(8, 2, 1, 4)`. We canonicalize it to `(8, 8)(4,)`, which allows
-       getting rid of the unnecessary `1` dimension, and yields a shape
-       `(8, 2, 4)`.
+      tile in this way leads to an empty tile, then the tile is given shape
+      `(1,)`---which is still a meaningful (final) tile. For example, the
+      tiling `(8, 8)(1, 4)` is not canonical, as applying it yields a shape
+      `(8, 2, 1, 4)`. We canonicalize it to `(8, 8)(4,)`, which allows
+      getting rid of the unnecessary `1` dimension, and yields a shape
+      `(8, 2, 4)`.
     """
     if len(self.tiles) <= 1:
       return self
@@ -145,7 +147,7 @@ class Tiling:
         continue
       shape = canonical_tile
       new_tiling.append(canonical_tile)
-    return Tiling(tuple(new_tiling))
+    return TilingImpl(tuple(new_tiling))
 
   def tile_strides(self, strides: tuple[int, ...]) -> tuple[int, ...]:
     """Computes the strides of an array after tiling."""
@@ -163,7 +165,7 @@ class Tiling:
     strides[dim] = 0
     return tuple(s == 0 for s in self.tile_strides(tuple(strides)))
 
-  def remove_dimension(self, dim: int) -> Tiling:
+  def remove_dimension(self, dim: int) -> TilingImpl:
     """Returns a tiling with the given dimension removed."""
     tiling_rank = len(self.tiles[0])
     if dim < 0 or dim >= tiling_rank:
@@ -180,7 +182,7 @@ class Tiling:
       if not t:  # If this tile is empty, all other tiles will be empty too.
         break
       tiles.append(t)
-    return Tiling(tuple(tiles))
+    return TilingImpl(tuple(tiles))
 
   def tile_nested_shape_strides(
       self,
@@ -259,6 +261,14 @@ class Tiling:
       indices = (*untiled, *(o * t + i for o, i, t in zip(outer, inner, tile)))
     return indices
 
+# TODO(olechwierowicz): Clean up this once C++ Tiling is always available in JAX build.
+Tiling: Any
+if hasattr(mgpu.dialect, "Tiling"):
+  Tiling = mgpu.dialect.Tiling
+else:
+  Tiling = TilingImpl
+
+
 def enumerate_negative(elems: Sequence[T]) -> Iterable[tuple[int, T]]:
   """Like built-in enumerate, but returns negative indices into the sequence."""
   offset = len(elems)
@@ -267,8 +277,32 @@ def enumerate_negative(elems: Sequence[T]) -> Iterable[tuple[int, T]]:
 
 
 @dataclasses.dataclass(frozen=True)
-class Replicated:
+class ReplicatedImpl:
   times: int
+
+
+# TODO(olechwierowicz): Clean up this once C++ Replicated is always available in JAX build.
+Replicated: Any
+if hasattr(mgpu.dialect, "Replicated"):
+  Replicated = mgpu.dialect.Replicated
+else:
+  Replicated = ReplicatedImpl
+
+
+def cc_method_exists(self, method_name: str):
+  return hasattr(mgpu.dialect, self.__class__.__name__) and hasattr(
+      getattr(mgpu.dialect, self.__class__.__name__), method_name
+  )
+
+
+def dispatch_to_cc_method(self, method_name: str, extract_args_fun, *args, **kwargs):
+  """Dispatches a method call to the corresponding C++ method."""
+  cls = getattr(mgpu.dialect, self.__class__.__name__)
+  instance = cls(*extract_args_fun(self))
+  attr = getattr(instance, method_name)
+  if not callable(attr):
+    return attr
+  return attr(*args, **kwargs)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -359,12 +393,16 @@ class TiledLayout:
 
   @functools.cached_property
   def partitioned_warp_dims(self) -> tuple[int, ...]:
+    if cc_method_exists(self, "partitioned_warp_dims"):
+      return self.dispatch_to_cc("partitioned_warp_dims", check_canonical=False)
     return tuple(
       d for d in self.warp_dims if not isinstance(d, Replicated)
     )
 
   @functools.cached_property
   def partitioned_lane_dims(self) -> tuple[int, ...]:
+    if cc_method_exists(self, "partitioned_lane_dims"):
+      return self.dispatch_to_cc("partitioned_lane_dims", check_canonical=False)
     return tuple(
       d for d in self.lane_dims if not isinstance(d, Replicated)
     )
@@ -408,6 +446,8 @@ class TiledLayout:
     so the tiled shape always ends with this suffix, no matter what array shape
     it's applied to.
     """
+    if cc_method_exists(self, "tiled_tiling_shape"):
+      return self.dispatch_to_cc("tiled_tiling_shape", check_canonical=False)
     base_tile_shape = self.base_tile_shape
     return self.tiling.tile_shape(base_tile_shape)[len(base_tile_shape):]
 
@@ -417,6 +457,8 @@ class TiledLayout:
 
   @property
   def vector_length(self) -> int:
+    if cc_method_exists(self, "vector_length"):
+      return self.dispatch_to_cc("vector_length", check_canonical=False)
     return self.tiled_tiling_shape[self.vector_dim]
 
   def registers_element_type(self, t: ir.Type) -> ir.Type:
@@ -522,6 +564,16 @@ class TiledLayout:
 
   def canonicalize(self) -> TiledLayout:
     """Returns a version of this layout where tiling is canonical."""
+    if cc_method_exists(self, "canonicalize"):
+      c_layout = self.dispatch_to_cc("canonicalize", check_canonical=False)
+      return TiledLayout(
+        tiling=c_layout.tiling,
+        warp_dims=c_layout.warp_dims,
+        lane_dims=c_layout.lane_dims,
+        vector_dim=c_layout.vector_dim,
+        _check_canonical=False
+      )
+
     canonical_tiling = self.tiling.canonicalize()
 
     s = self.base_tile_shape
@@ -575,6 +627,22 @@ class TiledLayout:
         _check_canonical=False,
     )
 
+  def dispatch_to_cc(self, method_name: str, *args, **kwargs):
+    check_canonical = kwargs.pop("check_canonical", True)
+    return dispatch_to_cc_method(
+        self,
+        method_name,
+        lambda inst: [
+            inst.tiling,
+            inst.warp_dims,
+            inst.lane_dims,
+            inst.vector_dim,
+            check_canonical
+        ],
+        *args,
+        **kwargs,
+    )
+
 
 def _tiled_wgmma_layout(shape: tuple[int, ...]):
   """Returns the tiled layout relevant for WGMMA operations.
@@ -615,10 +683,14 @@ class WGSplatFragLayout:
   def can_broadcast_to(self, shape) -> bool:
     """Check that the shape can be broadcast.
 
-    Only dimensions of size 1 can be broadcast. All other dimensions
-    must be the same as the argument shape.
+    All source dimensions must match the target's trailing dimensions by
+    equality or being set to 1 (i.e. we can broadcast 1-sized dimensions or
+    create new leading dimensions).
     """
-    return all(dim1 == dim2 or dim1 == 1 for dim1, dim2 in zip(self.shape[::-1], shape[::-1]))
+    return len(self.shape) <= len(shape) and all(
+        dim1 == dim2 or dim1 == 1
+        for dim1, dim2 in zip(self.shape[::-1], shape[::-1])
+    )
 
   def registers_element_type(self, t: ir.Type) -> ir.Type:
     return t
@@ -656,7 +728,7 @@ class WGStridedFragLayout:
 
     Return None if the shaped type cannot have a strided layout.
     """
-    if not ir.ShapedType.isinstance(shaped_ty):
+    if not isinstance(shaped_ty, ir.ShapedType):
       raise TypeError(shaped_ty)
 
     shaped_ty = ir.ShapedType(shaped_ty)
@@ -760,6 +832,25 @@ WGMMA_LAYOUT_ACC_32BIT = TiledLayout(
     Tiling(((64, 8), (16, 8), (8, 8), (2,), (1,))),
     warp_dims=(-8,),
     lane_dims=(-4, -3),
+    vector_dim=-1,
+)
+# The tiled layout is equivalent to one described here in PTX documentation:
+# https://docs.nvidia.com/cuda/parallel-thread-execution/#wgmma-64n32-a
+# In this layout, we partition the 64x16 tiles over 4 warps into 16x16 tiles.
+# Then, we further split the 16x16 tiles into 8x16 submatrices which are the unit
+# of data that is split across a warp. Since 8*16 = 128, but a warp has only 32
+# threads, we vectorize quadruplets of elements along columns.
+# The assignment of elements to warp lanes is as follows:
+#
+#   0  0  0  0  1  1  1  1  2  2  2  2  3  3  3  3
+#   4  4  4  4  5  5  5  5  6  6  6  6  7  7  7  7
+#   8  8  8  8  9  9  9  9 10 10 10 10 11 11 11 11
+#  12 12 12 12 13 13 13 13 14 14 14 14 15 15 15 15
+#                     ...
+WGMMA_LAYOUT_8BIT = TiledLayout(
+    Tiling(((64, 16), (16, 16), (8, 16), (4,))),
+    warp_dims=(-7,),
+    lane_dims=(-3, -2),
     vector_dim=-1,
 )
 # This tiled layout is similar to the WGMMA layout, only the unit at which we
@@ -884,6 +975,14 @@ TMA_GATHER_INDICES_LAYOUT = TiledLayout(
 )
 
 
+def can_relayout_wgmma_4x_to_wgmma_2x(bitwidth: int) -> bool:
+  return bitwidth == 4
+
+
+def can_relayout_wgmma_2x_to_wgmma(bitwidth: int) -> bool:
+  return bitwidth <= 16
+
+
 @jax.tree_util.register_pytree_node_class
 @dataclasses.dataclass(init=False, frozen=True, slots=True)
 class FragmentedArray:
@@ -909,7 +1008,7 @@ class FragmentedArray:
     object.__setattr__(self, "layout", _layout)
     object.__setattr__(self, "is_signed", _is_signed)
 
-    if (_is_signed is not None) != ir.IntegerType.isinstance(self.mlir_dtype):
+    if (_is_signed is not None) != isinstance(self.mlir_dtype, ir.IntegerType):
       raise TypeError(
           "is_signed must be non-None if and only if the MLIR type is an"
           f" integer type, got {_is_signed=} for {self.mlir_dtype}"
@@ -952,7 +1051,7 @@ class FragmentedArray:
       is_signed: bool | None = None,
       vec_size: int | None = None,
   ) -> FragmentedArray:
-    if not ir.MemRefType.isinstance(ref.type):
+    if not isinstance(ref.type, ir.MemRefType):
       raise TypeError(ref.type)
 
     ref_ty = ir.MemRefType(ref.type)
@@ -981,7 +1080,9 @@ class FragmentedArray:
       case WGSplatFragLayout():
         pass
       case WGStridedFragLayout() | TiledLayout():
-        value = vector.splat(layout.registers_element_type(value.type), value)
+        value = vector.broadcast(
+            layout.registers_element_type(value.type), value
+        )
       case _:
         raise NotImplementedError(layout)
 
@@ -989,6 +1090,38 @@ class FragmentedArray:
         _registers=np.full(layout.registers_shape(shape), value, dtype=object),
         _layout=layout,
         _is_signed=is_signed,
+    )
+
+  @staticmethod
+  def broadcasted_iota(
+      dtype: ir.Type,
+      shape: tuple[int, ...],
+      dimension: int,
+      layout: FragmentedLayout | None = None,
+      *,
+      is_signed: bool | None = None,
+  ) -> FragmentedArray:
+    """Creates a broadcasted iota array along the specified dimension."""
+    if dimension >= len(shape):
+      raise ValueError(
+          "`dimension` must be smaller than the rank of the array."
+      )
+
+    def cast(idx: ir.Value) -> ir.Value:
+      if isinstance(dtype, ir.FloatType):
+        i32 = ir.IntegerType.get_signless(32)
+        return arith.uitofp(dtype, arith.index_cast(i32, idx))
+      return arith.index_cast(dtype, idx)
+
+    return mgpu.FragmentedArray.splat(
+        llvm.mlir_undef(dtype),
+        shape,
+        layout,
+        is_signed=is_signed,
+    ).foreach(
+        lambda _, idx: cast(idx[dimension]),
+        create_array=True,
+        is_signed=is_signed,
     )
 
   @property
@@ -1015,19 +1148,20 @@ class FragmentedArray:
         raise NotImplementedError
 
   def to_layout(self, new_layout: FragmentedLayout) -> FragmentedArray:
-    """Converts the fragmented array to the given layout.
-
-    At the moment, only conversions from ``WGSplatFragLayout`` are supported.
-    """
+    """Converts the fragmented array to the given layout."""
     i32 = ir.IntegerType.get_signless(32)
     c = lambda x: arith.constant(i32, x)
     if self.layout == new_layout:
       return self
     shape = self.shape
     bitwidth = utils.bitwidth(self.mlir_dtype)
+    transpose_pairs = (
+        (WGMMA_LAYOUT, WGMMA_TRANSPOSED_LAYOUT),
+        (TCGEN05_LAYOUT, TCGEN05_TRANSPOSED_LAYOUT),
+    )
     if bitwidth in {16, 32} and (
-        (self.layout == WGMMA_LAYOUT and new_layout == WGMMA_TRANSPOSED_LAYOUT)
-        or (self.layout == TCGEN05_LAYOUT and new_layout == TCGEN05_TRANSPOSED_LAYOUT)
+        (self.layout, new_layout) in transpose_pairs
+        or (new_layout, self.layout) in transpose_pairs
     ):
       is_even_row = arith.cmpi(
           arith.CmpIPredicate.eq,
@@ -1116,10 +1250,11 @@ class FragmentedArray:
       return FragmentedArray(
           _registers=new_regs, _layout=new_layout, _is_signed=self.is_signed,
       )
+    dtype_bitwidth = utils.bitwidth(self.mlir_dtype)
     if (
         self.layout == WGMMA_LAYOUT_UPCAST_2X
         and new_layout == WGMMA_LAYOUT
-        and (dtype_bitwidth := utils.bitwidth(self.mlir_dtype)) <= 16
+        and can_relayout_wgmma_2x_to_wgmma(dtype_bitwidth)
     ):
       assert shape[1] % 16 == 0  # Should be implied by the layout
       new_registers = np.empty(new_layout.registers_shape(shape), dtype=object)
@@ -1208,7 +1343,7 @@ class FragmentedArray:
     if (
         self.layout == WGMMA_LAYOUT_UPCAST_4X
         and new_layout == WGMMA_LAYOUT_UPCAST_2X
-        and utils.bitwidth(self.mlir_dtype) == 4
+        and can_relayout_wgmma_4x_to_wgmma_2x(dtype_bitwidth)
     ):
       assert shape[0] % 64 == 0  # Should be implied by the layout
       assert shape[1] % 32 == 0  # Should be implied by the layout
@@ -1246,9 +1381,8 @@ class FragmentedArray:
       raise NotImplementedError(
           f"Cannot convert from {self.layout} to {new_layout}"
       )
-    [reg] = self.registers.flat
     return type(self).splat(
-        reg, self.shape, new_layout, is_signed=self.is_signed
+        self.registers.item(), self.shape, new_layout, is_signed=self.is_signed
     )
 
   def _pointwise(
@@ -1311,9 +1445,9 @@ class FragmentedArray:
     for idx, reg in np.ndenumerate(self.registers):
       new_regs[idx] = op(reg, *(o.registers[idx] for o in other_arrs))
     reg_ty = new_regs.flat[0].type
-    if ir.VectorType.isinstance(reg_ty):
+    if isinstance(reg_ty, ir.VectorType):
       reg_ty = ir.VectorType(reg_ty).element_type
-    if output_is_signed is None and ir.IntegerType.isinstance(reg_ty):
+    if output_is_signed is None and isinstance(reg_ty, ir.IntegerType):
       output_is_signed = self.is_signed
     return FragmentedArray(
         _registers=new_regs, _layout=self.layout, _is_signed=output_is_signed
@@ -1323,17 +1457,17 @@ class FragmentedArray:
     return self
 
   def __neg__(self):
-    if ir.FloatType.isinstance(self.mlir_dtype):
+    if isinstance(self.mlir_dtype, ir.FloatType):
       return self._pointwise(arith.negf)
-    elif ir.IntegerType.isinstance(self.mlir_dtype):
+    elif isinstance(self.mlir_dtype, ir.IntegerType):
       return 0 - self
     else:
       return NotImplemented
 
   def __add__(self, other):
-    if ir.FloatType.isinstance(self.mlir_dtype):
+    if isinstance(self.mlir_dtype, ir.FloatType):
       return self._pointwise(addf, other)
-    elif ir.IntegerType.isinstance(self.mlir_dtype):
+    elif isinstance(self.mlir_dtype, ir.IntegerType):
       return self._pointwise(arith.addi, other)
     else:
       return NotImplemented
@@ -1342,9 +1476,9 @@ class FragmentedArray:
     return self + other
 
   def __mul__(self, other):
-    if ir.FloatType.isinstance(self.mlir_dtype):
+    if isinstance(self.mlir_dtype, ir.FloatType):
       return self._pointwise(mulf, other)
-    elif ir.IntegerType.isinstance(self.mlir_dtype):
+    elif isinstance(self.mlir_dtype, ir.IntegerType):
       return self._pointwise(arith.muli, other)
     else:
       return NotImplemented
@@ -1353,37 +1487,37 @@ class FragmentedArray:
     return self * other
 
   def __sub__(self, other):
-    if ir.FloatType.isinstance(self.mlir_dtype):
+    if isinstance(self.mlir_dtype, ir.FloatType):
       return self._pointwise(subf, other)
-    elif ir.IntegerType.isinstance(self.mlir_dtype):
+    elif isinstance(self.mlir_dtype, ir.IntegerType):
       return self._pointwise(arith.subi, other)
     else:
       return NotImplemented
 
   def __rsub__(self, other):
-    if ir.FloatType.isinstance(self.mlir_dtype):
+    if isinstance(self.mlir_dtype, ir.FloatType):
       return self._pointwise(lambda s, o: subf(o, s), other)
-    elif ir.IntegerType.isinstance(self.mlir_dtype):
+    elif isinstance(self.mlir_dtype, ir.IntegerType):
       return self._pointwise(lambda s, o: arith.subi(o, s), other)
     else:
       return NotImplemented
 
   def __truediv__(self, other):
-    if not ir.FloatType.isinstance(self.mlir_dtype):
+    if not isinstance(self.mlir_dtype, ir.FloatType):
       return NotImplemented
     return self._pointwise(arith.divf, other)
 
   def __rtruediv__(self, other):
-    if not ir.FloatType.isinstance(self.mlir_dtype):
+    if not isinstance(self.mlir_dtype, ir.FloatType):
       return NotImplemented
     return self._pointwise(lambda s, o: arith.divf(o, s), other)
 
   def __floordiv__(self, other):
-    if ir.FloatType.isinstance(self.mlir_dtype):
+    if isinstance(self.mlir_dtype, ir.FloatType):
       return self._pointwise(
           lambda s, o: mlir_math.floor(arith.divf(s, o)), other
       )
-    elif ir.IntegerType.isinstance(self.mlir_dtype):
+    elif isinstance(self.mlir_dtype, ir.IntegerType):
       if self.is_signed:
         return self._pointwise(arith.floordivsi, other)
       else:
@@ -1392,11 +1526,11 @@ class FragmentedArray:
       return NotImplemented
 
   def __rfloordiv__(self, other):
-    if ir.FloatType.isinstance(self.mlir_dtype):
+    if isinstance(self.mlir_dtype, ir.FloatType):
       return self._pointwise(
           lambda s, o: mlir_math.floor(arith.divf(o, s)), other
       )
-    elif ir.IntegerType.isinstance(self.mlir_dtype):
+    elif isinstance(self.mlir_dtype, ir.IntegerType):
       if self.is_signed:
         return self._pointwise(lambda s, o: arith.floordivsi(o, s), other)
       else:
@@ -1405,7 +1539,7 @@ class FragmentedArray:
       return NotImplemented
 
   def __mod__(self, other):
-    if not ir.IntegerType.isinstance(self.mlir_dtype):
+    if not isinstance(self.mlir_dtype, ir.IntegerType):
       return NotImplemented
     if self.is_signed:
       return self._pointwise(arith.remsi, other)
@@ -1413,7 +1547,7 @@ class FragmentedArray:
       return self._pointwise(arith.remui, other)
 
   def __rmod__(self, other):
-    if not ir.IntegerType.isinstance(self.mlir_dtype):
+    if not isinstance(self.mlir_dtype, ir.IntegerType):
       return NotImplemented
     if self.is_signed:
       return self._pointwise(lambda s, o: arith.remsi(o, s), other)
@@ -1421,12 +1555,12 @@ class FragmentedArray:
       return self._pointwise(lambda s, o: arith.remui(o, s), other)
 
   def __invert__(self):
-    if not ir.IntegerType.isinstance(self.mlir_dtype):
+    if not isinstance(self.mlir_dtype, ir.IntegerType):
       return NotImplemented
     return self ^ ~0
 
   def __or__(self, other):
-    if not ir.IntegerType.isinstance(self.mlir_dtype):
+    if not isinstance(self.mlir_dtype, ir.IntegerType):
       return NotImplemented
     return self._pointwise(arith.ori, other)
 
@@ -1434,7 +1568,7 @@ class FragmentedArray:
     return self | other
 
   def __and__(self, other):
-    if not ir.IntegerType.isinstance(self.mlir_dtype):
+    if not isinstance(self.mlir_dtype, ir.IntegerType):
       return NotImplemented
     return self._pointwise(arith.andi, other)
 
@@ -1442,7 +1576,7 @@ class FragmentedArray:
     return self & other
 
   def __xor__(self, other):
-    if not ir.IntegerType.isinstance(self.mlir_dtype):
+    if not isinstance(self.mlir_dtype, ir.IntegerType):
       return NotImplemented
     return self._pointwise(arith.xori, other)
 
@@ -1498,9 +1632,9 @@ class FragmentedArray:
     )
 
   def _compare(self, other, *, f_pred, si_pred, ui_pred):
-    if ir.FloatType.isinstance(self.mlir_dtype):
+    if isinstance(self.mlir_dtype, ir.FloatType):
       pred = functools.partial(arith.cmpf, f_pred)
-    elif ir.IntegerType.isinstance(self.mlir_dtype):
+    elif isinstance(self.mlir_dtype, ir.IntegerType):
       if self.is_signed:
         pred = functools.partial(arith.cmpi, si_pred)
       else:
@@ -1510,12 +1644,21 @@ class FragmentedArray:
     return self._pointwise(pred, other, output_is_signed=False)
 
   def max(self, other) -> FragmentedArray:
-    if ir.FloatType.isinstance(self.mlir_dtype):
+    if isinstance(self.mlir_dtype, ir.FloatType):
       maximumf = arith.maximumf
-      if ir.F32Type.isinstance(self.mlir_dtype):
+      if isinstance(self.mlir_dtype, ir.F32Type):
         maximumf = self._lift_fast_instr("max.NaN.f32")
+      elif isinstance(self.mlir_dtype, ir.F16Type):
+        maximumf = self._lift_fast_packed_instr("max.NaN.f16x2", "max.NaN.f16")
+      elif isinstance(self.mlir_dtype, ir.BF16Type):
+        maximumf = self._lift_fast_packed_instr("max.NaN.bf16x2", "max.NaN.bf16")
       return self._pointwise(maximumf, other)
-    elif ir.IntegerType.isinstance(self.mlir_dtype):
+    elif isinstance(self.mlir_dtype, ir.IntegerType):
+      width = utils.bitwidth(self.mlir_dtype)
+      if width == 16:
+        sign = "s" if self.is_signed else "u"
+        instr = self._lift_fast_packed_instr(f"max.{sign}16x2", f"max.{sign}16")
+        return self._pointwise(instr, other)
       return self._pointwise(
           arith.maxsi if self.is_signed else arith.maxui, other
       )
@@ -1523,17 +1666,34 @@ class FragmentedArray:
       raise NotImplementedError
 
   def min(self, other) -> FragmentedArray:
-    if ir.FloatType.isinstance(self.mlir_dtype):
-      return self._pointwise(arith.minimumf, other)
-    elif ir.IntegerType.isinstance(self.mlir_dtype):
+    if isinstance(self.mlir_dtype, ir.FloatType):
+      minimumf = arith.minimumf
+      if isinstance(self.mlir_dtype, ir.F32Type):
+        minimumf = self._lift_fast_instr("min.NaN.f32")
+      elif isinstance(self.mlir_dtype, ir.F16Type):
+        minimumf = self._lift_fast_packed_instr("min.NaN.f16x2", "min.NaN.f16")
+      elif isinstance(self.mlir_dtype, ir.BF16Type):
+        minimumf = self._lift_fast_packed_instr("min.NaN.bf16x2", "min.NaN.bf16")
+      return self._pointwise(minimumf, other)
+    elif isinstance(self.mlir_dtype, ir.IntegerType):
+      width = utils.bitwidth(self.mlir_dtype)
+      if width == 16:
+        sign = "s" if self.is_signed else "u"
+        instr = self._lift_fast_packed_instr(f"min.{sign}16x2", f"min.{sign}16")
+        return self._pointwise(instr, other)
       return self._pointwise(
           arith.minsi if self.is_signed else arith.minui, other
       )
     else:
       raise NotImplementedError
 
+  def copysign(self, other: FragmentedArray) -> FragmentedArray:
+    if not isinstance(self.mlir_dtype, ir.FloatType):
+      raise NotImplementedError
+    return self._pointwise(mlir_math.copysign, other)
+
   def exp(self, *, approx: bool = False) -> FragmentedArray:
-    if not ir.FloatType.isinstance(self.mlir_dtype):
+    if not isinstance(self.mlir_dtype, ir.FloatType):
       raise NotImplementedError
     if approx:
       dtype = self.mlir_dtype
@@ -1542,16 +1702,16 @@ class FragmentedArray:
     return self._pointwise(mlir_math.exp)
 
   def exp2(self, *, approx: bool = False) -> FragmentedArray:
-    if not ir.FloatType.isinstance(self.mlir_dtype):
+    if not isinstance(self.mlir_dtype, ir.FloatType):
       raise NotImplementedError
     if approx:
-      if not ir.F32Type.isinstance(self.mlir_dtype):
+      if not isinstance(self.mlir_dtype, ir.F32Type):
         raise NotImplementedError(self.mlir_dtype)
       return self._pointwise(self._lift_fast_instr("ex2.approx.ftz.f32"))
     return self._pointwise(mlir_math.exp2)
 
   def log(self, *, approx: bool = False) -> FragmentedArray:
-    if not ir.FloatType.isinstance(self.mlir_dtype):
+    if not isinstance(self.mlir_dtype, ir.FloatType):
       raise NotImplementedError
     if approx:
       dtype = self.mlir_dtype
@@ -1560,16 +1720,16 @@ class FragmentedArray:
     return self._pointwise(mlir_math.log)
 
   def log2(self, *, approx: bool = False) -> FragmentedArray:
-    if not ir.FloatType.isinstance(self.mlir_dtype):
+    if not isinstance(self.mlir_dtype, ir.FloatType):
       raise NotImplementedError(self.mlir_dtype)
     if approx:
-      if not ir.F32Type.isinstance(self.mlir_dtype):
+      if not isinstance(self.mlir_dtype, ir.F32Type):
         raise NotImplementedError(self.mlir_dtype)
       return self._pointwise(self._lift_fast_instr("lg2.approx.ftz.f32"))
     return self._pointwise(mlir_math.log2)
 
   def sin(self, *, approx: bool = False) -> FragmentedArray:
-    if not ir.FloatType.isinstance(self.mlir_dtype):
+    if not isinstance(self.mlir_dtype, ir.FloatType):
       raise NotImplementedError
     if approx and self.mlir_dtype != ir.F32Type.get():
       raise NotImplementedError
@@ -1578,7 +1738,7 @@ class FragmentedArray:
     )
 
   def cos(self, *, approx: bool = False) -> FragmentedArray:
-    if not ir.FloatType.isinstance(self.mlir_dtype):
+    if not isinstance(self.mlir_dtype, ir.FloatType):
       raise NotImplementedError
     if approx and self.mlir_dtype != ir.F32Type.get():
       raise NotImplementedError
@@ -1587,7 +1747,7 @@ class FragmentedArray:
     )
 
   def tanh(self, *, approx: bool = False) -> FragmentedArray:
-    if not ir.FloatType.isinstance(self.mlir_dtype):
+    if not isinstance(self.mlir_dtype, ir.FloatType):
       raise NotImplementedError
     if approx and self.mlir_dtype != ir.F32Type.get():
       raise NotImplementedError
@@ -1596,13 +1756,42 @@ class FragmentedArray:
     )
 
   def rsqrt(self, *, approx: bool = False) -> FragmentedArray:
-    if not ir.FloatType.isinstance(self.mlir_dtype):
+    if not isinstance(self.mlir_dtype, ir.FloatType):
       raise NotImplementedError
     if approx and self.mlir_dtype != ir.F32Type.get():
       raise NotImplementedError
     return self._pointwise(
         self._lift_fast_instr("rsqrt.approx.f32") if approx else mlir_math.rsqrt
     )
+
+  def abs(self) -> FragmentedArray:
+    if isinstance(self.mlir_dtype, ir.FloatType):
+      return self._pointwise(mlir_math.absf)
+    if isinstance(self.mlir_dtype, ir.IntegerType):
+      return self._pointwise(mlir_math.absi)
+    raise NotImplementedError
+
+  def round(self) -> FragmentedArray:
+    """Same as `lax.round(..., AWAY_FROM_ZERO)`."""
+    if not isinstance(self.mlir_dtype, ir.FloatType):
+      raise NotImplementedError
+    return self._pointwise(mlir_math.round)
+
+  def round_even(self) -> FragmentedArray:
+    """Same as `lax.round(..., TO_NEAREST_EVEN)`."""
+    if not isinstance(self.mlir_dtype, ir.FloatType):
+      raise NotImplementedError
+    return self._pointwise(mlir_math.roundeven)
+
+  def erf(self) -> FragmentedArray:
+    if not isinstance(self.mlir_dtype, ir.FloatType):
+      raise NotImplementedError(self.mlir_dtype)
+    return self._pointwise(mlir_math.erf)
+
+  def atan2(self, other: FragmentedArray) -> FragmentedArray:
+    if not isinstance(self.mlir_dtype, ir.FloatType):
+      raise NotImplementedError(self.mlir_dtype)
+    return self._pointwise(mlir_math.atan2, other)
 
   @staticmethod
   def _lift_fast_instr(
@@ -1620,7 +1809,7 @@ class FragmentedArray:
           )
         else:
           return instr(*args)
-      elif ir.VectorType.isinstance(arg_ty):
+      elif isinstance(arg_ty, ir.VectorType):
         result = llvm.mlir_undef(arg_ty)
         [vec_len] = ir.VectorType(arg_ty).shape
         for i in range(vec_len):
@@ -1644,10 +1833,53 @@ class FragmentedArray:
         raise NotImplementedError(arg_ty)
     return fast_instr
 
+  @staticmethod
+  def _lift_fast_packed_instr(
+      packed_instr: str, single_instr: str,
+  ) -> Callable[[ir.Value, ir.Value], ir.Value]:
+    def fast_instr(*args):
+      arg_ty = original_arg_ty = args[0].type
+      assert all(a.type == arg_ty for a in args)
+      if not isinstance(arg_ty, ir.VectorType):
+        args = [vector.broadcast(ir.VectorType.get((1,), arg_ty), a) for a in args]
+      arg_ty = ir.VectorType(args[0].type)
+      [vec_len] = arg_ty.shape
+      vec_bitwidth = vec_len * utils.bitwidth(arg_ty.element_type)
+      if vec_len == 1 or vec_bitwidth == 32:
+        assert vec_bitwidth.bit_count() == 1
+        if vec_bitwidth == 32:
+          cstr = "r"
+        elif vec_bitwidth == 16:
+          cstr = "h"
+        else:
+          raise NotImplementedError(vec_bitwidth)
+        int_ty = ir.IntegerType.get_signless(vec_bitwidth)
+        args_ptx = ", ".join(f"${i}" for i in range(len(args) + 1))
+        args_int = [utils.bitcast(a, int_ty) for a in args]
+        result_int = llvm.inline_asm(
+            int_ty,
+            args_int,
+            f"{single_instr if vec_len == 1 else packed_instr} {args_ptx};",
+            f"={cstr}" + f",{cstr}" * len(args)
+        )
+        return utils.bitcast(result_int, original_arg_ty)
+      else:
+        assert vec_bitwidth > 32
+        slice_len = 32 // utils.bitwidth(arg_ty.element_type)
+        offset = 0
+        slices = []
+        while offset < vec_len:
+          slice_end = min(offset + slice_len, vec_len)
+          args_slice = [utils.vector_slice(a, slice(offset, slice_end)) for a in args]
+          slices.append(fast_instr(*args_slice))
+          offset = slice_end
+        return utils.vector_concat(slices)
+    return fast_instr
+
   def bitcast(
       self, elt: ir.Type, *, output_is_signed: bool | None = None
   ) -> FragmentedArray:
-    if (output_is_signed is not None) != ir.IntegerType.isinstance(elt):
+    if (output_is_signed is not None) != isinstance(elt, ir.IntegerType):
       raise TypeError(
           "output_is_signed must be non-None if and only if the MLIR type is an"
           f" integer type, got {output_is_signed=} for {elt}"
@@ -1656,7 +1888,7 @@ class FragmentedArray:
     if elt == self.mlir_dtype:
       return self
     reg_type = self.registers.flat[0].type
-    if ir.VectorType.isinstance(reg_type):
+    if isinstance(reg_type, ir.VectorType):
       reg_shape = ir.VectorType(reg_type).shape
       ty = ir.VectorType.get(reg_shape, elt)
     else:
@@ -1667,16 +1899,19 @@ class FragmentedArray:
     )
 
   def __getitem__(self, idx) -> FragmentedArray:
+    base_idx, slice_shape, is_squeezed = utils.parse_indices(idx, self.shape)
+    if isinstance(self.layout, WGSplatFragLayout):
+      shape = tuple(d for d, s in zip(slice_shape, is_squeezed) if not s)
+      return self.splat(self.registers.item(), shape, is_signed=self.is_signed)
     if not isinstance(self.layout, TiledLayout):
       raise NotImplementedError("Only arrays with tiled layouts can be sliced")
-    base_idx, slice_shape, is_squeezed = utils.parse_indices(idx, self.shape)
     if any(isinstance(idx, ir.Value) for idx in base_idx):
       raise ValueError("Only slicing with static indices allowed")
     if any(is_squeezed):
       raise NotImplementedError("Integer indexing not implemented (only slicing allowed)")
     base_tile_shape = self.layout.base_tile_shape
-    if len(base_tile_shape) != len(self.shape):
-      raise NotImplementedError("Tiling has different rank than array")
+    if untiled_rank := len(self.shape) - len(base_tile_shape):
+      base_tile_shape = (1,) * untiled_rank + base_tile_shape
     if any(b % t for b, t in zip(base_idx, base_tile_shape, strict=True)):
       raise ValueError(
           "Base indices of array slices must be aligned to the beginning of a"
@@ -1767,8 +2002,9 @@ class FragmentedArray:
     # Otherwise, mypy is unhappy with using ``idx`` for both range and
     # np.ndenumerate.
     idx: Any
-    reg_type = self.registers.flat[0].type
-    is_vector_reg = ir.VectorType.isinstance(reg_type)
+    any_reg = self.registers.flat[0]
+    reg_type = any_reg.type
+    is_vector_reg = isinstance(reg_type, ir.VectorType)
     reg_shape = tuple(ir.VectorType(reg_type).shape) if is_vector_reg else (1,)
     [vector_len] = reg_shape  # This is meant to be a 1D assertion.
     if (new_reg_bitwidth := utils.bitwidth(new_dtype) * vector_len) % 8:
@@ -1776,6 +2012,42 @@ class FragmentedArray:
           "Register bitwidth in target type must be divisible by 8, got"
           f" {new_reg_bitwidth}"
       )
+    # If the vector originates from a slice (common after relayouts), we
+    # can fuse the slicing into the conversion and reuse many
+    # preprocessing ops (shifts, prmts) accross different vectors.
+    regs_from_32bit_slice = (
+        isinstance(
+            _slice_op := getattr(any_reg.owner, "opview", None),
+            vector.ExtractStridedSliceOp,
+        )
+        and utils.bitwidth(_slice_op.source.type) == 32
+        and _slice_op.strides[0].value == 1
+    )
+    def packed_registers(
+        dst_vector_len: int, *, if_not_sliced: bool
+    ) -> Iterable[tuple[Sequence[tuple[int, ...]], ir.Value]]:
+      """Tries to pack registers up to destination vector length."""
+      if regs_from_32bit_slice and if_not_sliced:
+        for idx, reg in np.ndenumerate(self.registers):
+          yield [idx], reg
+        return
+      generator = np.ndenumerate(self.registers)
+      indices = []
+      regs = []
+      while True:
+        try:
+          for _ in range(max(dst_vector_len // vector_len, 1)):
+            idx, reg = next(generator)
+            indices.append(idx)
+            regs.append(reg)
+          yield indices, utils.vector_concat(regs)
+          regs.clear()
+          indices.clear()
+        except StopIteration:
+          break
+      if regs:
+        yield indices, utils.vector_concat(regs)
+
     if cur_dtype == i4 and new_dtype == f8e4m3fn:
       # The algorithm here is taken from CUTLASS's `NumericArrayConverter`
       # specialization for int4 -> f8e4m3, available at
@@ -1816,27 +2088,11 @@ class FragmentedArray:
         )
       new_registers = np.empty_like(self.registers)
 
-      def packed_registers() -> Iterable[tuple[Sequence[int], ir.Value]]:
-        """Tries to pack registers into groups of 16 bits if vector_len < 4."""
-        generator = np.ndenumerate(self.registers)
-        indices = []
-        regs = []
-        while True:
-          try:
-            for _ in range(max(4 // vector_len, 1)):
-              idx, reg = next(generator)
-              indices.append(cast(int, idx))
-              regs.append(reg)
-            yield indices, utils.vector_concat(regs)
-            regs.clear()
-            indices.clear()
-          except StopIteration:
-            break
-        if regs:
-          yield indices, utils.vector_concat(regs)
-
-      for indices, reg in packed_registers():
-        group_size = ir.VectorType(reg.type).shape[0]
+      # TODO(apaszke,bchetioui): Using 8 helps some (but not all) cases.
+      # TODO(apaszke,bchetioui): Add the slice optimization here.
+      packing_width = 8 if vector_len == 2 else 4
+      for indices, reg in packed_registers(packing_width, if_not_sliced=False):
+        [group_size] = ir.VectorType(reg.type).shape
         assert group_size % vector_len == 0
         int_ty = ir.IntegerType.get_signless(group_size * 4)
         reg_as_i32 = utils.bitcast(reg, int_ty)
@@ -1847,7 +2103,7 @@ class FragmentedArray:
             for part in range(max(group_size // 4, 1))
         ]
         out_vec_int = utils.vector_concat([
-            vector.splat(ir.VectorType.get((1,), i32), out_i32_reg)
+            vector.broadcast(ir.VectorType.get((1,), i32), out_i32_reg)
             for out_i32_reg in out_i32_regs
         ])
         out_vector_len = len(out_i32_regs) * 4
@@ -1871,7 +2127,11 @@ class FragmentedArray:
     if cur_dtype == i4 and self.is_signed and new_dtype == bf16 and vector_len % 2 == 0:
       new_registers = np.empty_like(self.registers)
       out_vec_ty = ir.VectorType.get((vector_len,), new_dtype)
-      for idx, reg in np.ndenumerate(self.registers):
+      # We use packed_registers for consistency, even though the packing is not
+      # really profitable here: the PTX below begins by an op dependent on the
+      # extracted part and so there are no ops that can be shared across packed
+      # parts.
+      for indices, reg in packed_registers(2, if_not_sliced=True):
         # The algorithm here is largely the same as CUTLASS's
         # NumericArrayConverter specialization for int4 -> bf16 casts.
         # We modify it slightly, because we only extract 2 values.
@@ -1887,7 +2147,7 @@ class FragmentedArray:
         # bias coming from flipping the sign bit which is 136 (0x4308 as bits).
         def upcast_i4_to_bf16(reg: ir.Value, reg_shr: ir.Value, part: int):
           assert 0 <= part < 4
-          return llvm.inline_asm(
+          int_reg = llvm.inline_asm(
               i32,
               [reg, reg_shr],
               f"""
@@ -1901,49 +2161,50 @@ class FragmentedArray:
               """,
               "=r,r,r",
           )
-        offset = 0
+          return utils.bitcast(int_reg, ir.VectorType.get((2,), bf16))
+        [group_size] = ir.VectorType(reg.type).shape
+        assert group_size % vector_len == 0
+        assert group_size * 4 <= 32
+        int_ty = ir.IntegerType.get_signless(group_size * 4)
+        # If the vector originates from a slice (common after relayouts), we
+        # can fuse the slicing into the conversion and prevent LLVM from
+        # generating a bunch of shifts to align the vector data to the LSB.
+        # This also lets us share the right shift among more vectors.
         out_int_regs: list[ir.Value] = []
-        for group_size in (8, 4, 2):
-          int_ty = ir.IntegerType.get_signless(group_size * 4)
-          while vector_len - offset >= group_size:
-            # If the vector originates from a slice (common after relayouts), we
-            # can fuse the slicing into the conversion and prevent LLVM from
-            # generating a bunch of shifts to align the vector data to the LSB.
-            # This also lets us share the right shift among more vectors.
-            if (isinstance(slice_op := reg.owner.opview, vector.ExtractStridedSliceOp)
-                and utils.bitwidth(slice_op.source.type) == 32
-                and slice_op.strides[0].value == 1):
-              slice_offset = slice_op.offsets[0].value + offset
-              reg_int = utils.bitcast(slice_op.source, i32)
-              reg_int_shr = arith.shrui(reg_int, c(4, i32))
-              out_int_regs.extend(
-                  upcast_i4_to_bf16(reg_int, reg_int_shr, part=(slice_offset // 2 + part))
-                  for part in range(group_size // 2)
-              )
-            else:
-              reg_slice = utils.vector_slice(reg, slice(offset, offset + group_size))
-              reg_slice_int = utils.bitcast(reg_slice, int_ty)
-              if int_ty != i32:
-                reg_slice_int = arith.extsi(i32, reg_slice_int)
-              reg_slice_int_shr = arith.shrui(reg_slice_int, c(4, i32))
-              out_int_regs.extend(
-                  upcast_i4_to_bf16(reg_slice_int, reg_slice_int_shr, part=part)
-                  for part in range(group_size // 2)
-              )
-            offset += group_size
-        assert offset == vector_len
-        out_vec_int = utils.vector_concat([
-            vector.splat(ir.VectorType.get((1,), i32), reg)
-            for reg in out_int_regs
-        ])
-        new_registers[idx] = utils.bitcast(out_vec_int, out_vec_ty)
+        if regs_from_32bit_slice:
+          slice_op = reg.owner.opview
+          slice_offset = slice_op.offsets[0].value
+          reg_int = utils.bitcast(slice_op.source, i32)
+          reg_int_shr = arith.shrui(reg_int, c(4, i32))
+          assert slice_offset % 2 == 0
+          out_int_regs.extend(
+              upcast_i4_to_bf16(reg_int, reg_int_shr, part=slice_offset // 2 + part)
+              for part in range(group_size // 2)
+          )
+        else:
+          reg_slice_int = utils.bitcast(reg, int_ty)
+          if int_ty != i32:
+            reg_slice_int = arith.extsi(i32, reg_slice_int)
+          reg_slice_int_shr = arith.shrui(reg_slice_int, c(4, i32))
+          out_int_regs.extend(
+              upcast_i4_to_bf16(reg_slice_int, reg_slice_int_shr, part=part)
+              for part in range(group_size // 2)
+          )
+        out_reg = utils.vector_concat(out_int_regs)
+        offset = 0
+        for idx in indices:
+          new_registers[idx] = new_reg = utils.vector_slice(
+              out_reg, slice(offset, offset + vector_len)
+          )
+          offset += vector_len
+          assert new_reg.type == out_vec_ty
       return FragmentedArray(
           _registers=new_registers, _layout=self.layout, _is_signed=None
       )
     if cur_dtype == i4 and self.is_signed and new_dtype == i8 and is_signed:
       new_registers = np.empty_like(self.registers)
       out_vec_ty = ir.VectorType.get((vector_len,), new_dtype)
-      for idx, reg in np.ndenumerate(self.registers):
+      for indices, reg in packed_registers(8, if_not_sliced=True):
         def upcast_i4_to_i8(reg: ir.Value, first_valid_nibble: int = 0):
           # When first_valid_nibble is >0, then only the nibbles in the range
           # [first_valid_nibble, 8) will be upcast and placed in the low
@@ -1980,31 +2241,29 @@ class FragmentedArray:
               utils.bitcast(llvm.extractvalue(i32, out_struct, (i,)), i8_vec)
               for i in range(2)
           ])
+        [group_size] = ir.VectorType(reg.type).shape
+        assert group_size % vector_len == 0
+        assert group_size * 4 <= 32
+        int_ty = ir.IntegerType.get_signless(group_size * 4)
+        if regs_from_32bit_slice:
+          slice_op = reg.owner.opview
+          slice_offset = slice_op.offsets[0].value
+          reg_int = utils.bitcast(slice_op.source, i32)
+          reg_i8 = upcast_i4_to_i8(reg_int, first_valid_nibble=slice_offset)
+        else:
+          reg_slice_int = utils.bitcast(reg, int_ty)
+          if int_ty != i32:
+            reg_slice_int = arith.extsi(i32, reg_slice_int)
+          reg_i8 = upcast_i4_to_i8(reg_slice_int)
+
+        # distribute packed registers to original indices
         offset = 0
-        out_regs: list[ir.Value] = []
-        for group_size in (8, 4, 2):
-          int_ty = ir.IntegerType.get_signless(group_size * 4)
-          while vector_len - offset >= group_size:
-            # If the vector originates from a slice (common after relayouts), we
-            # can fuse the slicing into the conversion and reuse many
-            # preprocessing ops (shifts, prmts) accross different vectors.
-            if (isinstance(slice_op := reg.owner.opview, vector.ExtractStridedSliceOp)
-                and utils.bitwidth(slice_op.source.type) == 32
-                and slice_op.strides[0].value == 1):
-              slice_offset = slice_op.offsets[0].value + offset
-              reg_int = utils.bitcast(slice_op.source, i32)
-              reg_i8 = upcast_i4_to_i8(reg_int, first_valid_nibble=slice_offset)
-            else:
-              reg_slice = utils.vector_slice(reg, slice(offset, offset + group_size))
-              reg_slice_int = utils.bitcast(reg_slice, int_ty)
-              if int_ty != i32:
-                reg_slice_int = arith.extsi(i32, reg_slice_int)
-              reg_i8 = upcast_i4_to_i8(reg_slice_int)
-            out_regs.append(utils.vector_slice(reg_i8, slice(group_size)))
-            offset += group_size
-        assert offset == vector_len
-        new_registers[idx] = new_reg = utils.vector_concat(out_regs)
-        assert new_reg.type == out_vec_ty
+        for idx in indices:
+          new_registers[idx] = new_reg = utils.vector_slice(
+              reg_i8, slice(offset, offset + vector_len)
+          )
+          offset += vector_len
+          assert new_reg.type == out_vec_ty
       return FragmentedArray(
           _registers=new_registers, _layout=self.layout, _is_signed=is_signed
       )
@@ -2088,10 +2347,10 @@ class FragmentedArray:
           _registers=new_registers, _layout=self.layout, _is_signed=is_signed
       )
     # Generic path.
-    from_float = ir.FloatType.isinstance(cur_dtype)
-    to_float = ir.FloatType.isinstance(new_dtype)
-    from_integer = ir.IntegerType.isinstance(cur_dtype)
-    to_integer = ir.IntegerType.isinstance(new_dtype)
+    from_float = isinstance(cur_dtype, ir.FloatType)
+    to_float = isinstance(new_dtype, ir.FloatType)
+    from_integer = isinstance(cur_dtype, ir.IntegerType)
+    to_integer = isinstance(new_dtype, ir.IntegerType)
     if from_float and to_float:
       cur_ty_width = ir.FloatType(cur_dtype).width
       new_ty_width = ir.FloatType(new_dtype).width
@@ -2156,28 +2415,83 @@ class FragmentedArray:
     if isinstance(axis, int):
       axis = (axis,)
     splat_op = None
+    redux_op = None
+    # TODO(apaszke): For associative reductions that reduce both inside and
+    # across warps, we could just have everyone use SMEM atomics instead of
+    # performing an explicit warp reduction in registers.
     if isinstance(op, str):
       match op:
         case "add":
           reduced_elems = math.prod(self.shape[a] for a in axis)
-          if ir.FloatType.isinstance(self.mlir_dtype):
+          if isinstance(self.mlir_dtype, ir.FloatType):
             op = addf
             splat_op = lambda x: arith.mulf(x, c(reduced_elems, x.type))
-          elif ir.IntegerType.isinstance(self.mlir_dtype):
+            # TODO(apaszke): Use redux.sync on Blackwell for f32.
+          elif isinstance(self.mlir_dtype, ir.IntegerType):
             op = arith.addi
             splat_op = lambda x: arith.muli(x, c(reduced_elems, x.type))
+            if utils.bitwidth(self.mlir_dtype) == 32:
+              redux_op = functools.partial(utils.redux, kind=nvvm.ReduxKind.ADD)
           else:
             raise NotImplementedError(self.mlir_dtype)
         case "max":
-          if ir.F32Type.isinstance(self.mlir_dtype):
+          if isinstance(self.mlir_dtype, ir.F32Type):
             op = self._lift_fast_instr("max.NaN.f32")
-          elif ir.FloatType.isinstance(self.mlir_dtype):
+            if utils.get_arch().major == 10:
+              redux_op = functools.partial(utils.redux, kind=nvvm.ReduxKind.FMAX)
+          elif isinstance(self.mlir_dtype, ir.F16Type):
+            op = self._lift_fast_packed_instr("max.NaN.f16x2", "max.NaN.f16")
+          elif isinstance(self.mlir_dtype, ir.BF16Type):
+            op = self._lift_fast_packed_instr("max.NaN.bf16x2", "max.NaN.bf16")
+          elif isinstance(self.mlir_dtype, ir.FloatType):
             op = arith.maximumf
-          elif ir.IntegerType.isinstance(self.mlir_dtype):
+          elif isinstance(self.mlir_dtype, ir.IntegerType):
             op = arith.maxsi if self.is_signed else arith.maxui
+            if utils.bitwidth(self.mlir_dtype) == 32:
+              kind = nvvm.ReduxKind.MAX if self.is_signed else nvvm.ReduxKind.UMAX
+              redux_op = functools.partial(utils.redux, kind=kind)
           else:
             raise NotImplementedError(self.mlir_dtype)
           splat_op = lambda x: x
+        case "min":
+          if isinstance(self.mlir_dtype, ir.F32Type):
+            op = self._lift_fast_instr("min.NaN.f32")
+            if utils.get_arch().major == 10:
+              redux_op = functools.partial(utils.redux, kind=nvvm.ReduxKind.FMIN)
+          elif isinstance(self.mlir_dtype, ir.F16Type):
+            op = self._lift_fast_packed_instr("min.NaN.f16x2", "min.NaN.f16")
+          elif isinstance(self.mlir_dtype, ir.BF16Type):
+            op = self._lift_fast_packed_instr("min.NaN.bf16x2", "min.NaN.bf16")
+          elif isinstance(self.mlir_dtype, ir.FloatType):
+            op = arith.minimumf
+          elif isinstance(self.mlir_dtype, ir.IntegerType):
+            op = arith.minsi if self.is_signed else arith.minui
+          else:
+            raise NotImplementedError(self.mlir_dtype)
+          splat_op = lambda x: x
+        case "prod":
+          reduced_elems = math.prod(self.shape[a] for a in axis)
+          if isinstance(self.mlir_dtype, ir.FloatType):
+            op = arith.mulf
+            # For splat, prod(x, x, ..., x) = x^n
+            splat_op = lambda x: mlir_math.powf(
+                x, c(float(reduced_elems), x.type)
+            )
+          elif isinstance(self.mlir_dtype, ir.IntegerType):
+            op = arith.muli
+            # For splat, use repeated squaring to compute x^n
+            def int_pow(x, n=reduced_elems):
+              result = c(1, x.type)
+              base = x
+              while n > 0:
+                if n % 2 == 1:
+                  result = arith.muli(result, base)
+                base = arith.muli(base, base)
+                n //= 2
+              return result
+            splat_op = int_pow
+          else:
+            raise NotImplementedError(self.mlir_dtype)
         case _:
           raise ValueError(f"Unrecognized reduction operator: {op}")
     assert not isinstance(op, str)
@@ -2262,26 +2576,64 @@ class FragmentedArray:
           scalar_out_reg = (
               scalar if scalar_out_reg is None else op(scalar_out_reg, scalar)
           )
-        out_reg = vector.splat(
+        out_reg = vector.broadcast(
             ir.VectorType.get((1,), out_reg.type.element_type), scalar_out_reg
         )
       # Reduce across warp lanes, if necessary (using warp shuffles).
       if any(reduced_dims[d] for d in layout.partitioned_lane_dims):
-        lane_stride = 1
-        for d in layout.lane_dims[::-1]:  # Iterate minor-to-major
-          if isinstance(d, Replicated):
-            lane_stride *= d.times
-          elif not reduced_dims[d]:
-            lane_stride *= tiled_tiling_shape[d]
-          else:
-            assert lane_stride.bit_count() == 1
-            reduction_size = tiled_tiling_shape[d]
-            while reduction_size > 1:
-              other_out_reg = utils.shfl_bfly(out_reg, lane_stride)
-              out_reg = op(out_reg, other_out_reg)
-              lane_stride *= 2
-              reduction_size //= 2
-        assert lane_stride == WARP_SIZE, lane_stride
+        # TODO(apaszke): Reenable Redux after targeted optimization and benchmarking.
+        redux_op = None
+        if redux_op is not None:
+          mask = [True]  # The bit significance grows together with the index.
+          mask_shift_bits = 0
+          lane_stride = 1
+          for d in layout.lane_dims[::-1]:
+            if isinstance(d, Replicated):
+              size = d.times
+              reduced = False
+            else:
+              size = tiled_tiling_shape[d]
+              reduced = reduced_dims[d]
+            if reduced:
+              mask = mask * size
+            else:
+              mask += [False] * (len(mask) * (size - 1))
+              # This could really be computed as:
+              #     d_idx = (lane_index // lane_stride) % size
+              #     mask_shift += d_idx * lane_stride
+              # but if you look closely enough and realize that strides/sizes
+              # are powers of 2, the div/mod/mul is just an AND, and + is an OR:
+              #     mask_shift |= lane_index & ((size - 1) * lane_stride)
+              # What's more, instead of repeatedly doing the AND/OR, we can just
+              # compute which bits of the lane_index we want to use statically,
+              # and use a single AND operation to extract them after the loop.
+              assert lane_stride.bit_count() == 1 and size.bit_count() == 1
+              mask_shift_bits |= (size - 1) * lane_stride
+            lane_stride *= size
+          mask = sum(1 << i for i, m in enumerate(mask) if m)
+          lane_index = arith.remui(utils.thread_idx(), c(utils.WARP_SIZE, i32))
+          mask_shift = arith.andi(lane_index, arith.constant(i32, mask_shift_bits))
+          dyn_mask = arith.shli(arith.constant(i32, mask), mask_shift)
+          out_reg = redux_op(out_reg, dyn_mask)
+        else:
+          lane_stride = 1
+          for d in layout.lane_dims[::-1]:  # Iterate minor-to-major
+            if isinstance(d, Replicated):
+              lane_stride *= d.times
+            elif not reduced_dims[d]:
+              lane_stride *= tiled_tiling_shape[d]
+            else:
+              assert lane_stride.bit_count() == 1
+              reduction_size = tiled_tiling_shape[d]
+              while reduction_size > 1:
+                other_out_reg = utils.shfl_bfly(out_reg, lane_stride)
+                out_reg = op(out_reg, other_out_reg)
+                lane_stride *= 2
+                reduction_size //= 2
+          assert lane_stride == WARP_SIZE, lane_stride
+      # TODO(apaszke): At the moment we do a barrier for every output register,
+      # which is very expensive. If we have enough scratch, we should just try
+      # using a single barrier for multiple reductions.
       # Reduce across warps in the warpgroup, if necessary.
       if any(reduced_dims[d] for d in layout.partitioned_warp_dims):
         if scratch is None:
@@ -2369,6 +2721,38 @@ class FragmentedArray:
     )
 
   def broadcast(self, shape) -> FragmentedArray:
+    if isinstance(self.layout, WGStridedFragLayout):
+      src_shape, dst_shape = self.layout.shape, shape
+      if len(src_shape) > len(dst_shape):
+        raise ValueError(
+            f"Shape length mismatch. Expected len({src_shape}) <= len({dst_shape})"
+        )
+      if not all(s == 1 or s == d for s, d in zip(src_shape[::-1], dst_shape[::-1])):
+        raise ValueError(
+            "Can broadcast if all source dimensions match trailing target"
+            " dimensions by being equal or set to 1. Broadcasting from"
+            f" {src_shape} to {dst_shape}"
+        )
+      rank_diff = len(dst_shape) - len(src_shape)
+      src_shape = tuple([1] * rank_diff + list(src_shape))
+
+      assert len(src_shape) == len(dst_shape), (src_shape, dst_shape)
+      len_suffix = next(
+          (i for i in range(len(src_shape)) if src_shape[~i] != dst_shape[~i]),
+          len(src_shape)
+      )
+      if len_suffix > 0 and all(x == 1 for x in src_shape[:-len_suffix]):
+        return FragmentedArray(
+            _registers=np.tile(self.registers, np.prod(dst_shape[:-len_suffix])),
+            _layout=WGStridedFragLayout(shape, self.layout.vec_size),
+            _is_signed=self.is_signed,
+        )
+
+      raise NotImplementedError(
+          "Only major-most broadcast for WGStridedFragLayout is implemented."
+          f" Broadcasting from: {src_shape}, to: {dst_shape}."
+      )
+
     if not isinstance(self.layout, WGSplatFragLayout):
       raise NotImplementedError(self.layout)
 
@@ -2384,7 +2768,7 @@ class FragmentedArray:
         _is_signed=self.is_signed,
     )
 
-  def reshape(self, shape) -> FragmentedArray:
+  def reshape(self, shape: tuple[int, ...]) -> FragmentedArray:
     if self.shape == shape:
       return self
     if math.prod(shape) != math.prod(self.shape):
@@ -2393,12 +2777,34 @@ class FragmentedArray:
     match self.layout:
       case WGSplatFragLayout() | WGStridedFragLayout():
         new_layout = dataclasses.replace(self.layout, shape=shape)
+        return FragmentedArray(
+            _registers=self.registers,
+            _layout=new_layout,
+            _is_signed=self.is_signed,
+        )
+      case TiledLayout():
+        base_tile_shape = self.layout.base_tile_shape
+        assert base_tile_shape
+        old_shape_suffix = self.shape[-len(base_tile_shape):]
+        new_shape_suffix = shape[-len(base_tile_shape):]
+        # We already know that old_shape_suffix[0] is divisible by
+        # base_tile_shape[0].
+        if (
+            old_shape_suffix[1:] != new_shape_suffix[1:]
+            or new_shape_suffix[0] % base_tile_shape[0]
+        ):
+          raise ValueError(
+              f"Can't reshape {self.shape} to {shape} with a tiled layout with"
+              f" base tile of {base_tile_shape}"
+          )
+        new_registers_shape = self.layout.registers_shape(shape)
+        return FragmentedArray(
+            _registers=self.registers.reshape(new_registers_shape),
+            _layout=self.layout,
+            _is_signed=self.is_signed,
+        )
       case _:
         raise NotImplementedError(self.layout)
-
-    return FragmentedArray(
-        _registers=self.registers, _layout=new_layout, _is_signed=self.is_signed
-    )
 
   def broadcast_minor(self, n) -> FragmentedArray:
     if len(self.shape) != 1:
@@ -2423,15 +2829,23 @@ class FragmentedArray:
             f" {shape[target_dim]} in shape after broadcast"
         )
     if isinstance(self.layout, WGSplatFragLayout):
-      if isinstance(layout, WGSplatFragLayout):
-        if layout.shape != shape:
-          raise ValueError(
-              f"Layout shape {layout.shape} does not match broadcast shape {shape}"
-          )
+      return type(self).splat(
+        self.registers.item(), shape, layout, is_signed=self.is_signed
+      )
+    if isinstance(self.layout, WGStridedFragLayout) and isinstance(layout, WGStridedFragLayout):
+      new_dims = set(range(len(shape))) - set(source_dimensions)
+      vec_match = self.layout.vec_size == layout.vec_size
+      broadcast_dim_match = new_dims == set(range(len(new_dims)))
+      assert layout.shape == shape, (layout.shape, shape)
+      if vec_match and broadcast_dim_match:
         return FragmentedArray(
-            _registers=self.registers, _layout=layout, _is_signed=self.is_signed,
+            _registers=np.tile(
+                self.registers,
+                np.prod(shape[:len(new_dims)]),
+            ),
+            _layout=layout,
+            _is_signed=self.is_signed,
         )
-      # TODO: Support splat to other layouts
     if not isinstance(self.layout, TiledLayout) or not isinstance(layout, TiledLayout):
       raise NotImplementedError(self.layout, layout)
     if any(d1 >= d2 for d1, d2 in zip(source_dimensions, source_dimensions[1:])):
@@ -2469,7 +2883,7 @@ class FragmentedArray:
 
   def select(self, on_true, on_false):
     if (
-        not ir.IntegerType.isinstance(self.mlir_dtype)
+        not isinstance(self.mlir_dtype, ir.IntegerType)
         or ir.IntegerType(self.mlir_dtype).width != 1
     ):
       raise NotImplementedError
@@ -2513,7 +2927,7 @@ class FragmentedArray:
       # Lazily create new_regs once we know the desired output type.
       if create_array and new_regs is None:
         assert result is not None
-        if ir.VectorType.isinstance(old_reg_type):
+        if isinstance(old_reg_type, ir.VectorType):
           new_reg_type = ir.VectorType.get(old_reg_type.shape, result.type)
         else:
           new_reg_type = result.type
@@ -2522,7 +2936,7 @@ class FragmentedArray:
     for mlir_idx, reg_idx in zip(self.layout.thread_idxs(self.shape), np.ndindex(self.registers.shape), strict=True):
       reg = self.registers[reg_idx]
       assert len(mlir_idx) == len(self.shape), (mlir_idx, self.shape)
-      if ir.VectorType.isinstance(reg.type):
+      if isinstance(reg.type, ir.VectorType):
         [elems] = ir.VectorType(reg.type).shape
         for i in range(elems):
           c_i = c(i, index)
@@ -2562,7 +2976,7 @@ class FragmentedArray:
   def store_untiled(
       self, ref: ir.Value | utils.MultimemRef, *, swizzle: int = 16, optimized: bool = True
   ) -> None:
-    if not ir.MemRefType.isinstance(ref.type):
+    if not isinstance(ref.type, ir.MemRefType):
       raise ValueError(ref)
     match self.layout:
       case WGSplatFragLayout():
@@ -2616,7 +3030,9 @@ class FragmentedArray:
         _load_fun=functools.partial(
             utils.multimem_load_reduce, reduction=reduction, is_signed=is_signed
         ),
-        _f8_as_i8=False,
+        # multimem_load_reduce supports vectors of narrow floats, so we don't
+        # need to do any casting.
+        _narrow_float_as_int=False,
     )
 
   @classmethod
@@ -2675,7 +3091,16 @@ class FragmentedArray:
     else:
       stores = self.transfer_tiled(ref, swizzle, layout, shape, optimized)
       for get, _update, _idx, ptr in stores:
-        llvm.store(get(self.registers), ptr)
+        reg = get(self.registers)
+        reg_ty = ir.VectorType(reg.type)
+        element_bitwidth = utils.bitwidth(reg_ty.element_type)
+        if (
+            isinstance(reg_ty.element_type, ir.FloatType)
+            and element_bitwidth <= 8
+        ):
+          narrow_int = ir.IntegerType.get_signless(element_bitwidth)
+          reg = vector.bitcast(ir.VectorType.get(reg_ty.shape, narrow_int), reg)
+        llvm.store(reg, ptr)
 
   @classmethod
   def load_tiled(
@@ -2687,7 +3112,7 @@ class FragmentedArray:
       layout: FragmentedLayout = WGMMA_LAYOUT,
       optimized: bool = True,
       _load_fun: Callable[[ir.VectorType, ir.Value], ir.Value] = llvm.load,
-      _f8_as_i8: bool = True,
+      _narrow_float_as_int: bool = True,
   ) -> FragmentedArray:
     if not isinstance(layout, TiledLayout):
       raise NotImplementedError(layout)
@@ -2701,19 +3126,22 @@ class FragmentedArray:
     tiling = Tiling((tiled_shape[len(tiled_shape) // 2 :],))
     shape = tiling.untile_shape(tiled_shape)
     reg_ty = ir.VectorType.get((layout.vector_length,), dtype)
-    zero = vector.splat(reg_ty, c(0, dtype))
+    zero = vector.broadcast(reg_ty, c(0, dtype))
     registers = np.full(layout.registers_shape(shape), zero, dtype=object)
-    is_f8 = ir.FloatType.isinstance(dtype) and utils.bitwidth(dtype) == 8
-    i8 = ir.IntegerType.get_signless(8)
-    # f8 data types are not handled by the LLVM dialect, so we need to
-    # transfer them as i8 and bitcast them back to f8.
+    is_narrow_float = (
+        isinstance(dtype, ir.FloatType) and utils.bitwidth(dtype) <= 8
+    )
+    narrow_int = ir.IntegerType.get_signless(utils.bitwidth(dtype))
+    # Narrow floats are not supported by LLVM, so we need to transfer them as
+    # narrow ints and bitcast back to the desired type.
     transfer_ty = ir.VectorType.get(
-        (layout.vector_length,), i8 if is_f8 and _f8_as_i8 else dtype
+        (layout.vector_length,),
+        narrow_int if is_narrow_float and _narrow_float_as_int else dtype
     )
     loads = cls.transfer_tiled(ref, swizzle, layout, shape, optimized)
     for _get, update, _idx, ptr in loads:
       loaded_reg = _load_fun(transfer_ty, ptr)
-      if is_f8 and _f8_as_i8:
+      if is_narrow_float and _narrow_float_as_int:
         loaded_reg = vector.bitcast(reg_ty, loaded_reg)
       update(registers, loaded_reg)
     return cls(_registers=registers, _layout=layout, _is_signed=is_signed)
@@ -2728,12 +3156,19 @@ class FragmentedArray:
       # flattening won't work.
       ref = mgpu.memref_fold(ref, 0, len(ref_ty.shape))
     except ValueError:
-      strides, _ = ref_ty.get_strides_and_offset()
       if vec_size > 1:
-        # TODO(apaszke): We could fold all the pairs of dims that are contiguous
-        # This check is a too strict if we don't do that.
+        ref_ty = ir.MemRefType(ref.type)
+        shape = ref_ty.shape
+        strides, _ = ref_ty.get_strides_and_offset()
+        # Try to fold contiguous dimension pairs.
+        for i in reversed(range(len(shape) - 1)):
+          if strides[i] == shape[i+1] * strides[i+1]:
+            ref = mgpu.memref_fold(ref, i, 2)
+        ref_ty = ir.MemRefType(ref.type)
+        shape = ref_ty.shape
+        strides, _ = ref_ty.get_strides_and_offset()
         has_contiguous_dim = False
-        for size, stride in zip(ref_ty.shape, strides):
+        for size, stride in zip(shape, strides):
           if stride == 1:
             has_contiguous_dim = True
             if size % vec_size != 0:
@@ -2753,6 +3188,7 @@ class FragmentedArray:
           raise ValueError(
               "The reference must have a contiguous dimension when vec_size > 1"
           )
+      layout = WGStridedFragLayout(shape=tuple(ref_ty.shape), vec_size=vec_size)
       idx_gen = layout.thread_idxs(tuple(ref_ty.shape))
     else:
       idx_gen = map(lambda x: [x], layout.linear_thread_idxs())
@@ -2870,10 +3306,9 @@ class FragmentedArray:
     swizzle_group_transfers = 128 // transfer_bytes
     swizzle_groups_per_block = swizzle // 16
     swizzle_block_transfers = swizzle_groups_per_block * swizzle_group_transfers
-    is_f8 = ir.FloatType.isinstance(dtype) and element_bits == 8
-    i8 = ir.IntegerType.get_signless(8)
-    if is_f8:
-      transfer_dtype = ir.VectorType.get((vector_length,), i8)
+    if isinstance(dtype, ir.FloatType) and element_bits <= 8:
+      narrow_int = ir.IntegerType.get_signless(element_bits)
+      transfer_dtype = ir.VectorType.get((vector_length,), narrow_int)
     else:
       transfer_dtype = ir.VectorType.get((vector_length,), dtype)
 
@@ -2966,13 +3401,9 @@ class FragmentedArray:
         return tuple(reg_tiled_idx)
       reg_idxs = [mem_idx_to_reg_idx(idx) for idx in indices.tolist()]
       def get_register(regs, reg_idxs=reg_idxs):
-        def cast_if_f8(x):
-          if is_f8:
-            return vector.bitcast(transfer_dtype, x)
-          return x
         # f8 data types are not handled by the LLVM dialect, so we need to
         # transfer them as i8 and bitcast them back to f8.
-        return plan.select([cast_if_f8(regs[reg_idx]) for reg_idx in reg_idxs])
+        return plan.select([regs[reg_idx] for reg_idx in reg_idxs])
       def update_registers(regs, new, reg_idxs=reg_idxs):
         # TODO(apaszke): If the staggering forms a permutation with a small
         # cycle length, then instead of blending at each step we could construct
@@ -3248,7 +3679,7 @@ def optimization_barrier(*arrays):
   i32 = ir.IntegerType.get_signless(32)
 
   def _repack(regs_it, reg_ty):
-    if not ir.VectorType.isinstance(reg_ty):
+    if not isinstance(reg_ty, ir.VectorType):
       result_reg = next(regs_it)
       assert result_reg.type == reg_ty
       return result_reg
@@ -3269,8 +3700,8 @@ def optimization_barrier(*arrays):
   for array in arrays:
     reg_ty = array.registers.flat[0].type
     dtype = array.mlir_dtype
-    if ir.F32Type.isinstance(dtype) or dtype == i32:
-      if ir.VectorType.isinstance(reg_ty):
+    if isinstance(dtype, ir.F32Type) or dtype == i32:
+      if isinstance(reg_ty, ir.VectorType):
         [vec_len] = ir.VectorType(reg_ty).shape
         array_regs = [  # pylint: disable=g-complex-comprehension
             vector.extract(
@@ -3284,13 +3715,14 @@ def optimization_barrier(*arrays):
       else:
         array_regs = list(array.registers.flat)
       reg_constraint = "r" if dtype == i32 else "f"
-    elif ir.BF16Type.isinstance(dtype) or ir.F16Type.isinstance(dtype):
-      if not ir.VectorType.isinstance(reg_ty):
+    elif utils.bitwidth(dtype) < 32:
+      reg_packing = 4 // utils.bytewidth(dtype)
+      if not isinstance(reg_ty, ir.VectorType):
         raise NotImplementedError(array.mlir_dtype)
       [vec_len] = ir.VectorType(reg_ty).shape
-      if vec_len % 2:
+      if vec_len % reg_packing:
         raise NotImplementedError(vec_len)
-      num_i32_regs = vec_len // 2
+      num_i32_regs = vec_len // reg_packing
       i32_reg_ty = ir.VectorType.get((num_i32_regs,), i32)
       array_regs = [
           vector.extract(
@@ -3339,7 +3771,7 @@ def optimization_barrier(*arrays):
   for array in arrays:
     num_regs = array.registers.size
     reg_ty = array.registers.flat[0].type
-    if ir.VectorType.isinstance(reg_ty):
+    if isinstance(reg_ty, ir.VectorType):
       reg_ty = ir.VectorType(reg_ty)
     new_registers = np.empty((num_regs,), dtype=object)
     for i_vreg in range(num_regs):
@@ -3443,7 +3875,7 @@ def copy_tiled(src: ir.Value, dst: ir.Value, swizzle: int = 16):
   bitwidth = utils.bitwidth(src_ty.element_type)
   # Signedness doesn't matter, but we need to specify something for the
   # intermediate arrays.
-  is_signed = False if ir.IntegerType.isinstance(src_ty.element_type) else None
+  is_signed = False if isinstance(src_ty.element_type, ir.IntegerType) else None
   if utils.is_smem_ref(src_ty) != utils.is_smem_ref(dst_ty):
     if utils.is_smem_ref(src_ty):
       smem_ty, gmem_ty = src_ty, dst_ty

@@ -19,9 +19,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from functools import partial
 import operator
-import math
 import numpy as np
-from typing import Any, Literal
+from typing import Any, Literal, overload
 import warnings
 
 from jax._src import api
@@ -40,8 +39,6 @@ from jax._src.cudnn.scaled_matmul_stablehlo import (
     scaled_matmul_wrapper as cudnn_scaled_matmul,
     scaled_dot_general_wrapper as cudnn_scaled_dot_general,
     BlockScaleConfig)
-from jax._src.interpreters import batching
-from jax._src.interpreters import mlir
 from jax._src.numpy import einsum as jnp_einsum
 from jax._src.numpy import util as numpy_util
 from jax._src.numpy.reductions import _count
@@ -69,8 +66,7 @@ def identity(x: ArrayLike) -> Array:
     Array([-2. , -1. , -0.5, 0. , 0.5, 1. , 2. ], dtype=float32)
 
   """
-  numpy_util.check_arraylike("identity", x)
-  return jnp.asarray(x)
+  return numpy_util.ensure_arraylike("identity", x)
 
 @custom_derivatives.custom_jvp
 @api.jit
@@ -124,10 +120,7 @@ def squareplus(x: ArrayLike, b: ArrayLike = 4) -> Array:
     x : input array
     b : smoothness parameter
   """
-  numpy_util.check_arraylike("squareplus", x)
-  numpy_util.check_arraylike("squareplus", b)
-  x = jnp.asarray(x)
-  b = jnp.asarray(b)
+  x, b = numpy_util.ensure_arraylike("squareplus", x, b)
   y = x + jnp.sqrt(jnp.square(x) + b)
   return y / 2
 
@@ -167,8 +160,7 @@ def sparse_plus(x: ArrayLike) -> Array:
   Args:
     x: input (float)
   """
-  numpy_util.check_arraylike("sparse_plus", x)
-  x = jnp.asarray(x)
+  x = numpy_util.ensure_arraylike("sparse_plus", x)
   return jnp.where(x <= -1.0, 0.0, jnp.where(x >= 1.0, x, (x + 1.0)**2/4))
 
 @api.jit
@@ -183,11 +175,10 @@ def soft_sign(x: ArrayLike) -> Array:
   Args:
     x : input array
   """
-  numpy_util.check_arraylike("soft_sign", x)
-  x_arr = jnp.asarray(x)
+  x_arr = numpy_util.ensure_arraylike("soft_sign", x)
   return x_arr / (jnp.abs(x_arr) + 1)
 
-@partial(api.jit, inline=True)
+@api.jit(inline=True)
 def sigmoid(x: ArrayLike) -> Array:
   r"""Sigmoid activation function.
 
@@ -260,8 +251,7 @@ def silu(x: ArrayLike) -> Array:
   See also:
     :func:`sigmoid`
   """
-  numpy_util.check_arraylike("silu", x)
-  x_arr = jnp.asarray(x)
+  x_arr = numpy_util.ensure_arraylike("silu", x)
   return x_arr * sigmoid(x_arr)
 
 swish = silu
@@ -285,8 +275,7 @@ def mish(x: ArrayLike) -> Array:
   Returns:
     An array.
   """
-  numpy_util.check_arraylike("mish", x)
-  x_arr = jnp.asarray(x)
+  x_arr = numpy_util.ensure_arraylike("mish", x)
   return x_arr * jnp.tanh(softplus(x_arr))
 
 @api.jit
@@ -307,8 +296,7 @@ def log_sigmoid(x: ArrayLike) -> Array:
   See also:
     :func:`sigmoid`
   """
-  numpy_util.check_arraylike("log_sigmoid", x)
-  x_arr = jnp.asarray(x)
+  x_arr = numpy_util.ensure_arraylike("log_sigmoid", x)
   return -softplus(-x_arr)
 
 @api.jit
@@ -333,8 +321,7 @@ def elu(x: ArrayLike, alpha: ArrayLike = 1.0) -> Array:
   See also:
     :func:`selu`
   """
-  numpy_util.check_arraylike("elu", x)
-  x_arr = jnp.asarray(x)
+  x_arr = numpy_util.ensure_arraylike("elu", x)
   return jnp.where(x_arr > 0,
                    x_arr,
                    alpha * jnp.expm1(jnp.where(x_arr > 0, 0., x_arr)))
@@ -363,8 +350,7 @@ def leaky_relu(x: ArrayLike, negative_slope: ArrayLike = 1e-2) -> Array:
   See also:
     :func:`relu`
   """
-  numpy_util.check_arraylike("leaky_relu", x)
-  x_arr = jnp.asarray(x)
+  x_arr = numpy_util.ensure_arraylike("leaky_relu", x)
   return jnp.where(x_arr >= 0, x_arr, negative_slope * x_arr)
 
 @api.jit
@@ -386,8 +372,7 @@ def hard_tanh(x: ArrayLike) -> Array:
   Returns:
     An array.
   """
-  numpy_util.check_arraylike("hard_tanh", x)
-  x_arr = jnp.asarray(x)
+  x_arr = numpy_util.ensure_arraylike("hard_tanh", x)
   return jnp.where(x_arr > 1, 1, jnp.where(x_arr < -1, -1, x_arr))
 
 @api.jit
@@ -448,7 +433,7 @@ def selu(x: ArrayLike) -> Array:
   return scale * elu(x, alpha)
 
 # TODO(phawkins): this jit was found to change numerics in a test. Debug this.
-# @partial(api.jit, static_argnames=("approximate",))
+# @api.jit(static_argnames=("approximate",))
 def gelu(x: ArrayLike, approximate: bool = True) -> Array:
   r"""Gaussian error linear unit activation function.
 
@@ -483,7 +468,7 @@ def gelu(x: ArrayLike, approximate: bool = True) -> Array:
         0.5 * x_arr * (lax.erfc(-x_arr * sqrt_half)), dtype=x_arr.dtype
     )
 
-@partial(api.jit, static_argnames=("axis",))
+@api.jit(static_argnames=("axis",))
 def glu(x: ArrayLike, axis: int = -1) -> Array:
   r"""Gated linear unit activation function.
 
@@ -507,8 +492,7 @@ def glu(x: ArrayLike, axis: int = -1) -> Array:
   See also:
     :func:`sigmoid`
   """
-  numpy_util.check_arraylike("glu", x)
-  x_arr = jnp.asarray(x)
+  x_arr = numpy_util.ensure_arraylike("glu", x)
   size = x_arr.shape[axis]
   assert size % 2 == 0, "axis size must be divisible by 2"
   x1, x2 = jnp.split(x_arr, 2, axis)
@@ -519,7 +503,7 @@ def glu(x: ArrayLike, axis: int = -1) -> Array:
 logsumexp = _logsumexp
 
 
-@partial(api.jit, static_argnames=("axis", "keepdims"))
+@api.jit(static_argnames=("axis", "keepdims"))
 def logmeanexp(
     x: ArrayLike,
     axis: Axis = None,
@@ -548,7 +532,7 @@ def logmeanexp(
   return lse - jnp.log(count)
 
 
-@partial(api.jit, static_argnames=("axis",))
+@api.jit(static_argnames=("axis",))
 def log_softmax(x: ArrayLike,
                 axis: Axis = -1,
                 where: ArrayLike | None = None) -> Array:
@@ -564,7 +548,7 @@ def log_softmax(x: ArrayLike,
   Args:
     x : input array
     axis: the axis or axes along which the :code:`log_softmax` should be
-      computed. Either an integer or a tuple of integers.
+      computed. Either an integer, tuple of integers, or ``None`` (all axes).
     where: Elements to include in the :code:`log_softmax`. The output for any
       masked-out element is minus infinity.
 
@@ -578,8 +562,7 @@ def log_softmax(x: ArrayLike,
   See also:
     :func:`softmax`
   """
-  numpy_util.check_arraylike("log_softmax", x)
-  x_arr = jnp.asarray(x)
+  x_arr = numpy_util.ensure_arraylike("log_softmax", x)
   x_max = jnp.max(x_arr, axis, where=where, initial=-np.inf, keepdims=True)
   x_safe = x_arr if where is None else jnp.where(where, x_arr, -np.inf)
   shifted = x_safe - lax.stop_gradient(x_max)
@@ -592,7 +575,7 @@ def log_softmax(x: ArrayLike,
 
 
 # TODO(phawkins): this jit was found to change numerics in a test. Debug this.
-# @partial(api.jit, static_argnames=("axis",))
+# @api.jit(static_argnames=("axis",))
 def softmax(x: ArrayLike,
             axis: Axis = -1,
             where: ArrayLike | None = None) -> Array:
@@ -608,7 +591,7 @@ def softmax(x: ArrayLike,
     x : input array
     axis: the axis or axes along which the softmax should be computed. The
       softmax output summed across these dimensions should sum to :math:`1`.
-      Either an integer or a tuple of integers.
+      Either an integer, tuple of integers, or ``None`` (all axes).
     where: Elements to include in the :code:`softmax`. The output for any
       masked-out element is zero.
 
@@ -665,7 +648,7 @@ def _softmax_deprecated(
   return result
 
 
-@partial(api.jit, static_argnames=("axis",))
+@api.jit(static_argnames=("axis",))
 def standardize(x: ArrayLike,
                 axis: Axis = -1,
                 mean: ArrayLike | None = None,
@@ -685,8 +668,8 @@ def standardize(x: ArrayLike,
 
   Args:
     x: input array to be standardized.
-    axis: integer or tuple of integers representing the axes along which
-      to standardize. Defaults to the last axis (``-1``).
+    axis: integer, tuple of integers, or ``None`` (all axes), representing the
+      axes along which to standardize. Defaults to the last axis (``-1``).
     mean: optionally specify the mean used for standardization. If not specified,
       then ``x.mean(axis, where=where)`` will be used.
     variance: optionally specify the variance used for standardization. If not
@@ -710,10 +693,15 @@ def standardize(x: ArrayLike,
     # when used in neural network normalization layers
     variance = jnp.mean(
         jnp.square(x), axis, keepdims=True, where=where) - jnp.square(mean)
-  return jnp.subtract(x, jnp.asarray(mean)) * lax.rsqrt(jnp.asarray(variance) + epsilon)
+    # Because we're using a less accurate variance definition, it may return
+    # negative values. This is problematic for the rsqrt, so we clip to 0.
+    # Note that this clipping only matters when the variance is vanishingly
+    # small compared to the mean of x, so the gradient should be unaffected.
+    variance = jnp.clip(variance, 0)
+  return jnp.subtract(x, mean) * lax.rsqrt(variance + epsilon)
 
 # TODO(slebedev): Change the type of `x` to `ArrayLike`.
-@partial(api.jit, static_argnames=("num_classes", "dtype", "axis"))
+@api.jit(static_argnames=("num_classes", "dtype", "axis"))
 def _one_hot(x: Array, num_classes: int, *,
              dtype: DTypeLike, axis: int | AxisName) -> Array:
   num_classes = core.concrete_dim_or_error(
@@ -727,7 +715,7 @@ def _one_hot(x: Array, num_classes: int, *,
       raise ValueError(f"Expected num_classes to match the size of axis {axis}, "
                        f"but {num_classes} != {axis_size}") from None
     axis_idx = lax.axis_index(axis)
-    return jnp.asarray(_dot_product_attention_xla == axis_idx, dtype=dtype)
+    return jnp.asarray(x == axis_idx, dtype=dtype)
   axis = operator.index(axis)  # type: ignore[arg-type]
   lhs = lax.expand_dims(x, (axis,))
   rhs_shape = [1] * x.ndim
@@ -852,8 +840,7 @@ def hard_silu(x: ArrayLike) -> Array:
   See also:
     :func:`hard_sigmoid`
   """
-  numpy_util.check_arraylike("hard_silu", x)
-  x_arr = jnp.asarray(x)
+  x_arr = numpy_util.ensure_arraylike("hard_silu", x)
   return x_arr * hard_sigmoid(x_arr)
 
 hard_swish = hard_silu
@@ -893,7 +880,7 @@ def _get_padding_mask_encoded(T, q_seqlen):
 
 def _apply_masks(logits, mask, is_causal, q_seqlen, kv_seqlen,
                  local_window_size):
-  if mask is None and not is_causal and q_seqlen is None and kv_seqlen is None:
+  if mask is None and not is_causal and q_seqlen is None and kv_seqlen is None and local_window_size is None:
     return logits
 
   combined_mask = jnp.ones_like(logits, dtype=bool)
@@ -920,7 +907,8 @@ def _apply_masks(logits, mask, is_causal, q_seqlen, kv_seqlen,
   return padded_logits
 
 def _dot_product_attention_core(query, key, value, bias, mask, is_causal,
-                                scale, q_seqlen, kv_seqlen, local_window_size):
+                                scale, q_seqlen, kv_seqlen, local_window_size,
+                                return_residual):
   logits_dtype = jnp.promote_types(query.dtype, np.float32)
 
   # If the query and logits dtypes are different, then the default precision
@@ -970,6 +958,12 @@ def _dot_product_attention_core(query, key, value, bias, mask, is_causal,
   if q_seqlen is not None:
     mask = _get_padding_mask_encoded(encoded.shape[1], q_seqlen)
     encoded *= mask.astype(encoded.dtype)
+
+  if return_residual:
+    lse_residual = logsumexp(padded_logits, axis=-1).astype(key.dtype)
+    lse_residual = jnp.transpose(lse_residual, (0, 2, 1))  # B N T -> B T N
+    return encoded, lax.stop_gradient(lse_residual)
+
   return encoded
 
 def _dot_product_attention_xla(
@@ -982,7 +976,8 @@ def _dot_product_attention_xla(
     scale: float,
     q_seqlen: Array | None,
     kv_seqlen: Array | None,
-    local_window_size: tuple[int, int] | None):
+    local_window_size: tuple[int, int] | None,
+    return_residual: bool = False):
 
   B, T, N, H = query.shape
   _, S, K, _ = key.shape
@@ -1002,75 +997,55 @@ def _dot_product_attention_xla(
   mask = _reshape_to_grouped(mask)
   vmapped_fn = api.vmap(
       _dot_product_attention_core,
-      in_axes=(3, None, None, 2, 2, None, None, None, None, None),
+      in_axes=(3, None, None, 2, 2, None, None, None, None, None, None),
       out_axes=3,
   )
-  encoded = vmapped_fn(query, key, value, bias, mask, is_causal, scale,
-                       q_seqlen, kv_seqlen, local_window_size)
-  encoded = jnp.reshape(encoded, (B, T, N, H))
+  output = vmapped_fn(query, key, value, bias, mask, is_causal, scale,
+                       q_seqlen, kv_seqlen, local_window_size, return_residual)
+
+  if return_residual:
+    encoded, lse_residual = output
+    encoded = jnp.reshape(encoded, (B, T, N, H))
+    lse_residual = jnp.reshape(lse_residual, (B, T, N))
+    return encoded, lse_residual
+
+  encoded = jnp.reshape(output, (B, T, N, H))
   return encoded
 
-def bias_fwd_rule(a, query_head_num):
-  return bias_fwd_p.bind(a, query_head_num), a
-def bias_bwd_rule(query_head_num, res, g):
-  a = res
-  if a.shape[0] > 1 or a.shape[-3] != query_head_num:
-    raise ValueError("cuDNN only supports bias gradient when the batch size is "
-                     f"1 and the head number matches the query, but got "
-                     f"B={a.shape[0]}, N={a.shape[-3]}.")
-  return (bias_bwd_p.bind(g, a, query_head_num),)
 
-# This function uses two custom primitives, `bias_fwd` and `bias_bwd`, to work
-# around a cuDNN issue where bias gradients are only supported when the batch
-# size is 1 and the number of heads matches the query.
-# TODO(kaixih@nvidia): Remove this workaround once cuDNN resolves the issue.
-@partial(custom_derivatives.custom_vjp, nondiff_argnums=(1,))
-def check_valid_bias_batch(x, query_head_num):
-  output, _ = bias_fwd_rule(x, query_head_num)
-  return output
-check_valid_bias_batch.defvjp(bias_fwd_rule, bias_bwd_rule)
+@overload
+def dot_product_attention(
+    query: ArrayLike,
+    key: ArrayLike,
+    value: ArrayLike,
+    bias: ArrayLike | None = None,
+    mask: ArrayLike | None = None,
+    *,
+    scale: float | None = None,
+    is_causal: bool = False,
+    query_seq_lengths: ArrayLike | None = None,
+    key_value_seq_lengths: ArrayLike | None = None,
+    local_window_size: int | tuple[int, int] | None = None,
+    implementation: Literal['xla', 'cudnn'] | None = None,
+    return_residual: Literal[False] = ...,
+) -> Array: ...
 
-bias_fwd_p = core.Primitive('bias_fwd')
-bias_fwd_p.multiple_results = False
-bias_bwd_p = core.Primitive('bias_bwd')
-bias_bwd_p.multiple_results = False
-
-def bias_fwd_impl(a, query_head_num):
-  return a
-def bias_bwd_impl(g, a, query_head_num):
-  return g
-bias_fwd_p.def_impl(bias_fwd_impl)
-bias_bwd_p.def_impl(bias_bwd_impl)
-
-def bias_fwd_abstract_eval(a, query_head_num):
-  return core.ShapedArray(a.shape, a.dtype)
-def bias_bwd_abstract_eval(g, a, query_head_num):
-  return core.ShapedArray(g.shape, g.dtype)
-bias_fwd_p.def_abstract_eval(bias_fwd_abstract_eval)
-bias_bwd_p.def_abstract_eval(bias_bwd_abstract_eval)
-
-def bias_fwd_lowering(ctx, a, query_head_num):
-  return [a]
-def bias_bwd_lowering(ctx, g, a, query_head_num):
-  return [g]
-mlir.register_lowering(bias_fwd_p, bias_fwd_lowering)
-mlir.register_lowering(bias_bwd_p, bias_bwd_lowering)
-
-def bias_fwd_batch_rule(batched_args, batch_dims):
-  x, query_head_num = batched_args
-  a = batch_dims[0]
-  output, _ = bias_fwd_rule(x, query_head_num)
-  return output, a
-def bias_bwd_batch_rule(batched_args, batch_dims):
-  g, x, query_head_num = batched_args
-  b = batch_dims[0]
-  *Bs, _, _, _ = x.shape
-  B = math.prod(Bs)
-  x = jnp.reshape(x, (B,) + x.shape[-3:])
-  output, = bias_bwd_rule(query_head_num, x, g)
-  return output, b
-batching.primitive_batchers[bias_fwd_p] = bias_fwd_batch_rule
-batching.primitive_batchers[bias_bwd_p] = bias_bwd_batch_rule
+@overload
+def dot_product_attention(
+    query: ArrayLike,
+    key: ArrayLike,
+    value: ArrayLike,
+    bias: ArrayLike | None = None,
+    mask: ArrayLike | None = None,
+    *,
+    scale: float | None = None,
+    is_causal: bool = False,
+    query_seq_lengths: ArrayLike | None = None,
+    key_value_seq_lengths: ArrayLike | None = None,
+    local_window_size: int | tuple[int, int] | None = None,
+    implementation: Literal['xla', 'cudnn'] | None = None,
+    return_residual: Literal[True] = ...,
+) -> tuple[Array, Array]: ...
 
 def dot_product_attention(
     query: ArrayLike,
@@ -1084,17 +1059,23 @@ def dot_product_attention(
     query_seq_lengths: ArrayLike | None = None,
     key_value_seq_lengths: ArrayLike | None = None,
     local_window_size: int | tuple[int, int] | None = None,
-    implementation: Literal['xla', 'cudnn'] | None = None) -> Array:
+    implementation: Literal['xla', 'cudnn'] | None = None,
+    return_residual: bool = False,
+):
   r"""Scaled dot product attention function.
 
-  Computes the attention function on Query, Key, and Value tensors:
+  Computes the following for each head:
 
   .. math::
 
-    \mathrm{Attention}(Q, K, V)=\mathrm{softmax}(\frac{QK^T}{\sqrt{d_k}})V
+    \mathrm{Attention}(Q, K, V) = \mathrm{softmax}\left( \frac{QK^T}{\sqrt{d}} + B \right) V
 
-  If we define :code:`logits` as the output of :math:`QK^T` and the
-  :code:`probs` as the output of :math:`softmax`.
+  where
+  :math:`Q` is the query matrix,
+  :math:`K` is the key matrix,
+  :math:`V` is the value matrix,
+  :math:`d` is the dimension of each individual query and key,
+  and :math:`B` is the bias matrix (optional).
 
   Throughout this function, we utilize the following uppercase letters to
   represent the shape of array::
@@ -1139,6 +1120,9 @@ def dot_product_attention(
       and the sequence is [0, 1, 2, 3, 4, 5, c, 7, 8, 9], token `c` can attend
       to [3, 4, 5, c, 7, 8]. If a single int is given, it will be interpreted as
       a symmetric window (window_size, window_size).
+    return_residual: Whether to return the logsumexp tensor of shape BTN
+      or BNT to users. See section 3.1.1 in the FlashAttention-2 paper:
+      https://arxiv.org/pdf/2307.08691 to find the definition of logsumexp.
     implementation: A string to control which implementation backend to use.
       Supported strings are `xla`, `cudnn` (cuDNN flash attention). It defaults
       to `None`, which currently falls back to `xla`.
@@ -1146,9 +1130,12 @@ def dot_product_attention(
       will be thrown if its not supported.
 
   Returns:
-    An array of the attention output with the same shape as :code:`query`.
+    If return_residual is False, returns an array of the attention output with
+    the same shape as :code:`query`. If return_residual is True, returns a tuple
+    of (output, residual). The residual is the shape of BTN|TN.
   """
   output_shape = jnp.asarray(query).shape
+  residual_shape = output_shape[:-1]
   def _ensure_4d(t):
     t = jnp.asarray(t)
     dims_to_add = 4 - t.ndim
@@ -1202,6 +1189,7 @@ def dot_product_attention(
           scale=scale_val, q_seqlen=query_seq_lengths,
           kv_seqlen=key_value_seq_lengths,
           local_window_size=local_window_size,
+          return_residual=return_residual,
       )
     case 'cudnn':
       use_padding = (
@@ -1235,8 +1223,14 @@ def dot_product_attention(
       out = cudnn_dot_product_attention(
           query_arr, key_arr, value_arr, bias, mask, query_seq_lengths,
           key_value_seq_lengths, scale=scale_val, mask_type=mask_type,
-          sliding_window_length=sliding_window,
+          sliding_window_length=sliding_window, return_residual=return_residual,
       )
+      if return_residual:
+        # Regardless of input layout, cudnn always returns residual with
+        # (B N T) layout.
+        out, residual = out
+        residual = jnp.transpose(residual, (0, 2, 1)).astype(out.dtype)
+        out = (out, residual)
     case None:
       # TODO(kaixih@nvidia) Automatically select the best backend (defaults to XLA for now).
       out = _dot_product_attention_xla(
@@ -1244,9 +1238,14 @@ def dot_product_attention(
           scale=scale_val, q_seqlen=query_seq_lengths,
           kv_seqlen=key_value_seq_lengths,
           local_window_size=local_window_size,
+          return_residual=return_residual,
       )
     case _:
       raise ValueError(f"Unsupported implementation option: {implementation}")
+
+  if return_residual:
+    out, residual = out
+    return jnp.reshape(out, output_shape), jnp.reshape(residual, residual_shape)
 
   return jnp.reshape(out, output_shape)
 
@@ -1487,8 +1486,7 @@ def log1mexp(x: ArrayLike) -> Array:
     .. [1] Martin Mächler. `Accurately Computing log(1 − exp(−|a|)) Assessed by the Rmpfr package.
       <https://cran.r-project.org/web/packages/Rmpfr/vignettes/log1mexp-note.pdf>`_.
   """
-  numpy_util.check_arraylike("log1mexp", x)
-  x = jnp.asarray(x)
+  x = numpy_util.ensure_arraylike("log1mexp", x)
   c = jnp.log(2.0)
   return jnp.where(
       x < c,

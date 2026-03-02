@@ -7,7 +7,6 @@ scipy>=1.15.2; python_version>="3.13"
 ml_dtypes>=0.5.3
 etils[epath]
 opt-einsum
-portpicker; python_version<"3.14"
 
 # Needed to build wheels
 build
@@ -19,7 +18,7 @@ wheel
 # the requirements files.
 jaxlib
 
-jax-cuda12-plugin; sys_platform == "linux" and python_version<"3.14"
+jax-cuda12-plugin; sys_platform == "linux"
 jax-cuda13-plugin
 jax-cuda12-pjrt; sys_platform == "linux"
 jax-cuda13-pjrt

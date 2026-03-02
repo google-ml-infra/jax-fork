@@ -13,12 +13,15 @@
 # limitations under the License.
 
 """Fusible primitive."""
+from functools import partial
 from typing import Any
 
 import jax
 from jax._src import api_util
 from jax._src import core as jax_core
+from jax._src.interpreters import batching
 from jax._src import linear_util as lu
+from jax._src.traceback_util import api_boundary
 from jax._src import tree_util
 from jax._src import util
 from jax._src.interpreters import mlir
@@ -27,6 +30,12 @@ from jax._src.pallas.fuser import fusion as fusion_lib
 
 fusible_p = jax_core.Primitive('fusible')
 fusible_p.multiple_results = True
+
+def _fusible_is_high(*_, jaxpr, **params):
+  del params
+  return jaxpr.is_high
+
+fusible_p.is_high = _fusible_is_high # type: ignore
 
 
 def _make_trivial_fusion(x: jax.Array) -> fusion_lib.Fusion:
@@ -37,6 +46,7 @@ def _make_trivial_fusion(x: jax.Array) -> fusion_lib.Fusion:
   )
 
 
+@partial(api_boundary, repro_api_name="fuser.fusible")
 def fusible(f=None, *, output_fusion_prefix: Any = True):
   def decorator(f):
     def wrapper(*args):
@@ -84,3 +94,42 @@ mlir.register_lowering(fusible_p, mlir.lower_fun(fusible_p.impl))
 def _(*args, jaxpr, **kwargs):
   del args, kwargs
   return [v.aval for v in jaxpr.outvars], jaxpr.effects
+
+
+def _fusible_trivial_batching_rule(axis_data, args, dims, **kwargs):
+  if axis_data.size != 1:
+    raise NotImplementedError('fusible does not support non-trivial batching')
+
+  unbatched_args = tuple(
+      a if (d is batching.not_mapped or d is None) else a[d]
+      for a, d in zip(args, dims, strict=True)
+  )
+  out_unbatched = fusible_p.bind(*unbatched_args, **kwargs)
+  out = tuple(o[None] for o in out_unbatched)
+
+  return out, (0,) * len(out)
+
+batching.fancy_primitive_batchers[fusible_p] = _fusible_trivial_batching_rule
+
+
+def _fusible_to_lojax(*hi_args, jaxpr, num_consts, **_):
+  const_in_avals = jaxpr.in_aval_qdds[:num_consts]
+  num_lo_consts = sum(len(aval.lo_ty()) for aval in const_in_avals)
+
+  lo_args = [
+      lo_val
+      for aval, x in util.safe_zip(jaxpr.in_aval_qdds, hi_args)
+      for lo_val in (aval.read_loval(x) if aval.has_qdd else aval.lower_val(x))
+  ]
+
+  closed_jaxpr = jax_core.ClosedJaxpr(jaxpr, lo_args[:num_lo_consts])
+
+  lo_jaxpr = pe.lower_jaxpr(closed_jaxpr)
+  all_outs = fusible_p.bind(*lo_args, jaxpr=lo_jaxpr.jaxpr, num_consts=num_lo_consts)
+
+  out_mut, lo_outs = util.split_list(all_outs, [pe.num_himuts_out(jaxpr)])
+  pe.apply_himut(jaxpr, hi_args, out_mut)
+  return pe.raise_lo_outs(jaxpr.out_avals, lo_outs)
+
+
+fusible_p.to_lojax = _fusible_to_lojax

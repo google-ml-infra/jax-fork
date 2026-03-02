@@ -277,7 +277,9 @@ absl::Span<const TracebackEntry> Traceback::RawFrames() const {
   return traceback;
 }
 
-void Traceback::RegisterType(nb::module_& m) {
+bool Traceback::IsEnabled() { return traceback_enabled_.load(); }
+
+void Traceback::Register(nb::module_& m) {
   nb::class_<Traceback::Frame>(m, "Frame")
       .def(nb::init<const nb::str&, const nb::str&, int, int>())
       .def_ro("file_name", &Traceback::Frame::file_name)
@@ -310,7 +312,7 @@ void Traceback::RegisterType(nb::module_& m) {
   auto type = nb::borrow<nb::object>(traceback_type_);
   m.attr("Traceback") = type;
 
-  m.def("tracebacks_enabled", []() { return traceback_enabled_.load(); });
+  m.def("tracebacks_enabled", []() { return Traceback::IsEnabled(); });
   m.def("set_tracebacks_enabled",
         [](bool value) { traceback_enabled_.store(value); });
 

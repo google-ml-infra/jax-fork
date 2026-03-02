@@ -31,6 +31,7 @@ import numpy as np
 from jax._src import config
 from jax._src.lib import weakref_lru_cache as _weakref_lru_cache
 from jax._src.lib import utils as jaxlib_utils
+from jax._src.lib import jaxlib_extension_version
 
 logger = logging.getLogger(__name__)
 
@@ -50,13 +51,13 @@ if TYPE_CHECKING:
   # to that used for builtins.zip in python/typeshed. This supports
   # return types matching input types for up to three arguments.
   @overload
-  def safe_zip(__arg1: Iterable[T1]) -> list[tuple[T1]]: ...
+  def safe_zip(__arg1: Iterable[T1], /) -> list[tuple[T1]]: ...
   @overload
-  def safe_zip(__arg1: Iterable[T1], __arg2: Iterable[T2]) -> list[tuple[T1, T2]]: ...
+  def safe_zip(__arg1: Iterable[T1], __arg2: Iterable[T2], /) -> list[tuple[T1, T2]]: ...
   @overload
-  def safe_zip(__arg1: Iterable[T1], __arg2: Iterable[T2], __arg3: Iterable[T3]) -> list[tuple[T1, T2, T3]]: ...
+  def safe_zip(__arg1: Iterable[T1], __arg2: Iterable[T2], __arg3: Iterable[T3], /) -> list[tuple[T1, T2, T3]]: ...
   @overload
-  def safe_zip(__arg1: Iterable[Any], __arg2: Iterable[Any], __arg3: Iterable[Any], __arg4: Iterable[Any], *args) -> list[tuple[Any, ...]]: ...
+  def safe_zip(__arg1: Iterable[Any], __arg2: Iterable[Any], __arg3: Iterable[Any], __arg4: Iterable[Any], /, *args) -> list[tuple[Any, ...]]: ...
 
   def safe_zip(*args):
     """
@@ -81,16 +82,16 @@ if TYPE_CHECKING:
   # to that used for builtins.map in python/typeshed. This supports
   # checking input types for the callable with up to three arguments.
   @overload
-  def safe_map(f: Callable[[T1], T], __arg1: Iterable[T1]) -> list[T]: ...
+  def safe_map(f: Callable[[T1], T], __arg1: Iterable[T1], /) -> list[T]: ...
 
   @overload
-  def safe_map(f: Callable[[T1, T2], T], __arg1: Iterable[T1], __arg2: Iterable[T2]) -> list[T]: ...
+  def safe_map(f: Callable[[T1, T2], T], __arg1: Iterable[T1], __arg2: Iterable[T2], /) -> list[T]: ...
 
   @overload
-  def safe_map(f: Callable[[T1, T2, T3], T], __arg1: Iterable[T1], __arg2: Iterable[T2], __arg3: Iterable[T3]) -> list[T]: ...
+  def safe_map(f: Callable[[T1, T2, T3], T], __arg1: Iterable[T1], __arg2: Iterable[T2], __arg3: Iterable[T3], /) -> list[T]: ...
 
   @overload
-  def safe_map(f: Callable[..., T], __arg1: Iterable[Any], __arg2: Iterable[Any], __arg3: Iterable[Any], __arg4: Iterable[Any], *args) -> list[T]: ...
+  def safe_map(f: Callable[..., T], __arg1: Iterable[Any], __arg2: Iterable[Any], __arg3: Iterable[Any], __arg4: Iterable[Any], /, *args) -> list[T]: ...
 
   def safe_map(f, *args):
     args = list(map(list, args))
@@ -104,16 +105,16 @@ else:
 
 if TYPE_CHECKING:
   @overload
-  def foreach(f: Callable[[T1], Any], __arg1: Iterable[T1]) -> None: ...
+  def foreach(f: Callable[[T1], Any], __arg1: Iterable[T1], /) -> None: ...
 
   @overload
-  def foreach(f: Callable[[T1, T2], Any], __arg1: Iterable[T1], __arg2: Iterable[T2]) -> None: ...
+  def foreach(f: Callable[[T1, T2], Any], __arg1: Iterable[T1], __arg2: Iterable[T2], /) -> None: ...
 
   @overload
-  def foreach(f: Callable[[T1, T2, T3], Any], __arg1: Iterable[T1], __arg2: Iterable[T2], __arg3: Iterable[T3]) -> None: ...
+  def foreach(f: Callable[[T1, T2, T3], Any], __arg1: Iterable[T1], __arg2: Iterable[T2], __arg3: Iterable[T3], /) -> None: ...
 
   @overload
-  def foreach(f: Callable[..., Any], __arg1: Iterable[Any], __arg2: Iterable[Any], __arg3: Iterable[Any], __arg4: Iterable[Any], *args) -> None: ...
+  def foreach(f: Callable[..., Any], __arg1: Iterable[Any], __arg2: Iterable[Any], __arg3: Iterable[Any], __arg4: Iterable[Any], /, *args) -> None: ...
 
   def foreach(f, *args):
     safe_map(f, *args)
@@ -319,10 +320,10 @@ def register_cache(cache: Any, for_what: str):
 
   Args:
     cache: an object supporting `cache_clear()`, `cache_info()`, and
-    `cache_keys()`, like the result of `functools.lru_cache()`.
+      `cache_keys()`, like the result of `functools.lru_cache()`.
     for_what: a string to identify what this cache is used for. This is
-     used for debugging.
-"""
+       used for debugging.
+  """
   _caches[cache] = for_what
 
 def clear_all_caches():
@@ -333,8 +334,9 @@ memoize = cache(max_size=None)
 
 def _ignore(): return None
 
-def weakref_lru_cache(call: Callable, maxsize=2048,
-                      trace_context_in_key: bool = True):
+def weakref_lru_cache(
+    call: Callable, maxsize=2048, trace_context_in_key: bool = True,
+    explain: Callable | None = None):
   """
   Least recently used cache decorator with weakref support.
 
@@ -342,9 +344,13 @@ def weakref_lru_cache(call: Callable, maxsize=2048,
   and strong refs to all other arguments. In all other respects it should
   behave similar to `functools.lru_cache`. The cache is thread local.
   """
-  cached_call = _weakref_lru_cache.weakref_lru_cache(
-      config.trace_context if trace_context_in_key else _ignore, call, maxsize
-  )
+  if jaxlib_extension_version >= 394:
+    cached_call = _weakref_lru_cache.weakref_lru_cache(  # type: ignore
+        config.trace_context if trace_context_in_key else _ignore, call, maxsize,  # type: ignore
+        explain = lambda: explain if config.explain_cache_misses.value else None)  # type: ignore
+  else:
+    cached_call = _weakref_lru_cache.weakref_lru_cache(
+        config.trace_context if trace_context_in_key else _ignore, call, maxsize)
   register_cache(cached_call, str(call))
   return cached_call
 
@@ -605,8 +611,6 @@ def assert_unreachable(x):
   raise AssertionError(f"Unhandled case: {type(x).__name__}")
 
 def tuple_insert(t: tuple[T, ...], idx: int, val: T) -> tuple[T, ...]:
-  if len(t) == 0 and idx == 0 or idx == -1:
-    return (val,)
   assert 0 <= idx <= len(t), (idx, len(t))
   return t[:idx] + (val,) + t[idx:]
 

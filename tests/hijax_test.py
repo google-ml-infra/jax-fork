@@ -17,6 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import partial
 import itertools as it
+from typing import Any
 import unittest
 
 from absl.testing import absltest, parameterized
@@ -36,8 +37,10 @@ from jax._src import test_util as jtu
 from jax._src.util import safe_zip, safe_map
 from jax._src.state.discharge import run_state
 
-from jax._src.hijax import (HiPrimitive, HiType, Box, new_box, box_set, box_get,
-                            box_effect, register_hitype, ShapedArray, Ty)
+from jax._src.hijax import (
+    HiPrimitive, HiType, Box, new_box, box_set, box_get, box_effect,
+    register_hitype, ShapedArray, Ty, custom_vjp3)
+from jax.experimental.hijax import VJPHiPrimitive
 
 config.parse_flags_with_absl()
 
@@ -169,9 +172,16 @@ class HiTup:
 
 @dataclass(frozen=True)
 class TupTy(HiType):
-  tys: tuple[Ty, ...]
+  tys: tuple[Ty]
+
   def __repr__(self):
     return 'Tup{' + ','.join(a.str_short() for a in self.tys) + '}'
+
+  def __hash__(self):
+    return hash(self.tys)
+
+  def __eq__(self, other):
+    return self.tys == other.tys
 
   def lo_ty(self):
     return list(self.tys)
@@ -184,6 +194,12 @@ class TupTy(HiType):
     elts_iter = iter(elts_flat)
     return HiTup(tuple(ty.raise_val(*it.islice(elts_iter, len(ty.lo_ty())))
                        for ty in self.tys))
+
+  def to_tangent_aval(self):
+    return TupTy(tuple(ty.to_tangent_aval() for ty in self.tys))
+
+  def normalize(self):
+    return TupTy(tuple(ty.normalize() for ty in self.tys))
 
 register_hitype(HiTup, lambda t: TupTy(tuple(map(typeof, t.elts))))
 
@@ -201,6 +217,22 @@ class GetTupElt(HiPrimitive):
 
   def to_lojax(self, tup, *, idx):
     return tup.elts[idx]
+
+  def jvp(self, primals, tangents, *, idx):
+    (tup,), (tup_dot,) = primals, tangents
+    return tup.elts[idx], get_tuple_element(tup_dot, idx)
+
+  def transpose(self, out_bar, tup, *, idx):
+    if ad.is_undefined_primal(tup):
+      tup_ty = tup.aval
+    else:
+      tup_ty = tup
+    out_elts = [
+      jnp.zeros(elt_ty.shape, elt_ty.dtype) for elt_ty in tup_ty.tys
+    ]
+    out_elts[idx] = out_bar
+    return [make_tup(*out_elts)]
+
 get_tup_elt_p = GetTupElt('get_tup_elt')
 
 def make_tup(*elts):
@@ -208,6 +240,158 @@ def make_tup(*elts):
 
 def get_tuple_element(tup, idx):
   return get_tup_elt_p.bind(tup, idx=idx)
+
+@dataclass(frozen=True)
+class ImmutBox:
+  _val: Any
+
+  @property
+  def shape(self):
+    if hasattr(self._val, 'shape'):
+      return self._val.shape
+    leaves = jax.tree.leaves(self._val)
+    if leaves and hasattr(leaves[0], 'shape'):
+      return leaves[0].shape
+    raise AttributeError(f"ImmutBox with value {self._val} has no shape")
+
+  @property
+  def ndim(self):
+    return len(self.shape)
+
+def _is_zero(x):
+  return isinstance(x, ad.Zero)
+
+def _get_aval(x):
+  return x.aval if _is_zero(x) else core.typeof(x)
+
+def immutbox_to_aval(box: ImmutBox) -> 'ImmutBoxTy':
+  leaves, treedef = jax.tree.flatten(box._val, is_leaf=_is_zero)
+  leaf_avals = tuple(map(_get_aval, leaves))
+  return ImmutBoxTy(leaf_avals, treedef)
+
+@dataclass(frozen=True)
+class ImmutBoxTy(HiType):
+  leaf_avals: tuple[core.AbstractValue, ...]
+  treedef: Any
+  has_qdd = False
+
+  @property
+  def shape(self):
+    reconstructed = jax.tree.unflatten(self.treedef, self.leaf_avals)
+    if hasattr(reconstructed, 'shape'):
+      return reconstructed.shape
+    if self.leaf_avals and hasattr(self.leaf_avals[0], 'shape'):
+      return self.leaf_avals[0].shape
+    raise AttributeError(f"ImmutBoxTy with treedef {self.treedef} has no shape")
+
+  @property
+  def ndim(self):
+    return len(self.shape)
+
+  @property
+  def sharding(self):
+    reconstructed = jax.tree.unflatten(self.treedef, self.leaf_avals)
+    if hasattr(reconstructed, 'sharding'):
+      return reconstructed.sharding
+    if self.leaf_avals and hasattr(self.leaf_avals[0], 'sharding'):
+      return self.leaf_avals[0].sharding
+    return None
+
+  def lo_ty(self):
+    return list(self.leaf_avals)
+
+  def lower_val(self, hi_val: ImmutBox):
+    leaves, treedef = jax.tree.flatten(hi_val._val, is_leaf=_is_zero)
+    assert treedef == self.treedef
+    return leaves
+
+  def raise_val(self, *lo_vals):
+    return ImmutBox(jax.tree.unflatten(self.treedef, lo_vals))
+
+  def to_tangent_aval(self):
+    tangent_leaf_avals = tuple(aval.to_tangent_aval() for aval in self.leaf_avals)
+    return ImmutBoxTy(tangent_leaf_avals, self.treedef)
+
+def _map_immutbox_ty(size: int, axis: int | None, aval: ImmutBoxTy) -> ImmutBoxTy:
+  if axis is None:
+    return aval
+  mapped_leaf_avals = tuple(core.mapped_aval(size, axis, leaf_aval)
+                            for leaf_aval in aval.leaf_avals)
+  return ImmutBoxTy(mapped_leaf_avals, aval.treedef)
+
+def _unmap_immutbox_ty(size: int, axis: int | None, explicit_mesh_axis,
+                       aval: ImmutBoxTy) -> ImmutBoxTy:
+  if axis is None:
+    return aval
+  elif isinstance(axis, int):
+    unmapped_leaf_avals = tuple(core.unmapped_aval(size, axis, explicit_mesh_axis, leaf_aval)
+                                for leaf_aval in aval.leaf_avals)
+    return ImmutBoxTy(unmapped_leaf_avals, aval.treedef)
+  else:
+    raise TypeError(axis)
+
+core.aval_mapping_handlers[ImmutBoxTy] = (_map_immutbox_ty, _unmap_immutbox_ty)
+
+class ImmutBoxNew(HiPrimitive):
+  def is_high(self, *leaves, leaf_avals, treedef) -> bool:
+    return True
+
+  def abstract_eval(self, *leaves, leaf_avals, treedef):
+    return ImmutBoxTy(leaf_avals, treedef), set()
+
+  def to_lojax(self, *leaves, leaf_avals, treedef):
+    val = jax.tree.unflatten(treedef, leaves)
+    return ImmutBox(val)
+
+  def jvp(self, primals, tangents, *, leaf_avals, treedef):
+    return (immutbox_new_p.bind(*primals, leaf_avals=leaf_avals, treedef=treedef),
+            immutbox_new_p.bind(*tangents, leaf_avals=leaf_avals, treedef=treedef))
+
+  def transpose(self, out_bar, *leaves, leaf_avals, treedef):
+    val = out_bar._val
+    leaves, _ = jax.tree.flatten(val, is_leaf=_is_zero)
+    return leaves
+
+immutbox_new_p = ImmutBoxNew('immutbox_new')
+
+def immutbox_new(val):
+  leaves, treedef = jax.tree.flatten(val, is_leaf=_is_zero)
+  leaf_avals = tuple(map(_get_aval, leaves))
+  leaves = [ad.instantiate_zeros(leaf) for leaf in leaves]
+  return immutbox_new_p.bind(*leaves, leaf_avals=leaf_avals, treedef=treedef)
+
+class ImmutBoxGet(HiPrimitive):
+  multiple_results = True
+
+  def is_high(self, box_aval) -> bool:
+    return True
+
+  def abstract_eval(self, box_aval):
+    leaf_avals = box_aval.leaf_avals
+    return list(leaf_avals), set()
+
+  def to_lojax(self, box):
+    leaves, _ = jax.tree.flatten(box._val, is_leaf=_is_zero)
+    return tuple(leaves)
+
+  def jvp(self, primals, tangents):
+    (box,), (box_dot,) = primals, tangents
+    return immutbox_get(box), immutbox_get(box_dot)
+
+  def transpose(self, out_bars, box):
+    box_aval = core.typeof(box) if not ad.is_undefined_primal(box) else box.aval
+    treedef = box_aval.treedef
+    reconstructed_cotangent = jax.tree.unflatten(treedef, out_bars)
+    return (immutbox_new(reconstructed_cotangent),)
+
+immutbox_get_p = ImmutBoxGet('immutbox_get')
+
+def immutbox_get(box):
+  leaves = immutbox_get_p.bind(box)
+  box_ty = core.typeof(box)
+  return jax.tree.unflatten(box_ty.treedef, leaves)
+
+register_hitype(ImmutBox, immutbox_to_aval)
 
 
 class HijaxTest(jtu.JaxTestCase):
@@ -409,6 +593,9 @@ class HijaxTest(jtu.JaxTestCase):
     q = ArrayTuple(jnp.zeros((4, 4), 'int8'), jnp.ones(4, 'float32'))
     jax.jit(lambda x: x).lower(q).as_text()  # don't crash
 
+    compiled = jax.jit(lambda x: x).lower(q).compile()
+    compiled(q)  # don't crash
+
   @parameterized.parameters([False, True])
   def test_while_loop(self, jit):
     q = to_qarray(jnp.ones((2, 2), 'float32'))
@@ -476,26 +663,259 @@ class HijaxTest(jtu.JaxTestCase):
     ans = f()
     self.assertEqual(ans, 2)
 
-  def test_closed_over_hitype(self):
-    if not config.vmap_primitive.value:
-      raise unittest.SkipTest("requires vmap_primitive enabled")
+  @parameterized.parameters([False, True])
+  def test_newstyle_hiprimitive(self, jit):
 
-    tup = make_tup(1, 2)
+    class RaiseToStaticPower(VJPHiPrimitive):
+      def __init__(self, in_aval, *, power):
+        self.in_avals = (in_aval,)
+        self.out_aval = in_aval
+        self.params = dict(power=power)
+        super().__init__()
 
-    @jax.custom_vjp
-    def inner(tup):
-      return get_tuple_element(tup, 1)
-    def fwd(tup):
-      assert False
-    def bwd(*_):
-      assert False
-    inner.defvjp(fwd, bwd)
+      def expand(self, x):
+        return x ** self.power
 
-    @jax.jit
-    def f():
-      return inner(tup)
+      def vjp_fwd(self, nzs_in, x):
+        ans = self(x)
+        return (ans, x)
 
-    self.assertEqual(f(), 2)
+      def vjp_bwd(self, res, t, xbar_accum):
+        xbar = t * self.power * raise_to_static_power(res, self.power-1)
+        xbar_accum.accum(xbar)
+
+      def batch(self, _axis_data, args, in_dims):
+        in_dim, = in_dims
+        x, = args
+        return raise_to_static_power(x, self.power), in_dim
+
+      def jvp(self, primals, tangents):
+        (x,), (t,) = primals, tangents
+        return self(x), t * self.power * raise_to_static_power(x, self.power-1)
+
+    def raise_to_static_power(x, power):
+      x_aval = jax.typeof(x)
+      return RaiseToStaticPower(x_aval, power=power)(x)
+
+    def f(x):
+      return raise_to_static_power(x, power=3)
+
+    if jit:
+      f = jax.jit(f)
+      self.assertEqual(f.lower(2.0).compile()(2.0), 8.0)
+
+    self.assertEqual(f(2.0), 8.0)
+    xs = jnp.arange(3.0)
+    self.assertAllClose(jax.vmap(f)(xs), xs**3)
+    self.assertEqual(jax.grad(f)(2.0), 12.0)
+    self.assertEqual(jax.jvp(f, (2.0,), (1.0,)),
+                     (8.0, 12.0))
+
+  @parameterized.parameters([False, True])
+  def test_newstyle_hiprimitive_retval(self, jit):
+
+    class RaiseToStaticPower(VJPHiPrimitive):
+      def __init__(self, in_aval, *, power):
+        self.in_avals = (in_aval,)
+        self.out_aval = in_aval
+        self.params = dict(power=power)
+        super().__init__()
+
+      def expand(self, x):
+        return x ** self.power
+
+      def vjp_fwd(self, nzs_in, x):
+        ans = self(x)
+        return (ans, x)
+
+      def vjp_bwd_retval(self, res, t):
+        return (t * self.power * raise_to_static_power(res, self.power-1),)
+
+      def batch(self, _axis_data, args, in_dims):
+        in_dim, = in_dims
+        x, = args
+        return raise_to_static_power(x, self.power), in_dim
+
+    def raise_to_static_power(x, power):
+      x_aval = jax.typeof(x)
+      return RaiseToStaticPower(x_aval, power=power)(x)
+
+    def f(x):
+      return raise_to_static_power(x, power=3)
+
+    if jit:
+      f = jax.jit(f)
+
+    self.assertEqual(f(2.0), 8.0)
+    xs = jnp.arange(3.0)
+    self.assertAllClose(jax.vmap(f)(xs), xs**3)
+    self.assertEqual(jax.grad(f)(2.0), 12.0)
+
+  def test_newstyle_hiprimitive_defines_both_types_of_vjp_error(self):
+    class RaiseToStaticPower(VJPHiPrimitive):
+      def __init__(self, in_aval, *, power):
+        self.in_avals = (in_aval,)
+        self.out_aval = in_aval
+        self.params = dict(power=power)
+        super().__init__()
+
+      def expand(self, x):
+        return x ** self.power
+
+      def vjp_fwd(self, x):
+        ans = self(x)
+        return (ans, x)
+
+      def vjp_bwd(self, res, t, xbar_accum):
+        xbar = t * self.power * raise_to_static_power(res, self.power-1)
+        xbar_accum.accum(xbar)
+
+      def vjp_bwd_retval(self, res, t):
+        return (t * self.power * raise_to_static_power(res, self.power-1),)
+
+      def batch(self, _axis_data, args, in_dims):
+        in_dim, = in_dims
+        x, = args
+        return raise_to_static_power(x, self.power), in_dim
+
+    def raise_to_static_power(x, power):
+      x_aval = jax.typeof(x)
+      return RaiseToStaticPower(x_aval, power=power)(x)
+
+    def f(x):
+      return raise_to_static_power(x, power=3)
+
+    with self.assertRaises(AttributeError):
+      f(2.0)
+
+  @config.numpy_dtype_promotion('standard')
+  def test_newstyle_hiprimitive_qarray(self):
+
+    @dataclass(frozen=True)  # not NamedTuple, which is a pytree
+    class QArray:
+      qvalue: jax.Array
+      scale: jax.Array
+
+    @dataclass(frozen=True)
+    class QArrayTy(HiType):
+      shape: tuple[int, int]
+
+      def to_tangent_aval(self):
+        return ShapedArray(self.shape, jnp.dtype('float32'))
+
+    register_hitype(QArray, lambda q: QArrayTy(q.qvalue.shape))
+
+    def q(x):
+      return Q(jax.typeof(x))(x)
+
+    def dq(qx):
+      return DQ(jax.typeof(qx))(qx)
+
+    class Q(VJPHiPrimitive):
+      def __init__(self, unquantized_aval):
+        if unquantized_aval.dtype != jnp.dtype('float32'): raise TypeError
+        quantized_aval = QArrayTy(unquantized_aval.shape)
+        self.in_avals = (unquantized_aval,)
+        self.out_aval = quantized_aval
+        self.params = {}
+        super().__init__()
+
+      def expand(self, x):
+        scale = jnp.max(jnp.abs(x)) / 127
+        qvalue = jnp.round(x / scale).astype(jnp.int8)
+        return QArray(qvalue, scale)
+
+      def vjp_fwd(self, nzs_in, x):
+        return self(x), None
+
+      def vjp_bwd_retval(self, _, g):
+        return g,
+
+    class DQ(VJPHiPrimitive):
+      def __init__(self, quantized_aval):
+        unquantized_aval = ShapedArray(quantized_aval.shape, jnp.dtype('float32'))
+        self.in_avals = (quantized_aval,)
+        self.out_aval = unquantized_aval
+        self.params = {}
+        super().__init__()
+
+      def expand(self, qx):
+        return qx.qvalue * qx.scale
+
+      def vjp_fwd(self, nzs_in, qx):
+        return self(qx), None
+
+      def vjp_bwd_retval(self, _, g):
+        return g,
+
+    def f(x):
+      return jnp.sum(dq(q(x)))
+
+    x = jax.random.normal(jax.random.key(0), (3, 3), dtype='float32')
+    g = jax.grad(f)(x)
+
+  def test_symbolic_zeros(self):
+
+    class Mul(VJPHiPrimitive):
+      def __init__(self, aval):
+        self.in_avals = (aval, aval)
+        self.out_aval = aval
+        self.params = {}
+        super().__init__()
+
+      def expand(self, x, y):
+        return x * y
+
+      def vjp_fwd(self, nzs_in, x, y):
+        assert list(nzs_in) == list(nzs_in_)  # defined below
+        ans = self(x, y)
+        return ans, (x, y)
+
+      def vjp_bwd(self, res, g, x_acc, y_acc):
+        assert list(nzs_in_) == [not isinstance(x_acc, ad.NullAccum),
+                                 not isinstance(y_acc, ad.NullAccum)]
+        x, y = res
+        x_acc.accum(g * y)
+        y_acc.accum(x * g)
+
+    def mul(x, y):
+      return Mul(typeof(x))(x, y)
+
+    nzs_in_ = (True, False)
+    self.assertAllClose(jax.grad(mul)(2., 3.), 3., check_dtypes=False)
+
+    nzs_in_ = (False, True)
+    self.assertAllClose(jax.grad(mul, 1)(2., 3.), 2., check_dtypes=False)
+
+  def test_symbolic_zeros_retval(self):
+
+    class Mul(VJPHiPrimitive):
+      def __init__(self, aval):
+        self.in_avals = (aval, aval)
+        self.out_aval = aval
+        self.params = {}
+        super().__init__()
+
+      def expand(self, x, y):
+        return x * y
+
+      def vjp_fwd(self, nzs_in, x, y):
+        assert list(nzs_in) == list(nzs_in_)  # defined below
+        ans = self(x, y)
+        return ans, (x, y)
+
+      def vjp_bwd_retval(self, res, g):
+        x, y = res
+        return (g * y, x * g)
+
+    def mul(x, y):
+      return Mul(typeof(x))(x, y)
+
+    nzs_in_ = (True, False)
+    self.assertAllClose(jax.grad(mul)(2., 3.), 3., check_dtypes=False)
+
+    nzs_in_ = (False, True)
+    self.assertAllClose(jax.grad(mul, 1)(2., 3.), 2., check_dtypes=False)
 
 
 class BoxTest(jtu.JaxTestCase):
@@ -756,6 +1176,32 @@ class BoxTest(jtu.JaxTestCase):
       f = jax.jit(f)
 
     jax.grad(partial(f, box))(1.0)
+    self.assertAllClose(box.get(), 2.0)
+
+  @parameterized.parameters([False, True])
+  def test_custom_vjp_primal(self, jit):
+    box = Box(0.0)
+
+    @custom_vjp3
+    def foo(box, x):
+      box.set(x)
+      return x
+    def foo_fwd(box, x):
+      assert False  # doesn't run
+    def foo_bwd(box, g):
+      assert False  # doesn't run
+    foo.defvjp(foo_fwd, foo_bwd)
+
+    def f(box, x):
+      x = 2 * x
+      x = foo(box, x)
+      x = 2 * x
+      return x
+
+    if jit:
+      f = jax.jit(f)
+
+    f(box, 1.0)
     self.assertAllClose(box.get(), 2.0)
 
   @parameterized.parameters([False, True])
@@ -1025,6 +1471,21 @@ class BoxTest(jtu.JaxTestCase):
     out_type = jax.eval_shape(f)
     self.assertEqual(out_type, QArrayTy((2, 2)))
 
+  def test_stages_mutable(self):
+    box = Box(1.0)
+
+    @jax.jit
+    def f(box):
+      box.set(box.get() + 1.)
+
+    f.lower(box).as_text()  # don't crash
+    compiled = f.lower(box).compile()
+    compiled(box)
+    compiled(box)
+    compiled(box)
+    self.assertAllClose(box.get(), 4.)
+
+
 class RefTest(jtu.JaxTestCase):
 
   def test_get_ref_hitype(self):
@@ -1053,6 +1514,162 @@ class RefTest(jtu.JaxTestCase):
     self.assertArraysEqual(o.arr, q2.arr)
     self.assertArraysEqual(o.scale, q2.scale)
 
+class HijaxTransformCoverageTest(jtu.JaxTestCase):
+  # ------------
+  # grad
+  # ------------
+  # with differentiable hijax arguments
+  def test_hitypes_as_grad_args(self):
+    box = immutbox_new((jnp.array(2.0), jnp.array(3.0)))
+
+    def loss_fn(tup):
+      x = immutbox_get(tup)[0]
+      return x ** 2
+
+    grads = jax.grad(loss_fn)(box)
+    self.assertAllClose(immutbox_get(grads)[0], 4.0)
+
+  # with non-differentiable hijax arguments
+  def test_hitypes_as_nondiff_grad_args(self):
+    box = immutbox_new((jnp.array(2.0), jnp.array(3.0)))
+    x = jnp.array(3.0)
+
+    def loss_fn(x, box):
+      y = immutbox_get(box)[1]
+      return x ** 2 + y
+
+    grad = jax.grad(loss_fn)(x, box)
+    self.assertAllClose(grad, 6.0, check_dtypes=False)
+
+  # with hijax captured arguments
+  def test_hitypes_as_captured_args(self):
+    box = immutbox_new((jnp.array(2.0), jnp.array(3.0)))
+
+    def loss_fn(x):
+      y = immutbox_get(box)[1]
+      return x ** 2 + y
+
+    grad = jax.grad(loss_fn)(jnp.array(4.0))
+    self.assertAllClose(grad, 8.0, check_dtypes=False)
+
+  # with differentiable mutable hijax arguments
+  @absltest.skip("Not yet implemented")
+  def test_mutable_hitypes_as_grad_args(self):
+    box = Box(jnp.array(2.0))
+
+    def loss_fn(box):
+      return box.get() ** 2
+
+    grads = jax.grad(loss_fn)(box)
+    # NOTE: unclear what the tangent type will be here
+
+  # with non-differentiable mutable hijax arguments
+  def test_mutable_hitypes_as_nondiff_grad_args(self):
+    box = Box(jnp.array(2.0))
+    x = jnp.array(3.0)
+
+    def loss_fn(x, box):
+      box.set(jax.lax.stop_gradient(x * 2))
+      return x ** 2 + box.get()
+
+    grad = jax.grad(loss_fn)(x, box)
+    self.assertAllClose(box.get(), 6.0, check_dtypes=False)
+    self.assertAllClose(grad, 6.0, check_dtypes=False)
+
+  # with mutable hijax captured arguments
+  def test_mutable_hitypes_as_captured_args(self):
+    box = Box(jnp.array(2.0))
+
+    def loss_fn(x):
+      box.set(jax.lax.stop_gradient(x * 3))
+      return x ** 2 + box.get()
+
+    grad = jax.grad(loss_fn)(jnp.array(4.0))
+    self.assertAllClose(box.get(), 12.0, check_dtypes=False)
+    self.assertAllClose(grad, 8.0, check_dtypes=False)
+
+  #------------
+  # scan
+  #------------
+  # with hijax carry arguments
+  def test_hitypes_as_scan_carry(self):
+    box = immutbox_new((jnp.array(1.0), jnp.array(2.0)))
+
+    def body(box, _):
+      x, y = immutbox_get(box)
+      return immutbox_new((x + 1.0, y + 2.0)), None
+
+    box, _ = jax.lax.scan(body, box, None, length=5)
+    x, y = immutbox_get(box)
+    self.assertAllClose(x, 6.0, check_dtypes=False)
+    self.assertAllClose(y, 12.0, check_dtypes=False)
+
+  # with hijax extensive arguments
+  def test_hitypes_as_scan_extensive(self):
+    box = immutbox_new((jnp.arange(5), -jnp.arange(5)))
+
+    def body(_, box_i):
+      x, y = immutbox_get(box_i)
+      box_i = immutbox_new((x * 2, y * 2))
+      return None, box_i
+    _, box = jax.lax.scan(body, None, box)
+    x, y = immutbox_get(box)
+    self.assertAllClose(x, jnp.arange(5) * 2, check_dtypes=False)
+    self.assertAllClose(y, -jnp.arange(5) * 2, check_dtypes=False)
+
+  # with hijax captured arguments
+  def test_hitypes_as_scan_captured(self):
+    box = immutbox_new((jnp.array(3.0), jnp.array(4.0)))
+    carry0 = jnp.array(1.0)
+    xs = jnp.arange(5, dtype=jnp.float32)
+
+    def body(carry, x):
+      a, b = immutbox_get(box)
+      carry = a * carry + b
+      y = a * x + b
+      return carry, immutbox_new(y)
+
+    carry, ys_box = jax.lax.scan(body, carry0, xs)
+    ys = immutbox_get(ys_box)
+    self.assertAllClose(carry, 727.0, check_dtypes=False)
+    self.assertAllClose(ys, 3.0 * xs + 4.0, check_dtypes=False)
+
+  # with mutable hijax carry arguments
+  @absltest.skip("has_qdd not yet supported for Box in scan carry")
+  def test_mutable_hitypes_as_scan_carry(self):
+    box = Box(jnp.array(1.0))
+
+    def body(box, _):
+      box.set(box.get() * 2)
+      return box, None
+
+    box, _ = jax.lax.scan(body, box, None, length=5)
+    self.assertAllClose(box.get(), 32.0, check_dtypes=False)
+
+  # with mutable hijax extensive arguments
+  @absltest.skip("Box doesn't have shape attribute needed for scan extensive")
+  def test_mutable_hitypes_as_scan_extensive(self):
+    boxes = [Box(jnp.float32(i)) for i in range(5)]
+
+    def body(_, box_i):
+      val = box_i.get()
+      box_i.set(val * 2)
+      return None, box_i
+
+    _, boxes_out = jax.lax.scan(body, None, boxes)
+    for i, box in enumerate(boxes_out):
+      self.assertAllClose(box.get(), i * 2, check_dtypes=False)
+
+  # with mutable hijax captured arguments
+  def test_mutable_hitypes_as_scan_captured(self):
+    box = Box(jnp.array(3.0))
+
+    def body(_, __):
+      box.set(box.get() + 1.0)
+      return None, None
+
+    jax.lax.scan(body, None, None, length=5)
+    self.assertAllClose(box.get(), 8.0, check_dtypes=False)
 
 if __name__ == '__main__':
   absltest.main(testLoader=jtu.JaxTestLoader())

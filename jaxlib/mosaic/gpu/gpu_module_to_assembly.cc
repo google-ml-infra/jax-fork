@@ -28,6 +28,7 @@ limitations under the License.
 #include "llvm/IRReader/IRReader.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/Debug.h"
 #include "llvm/Support/LogicalResult.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/TargetSelect.h"
@@ -53,6 +54,8 @@ namespace gpu {
 
 namespace {
 
+using ::llvm::failure;
+using ::llvm::FailureOr;
 using ::llvm::LogicalResult;
 using ::llvm::SmallVector;
 using ::mlir::Attribute;
@@ -70,7 +73,7 @@ class ModuleToAssembly : public mlir::LLVM::ModuleToObject {
         libraries_to_link_(std::move(libraries_to_link)) {};
 
   // Serializes the LLVM module to PTX.
-  std::optional<SmallVector<char, 0>> moduleToObject(
+  FailureOr<SmallVector<char, 0>> moduleToObject(
       llvm::Module& llvm_module) override;
 
   // Loads the bitcode files in `libraries_to_link_`.
@@ -81,18 +84,24 @@ class ModuleToAssembly : public mlir::LLVM::ModuleToObject {
   std::vector<std::string> libraries_to_link_;
 };
 
-std::optional<SmallVector<char, 0>> ModuleToAssembly::moduleToObject(
+FailureOr<SmallVector<char, 0>> ModuleToAssembly::moduleToObject(
     llvm::Module& llvm_module) {
+  // Use a debug type compatible with upstream.
+#define DEBUG_TYPE "serialize-to-llvm"
+  LLVM_DEBUG({ llvm::dbgs() << llvm_module; });
+#undef DEBUG_TYPE
   std::optional<llvm::TargetMachine*> machine = getOrCreateTargetMachine();
   if (!machine) {
-    getOperation().emitError() << "Target Machine unavailable for triple "
-                               << triple << ", can't optimize with LLVM\n";
-    return std::nullopt;
+    return getOperation().emitError()
+           << "Target Machine unavailable for "
+              "triple "
+           << triple << ", can't optimize with LLVM\n";
   }
-  std::optional<std::string> ptx = translateToISA(llvm_module, **machine);
-  if (!ptx) {
-    getOperation().emitError() << "Failed translating the module to PTX.";
-    return std::nullopt;
+  llvm::FailureOr<std::string> ptx = translateModuleToISA(
+      llvm_module, **machine, [&]() { return getOperation().emitError(); });
+  if (failed(ptx)) {
+    return getOperation().emitError() << "Failed translating the module"
+                                         "to PTX.";
   }
 
   return SmallVector<char, 0>(ptx->begin(), ptx->end());

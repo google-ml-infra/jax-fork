@@ -57,10 +57,10 @@ fi
 # the git commit hash of the HEAD of the current branch and the date of the
 # commit (e.g. 0.5.1.dev20250128+3e75e20c7).
 if [[ "$JAXCI_ARTIFACT_TYPE" == "release" ]]; then
-  artifact_tag_flags="--bazel_options=--repo_env=ML_WHEEL_TYPE=release"
+  artifact_tag_flags="--bazel_options=--repo_env=ML_WHEEL_TYPE=release  --bazel_options=--//jaxlib/tools:jaxlib_git_hash=$(git rev-parse HEAD)"
 elif [[ "$JAXCI_ARTIFACT_TYPE" == "nightly" ]]; then
   current_date=$(date +%Y%m%d)
-  artifact_tag_flags="--bazel_options=--repo_env=ML_WHEEL_BUILD_DATE=${current_date} --bazel_options=--repo_env=ML_WHEEL_TYPE=nightly"
+  artifact_tag_flags="--bazel_options=--repo_env=ML_WHEEL_BUILD_DATE=${current_date} --bazel_options=--repo_env=ML_WHEEL_TYPE=nightly  --bazel_options=--//jaxlib/tools:jaxlib_git_hash=$(git rev-parse HEAD)"
 elif [[ "$JAXCI_ARTIFACT_TYPE" == "default" ]]; then
   artifact_tag_flags="--bazel_options=--repo_env=ML_WHEEL_TYPE=custom --bazel_options=--repo_env=ML_WHEEL_BUILD_DATE=$(git show -s --format=%as HEAD) --bazel_options=--repo_env=ML_WHEEL_GIT_HASH=$(git rev-parse HEAD) --bazel_options=--//jaxlib/tools:jaxlib_git_hash=$(git rev-parse HEAD)"
 else
@@ -82,7 +82,11 @@ if [[ "${allowed_artifacts[@]}" =~ "${artifact}" ]]; then
   bazel_remote_cache=""
 
   if [[ "$JAXCI_BUILD_ARTIFACT_WITH_RBE" == 1 ]]; then
-    bazelrc_config="rbe_${bazelrc_config}"
+    if [[ "$os" == "linux" && "$arch" == "aarch64" && "$artifact" == "jaxlib" ]]; then
+      bazelrc_config="rbe_cross_compile_${bazelrc_config}"
+    else
+      bazelrc_config="rbe_${bazelrc_config}"
+    fi
   else
     bazelrc_config="ci_${bazelrc_config}"
 
@@ -95,19 +99,21 @@ if [[ "${allowed_artifacts[@]}" =~ "${artifact}" ]]; then
     fi
   fi
 
+  cuda_version_flag=""
   # Use the "_cuda" configs when building the CUDA artifacts.
   if [[ ("$artifact" == "jax-cuda-plugin") || ("$artifact" == "jax-cuda-pjrt") ]]; then
     bazelrc_config="${bazelrc_config}_cuda${JAXCI_CUDA_VERSION}"
+    cuda_version_flag="--cuda_major_version=$JAXCI_CUDA_VERSION"
   fi
 
   # Build the artifact.
   python build/build.py build --wheels="$artifact" \
     --bazel_options=--config="$bazelrc_config" $bazel_remote_cache \
-    --bazel_options=--config=use_tar_archive_files \
+    --bazel_options=--config=rbe_cpu_pool \
     --bazel_startup_options="$bazel_startup_options" \
     --python_version=$JAXCI_HERMETIC_PYTHON_VERSION \
-    --cuda_major_version=$JAXCI_CUDA_VERSION \
-    --verbose --detailed_timestamped_log --use_new_wheel_build_rule \
+    $cuda_version_flag \
+    --verbose --detailed_timestamped_log \
     --output_path="$JAXCI_OUTPUT_DIR" \
     $artifact_tag_flags
 
@@ -116,11 +122,11 @@ if [[ "${allowed_artifacts[@]}" =~ "${artifact}" ]]; then
   if [[ "$JAXCI_ARTIFACT_TYPE" == "release" ]]; then
     python build/build.py build --wheels="$artifact" \
       --bazel_options=--config="$bazelrc_config" $bazel_remote_cache \
-      --bazel_options=--config=use_tar_archive_files \
+      --bazel_options=--config=rbe_cpu_pool \
       --bazel_startup_options="$bazel_startup_options" \
       --python_version=$JAXCI_HERMETIC_PYTHON_VERSION \
-      --cuda_major_version=$JAXCI_CUDA_VERSION \
-      --verbose --detailed_timestamped_log --use_new_wheel_build_rule \
+      $cuda_version_flag \
+      --verbose --detailed_timestamped_log \
       --output_path="$JAXCI_OUTPUT_DIR" \
       $artifact_tag_flags --bazel_options=--repo_env=ML_WHEEL_VERSION_SUFFIX="$JAXCI_WHEEL_RC_VERSION"
   fi

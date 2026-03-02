@@ -28,11 +28,10 @@ import jax
 from jax import lax
 from jax import numpy as jnp
 from jax import export
-from jax.experimental import pjit
 from jax._src.shard_map import shard_map
-from jax.sharding import NamedSharding
-from jax.sharding import Mesh
-from jax.sharding import PartitionSpec as P
+from jax.sharding import (NamedSharding, Mesh, PartitionSpec as P,
+                          reshard)
+from jax._src.sharding_impls import GSPMDSharding
 from jax import tree_util
 
 from jax._src import config
@@ -288,6 +287,16 @@ class JaxExportTest(jtu.JaxTestCase):
     exp_f = get_exported(f)(x, y)
 
     self.assertAllClose(f(x, y), exp_f.call(x, y))
+
+  def test_dict_non_string_key(self):
+    @jax.jit
+    def f(x_dict):
+      return x_dict[(0, 1)] + x_dict[(1, 2)]
+
+    x_dict = {(0, 1): np.float32(42.), (1, 2): np.float32(43.)}
+    with self.assertRaisesRegex(
+        TypeError, "Serialization is supported only for dictionaries with string keys"):
+      get_exported(f)(x_dict)
 
   def test_closed_over_constant(self):
     const_size = 100
@@ -1218,7 +1227,7 @@ class JaxExportTest(jtu.JaxTestCase):
 
     # We can use other devices and other meshes for running
     run_devices = devices[::-1]
-    run_mesh = Mesh(run_devices, "a")
+    run_mesh = Mesh(run_devices, "x")
     run_input_shardings = exp.in_shardings_jax(run_mesh)
     a_run = jax.device_put(a, run_input_shardings[0])
     b_run = jax.device_put(a, run_input_shardings[1])
@@ -1226,11 +1235,54 @@ class JaxExportTest(jtu.JaxTestCase):
     self.assertEqual(res.addressable_shards[0].device, run_devices[0])
     self.assertEqual(res.addressable_shards[1].device, run_devices[1])
 
+  @jtu.parameterized_filterable(
+    kwargs=[
+      dict(testcase_name=f"_in={has_in_shardings}_out={has_out_shardings}",
+           has_in_shardings=has_in_shardings,
+           has_out_shardings=has_out_shardings)
+      for has_in_shardings in (False, True)
+      for has_out_shardings in (False, True)
+    ])
+  def test_gspmdshardings(self, has_in_shardings, has_out_shardings):
+    if len(jax.devices()) < 2:
+      self.skipTest("Need at least 2 devices")
+    run_devices = jax.devices()[:2]
+    mesh = jtu.create_mesh((2, 1), ("x", "y"))
+    ns1 = NamedSharding(mesh, P(None))
+    ns2 = NamedSharding(mesh, P("x"))
+    gs1 = GSPMDSharding(run_devices, ns1._to_xla_hlo_sharding(2))
+    gs2 = GSPMDSharding(run_devices, ns2._to_xla_hlo_sharding(2))
+
+    jit_kwargs = {}
+    if has_in_shardings:
+      jit_kwargs["in_shardings"] = (gs1, gs2)
+    if has_out_shardings:
+      jit_kwargs["out_shardings"] = (gs1, gs2)
+
+    f = jax.jit(lambda x1, x2: (x1, x2), **jit_kwargs)
+    x = jnp.arange(16 * 4, dtype=np.float32).reshape((16, 4))
+    x1_dev = jax.device_put(x, gs1)
+    x2_dev = jax.device_put(x, gs2)
+    res = f(x1_dev, x2_dev)
+
+    if not has_in_shardings:
+      exp = get_exported(f)(x1_dev, x2_dev)
+    else:
+      exp = get_exported(f)(x, x)
+
+    with jax.set_mesh(mesh):
+      call_res = exp.call(x, x)  # args are on default device
+    for r, cr in zip(res, call_res):
+      self.assertAllClose(r, cr)
+      self.assertEqual(len(r.addressable_shards), len(cr.addressable_shards))
+      for rs, crs in zip(r.addressable_shards, cr.addressable_shards):
+        self.assertArraysEqual(rs.data, crs.data)
+
   def test_export_abstract_mesh(self):
     if jax.local_device_count() < 2:
       self.skipTest("Need at least 2 devices")
 
-    abs_mesh = jax.sharding.AbstractMesh((2,), 'x')
+    abs_mesh = jax.sharding.AbstractMesh((2,), "x")
     input_sharding = jax.sharding.NamedSharding(abs_mesh, P("x", None))
     output_sharding = jax.sharding.NamedSharding(abs_mesh, P(None, "x"))
     @jax.jit
@@ -1281,7 +1333,7 @@ class JaxExportTest(jtu.JaxTestCase):
       self.skipTest("Need at least 2 devices")
 
     mesh_1 = Mesh(jax.local_devices()[:1], "i")
-    @functools.partial(pjit.pjit,
+    @functools.partial(jax.jit,
                        in_shardings=NamedSharding(mesh_1, P("i")))
     def f_with_sharding(x):
       return jnp.sum(x ** 2, axis=0)
@@ -1305,7 +1357,7 @@ class JaxExportTest(jtu.JaxTestCase):
       self.skipTest("Need at least 3 devices")
 
     mesh_1 = Mesh(jax.local_devices()[:2], "i")
-    @functools.partial(pjit.pjit,
+    @functools.partial(jax.jit,
                        in_shardings=NamedSharding(mesh_1, P("i")))
     def f_with_sharding(x):
       return jnp.sum(x ** 2, axis=0)
@@ -1396,6 +1448,52 @@ class JaxExportTest(jtu.JaxTestCase):
         f"context with {jax.local_device_count()} devices"):
       exp.call(b)
 
+  def test_memory_space_from_arg(self):
+    shd = jax.sharding.SingleDeviceSharding(
+        jax.devices()[0], memory_kind="pinned_host")
+    a = jax.device_put(np.ones((2, 3), dtype=np.float32), shd)
+    f = jax.jit(lambda x: x)
+
+    exported = get_exported(f, platforms=("tpu", "cuda"))(a)
+    self.assertEqual(exported.in_avals[0].memory_space, core.MemorySpace.Host)
+    self.assertEqual(exported.out_avals[0].memory_space, core.MemorySpace.Host)
+
+    empty_mesh = jax.sharding.AbstractMesh((), ())
+    shd_ns = jax.sharding.NamedSharding(empty_mesh, P(None, None),
+                                        memory_kind="pinned_host")
+
+    self.assertEqual(exported.in_avals[0].sharding,
+                     jax.sharding.NamedSharding(empty_mesh, P(None, None)))
+    self.assertEqual(exported.in_shardings_jax(empty_mesh)[0],
+                     jax.sharding.NamedSharding(empty_mesh, P(None, None),
+                                                memory_kind="pinned_host"))
+    # TODO(necula): a situation when the out_shardings is not the SOT, because
+    # they are unspecified, so the memory space can only be in aval. If we
+    # want the shardings to be SOT, then maybe the unspecified shardings should
+    # contain a memory_kind.
+    self.assertEqual(exported.out_shardings_jax(empty_mesh)[0],
+                     None)  # sharding.UnspecifiedValue
+    if jtu.device_under_test() in ("tpu", "gpu"):
+      b = exported.call(a)
+      self.assertEqual(b.sharding, a.sharding)
+
+  def test_memory_space_from_out_shardings(self):
+    shd = jax.sharding.SingleDeviceSharding(jax.devices()[0],
+                                            memory_kind="pinned_host")
+    f = jax.jit(lambda: jnp.ones((2, 2), dtype=np.float32),
+                out_shardings=shd)
+
+    exported = get_exported(f, platforms=("tpu", "cuda"))()
+    self.assertEqual(exported.out_avals[0].memory_space, core.MemorySpace.Host)
+    empty_mesh = jax.sharding.AbstractMesh((), ())
+    shd_ns = jax.sharding.NamedSharding(empty_mesh, P(None, None),
+                                        memory_kind="pinned_host")
+    self.assertEqual(exported.out_shardings_jax(empty_mesh)[0], shd_ns)
+    # TODO(necula): this test should work on TPU also
+    if jtu.device_under_test() == "gpu":
+      b = exported.call()
+      self.assertEqual(b.sharding, shd)
+
   @jtu.parameterized_filterable(
     kwargs=[
       dict(testcase_name=f"_poly={poly}", poly=poly)
@@ -1409,7 +1507,7 @@ class JaxExportTest(jtu.JaxTestCase):
     a = np.arange(4 * 4, dtype=np.float32).reshape((4, 4))
 
     @functools.partial(
-      pjit.pjit,
+      jax.jit,
       in_shardings=NamedSharding(mesh, P("x", None),),
       out_shardings=NamedSharding(mesh, P("x", None)))
     @functools.partial(
@@ -1453,16 +1551,105 @@ class JaxExportTest(jtu.JaxTestCase):
       self.assertAllClose(res_jax.addressable_shards[i].data,
                           res_r.addressable_shards[i].data)
 
+  @jtu.with_explicit_mesh((2,), 'x')
+  def test_unreduced_einsum_basic(self, mesh):
+    np_inp = np.arange(4).reshape(2, 2)
+    x = jax.device_put(np_inp, P(None, 'x'))
+    y = jax.device_put(np_inp, P('x', None))
+
+    @jax.jit
+    def f(x, y):
+      out = jnp.einsum('ab,bc->ac', x, y,
+                       out_sharding=P(None, None, unreduced={'x'}))
+      self.assertEqual(out.aval.sharding.spec, P(None, None, unreduced={'x'}))
+      return out
+
+    exported = get_exported(f)(x, y)
+    out = exported.call(x, y)
+    self.assertEqual(out.sharding,
+                     NamedSharding(mesh, P(None, None, unreduced={'x'})))
+    self.assertEqual(out.shape, (2, 2))
+    self.assertEqual(out.sharding.shard_shape(out.shape), (2, 2))
+
+    expected_shards = [np.array([[0, 0], [0, 2]]), np.array([[2, 3], [6, 9]])]
+    for s, es in zip(out.addressable_shards, expected_shards):
+      self.assertEqual(s.data.shape, (2, 2))
+      self.assertArraysEqual(s.data, es)
+
+    reshard_out = reshard(out, P(None, None))
+    self.assertArraysEqual(reshard_out, np_inp @ np_inp)
+
   @jtu.parameterized_filterable(
     kwargs=[
-      dict(in_shardings=in_shardings, out_shardings=out_shardings,
-           with_mesh_context=with_mesh_context)
+      dict(testcase_name=name, spec1=spec1, spec2=spec2,
+           out_spec=out_spec, collective_name=collective_name)
+      for name, spec1, spec2, out_spec, collective_name in [
+        ("x_y", P("x", None), P(None, "y"), P("x", "y"), None),
+        ("x_None", P("x", None), P(None, None), P("x", None), None),
+        ("contracting2", P("x", "y"), P(None, None), P("x", None), "all-gather"),
+        ("fsdp", P("x", None), P("x", None), P("x", None), "all-gather"),
+        ("half_tp", P(None, "y"), P(None, "y"), P(None, "y"), "all-gather")
+      ]
+  ])
+  @jtu.with_explicit_mesh((2, 2), ('x', 'y'))
+  def test_explicit_sharding_dot_general(self, spec1, spec2, out_spec,
+                                         collective_name, mesh):
+    # Based on pjit_test::test_dot_general
+    def check_wsc_in_lowered(text):
+      assert config.use_shardy_partitioner.value  # TODO(necula): is shardy always on?
+      if config.use_shardy_partitioner.value:
+        self.assertIn('sdy.sharding_constraint', text)
+      else:
+        self.assertIn('@Sharding', text)
+
+    np_inp1 = np.arange(16.).reshape(8, 2)
+    arr1 = jax.device_put(np_inp1, NamedSharding(mesh, spec1))
+    arr2 = jax.device_put(np_inp1.T, NamedSharding(mesh, spec2))
+
+    def f(x, y):
+      out = x @ y
+      self.assertEqual(out.aval.sharding.spec, out_spec)
+      return out
+
+    exported = get_exported(jax.jit(f))(arr1, arr2)
+    amesh = jax.sharding.AbstractMesh(mesh.axis_sizes, mesh.axis_names,
+                                      axis_types=mesh.axis_types)
+    self.assertEqual(exported.in_avals[0].sharding,
+                     NamedSharding(amesh, spec1))
+    self.assertEqual(exported.in_avals[1].sharding,
+                     NamedSharding(amesh, spec2))
+    self.assertEqual(exported.in_shardings_jax(amesh)[0],
+                     NamedSharding(amesh, spec1, memory_kind="device"))
+    out = exported.call(arr1, arr2)
+    self.assertArraysEqual(out, np_inp1 @ np_inp1.T)
+    self.assertEqual(out.sharding, NamedSharding(mesh, out_spec))
+
+    lowered = jax.jit(exported.call).lower(arr1, arr2)
+    check_wsc_in_lowered(lowered.as_text())
+
+    compiled_text = lowered.compile().as_text()
+    if collective_name is not None:
+      self.assertIn(collective_name, compiled_text)
+
+    @jax.jit
+    def g(x, y):
+      out = f(x, y)
+      return jnp.sum(out)
+
+    g = jax.jit(jax.grad(g, argnums=(0, 1)))
+    exported_g = get_exported(g)(arr1, arr2)
+    out = exported_g.call(arr1, arr2)
+    out_g = jax.jit(g)(arr1, arr2)
+    self.assertEqual(out_g[0].sharding, arr1.sharding)
+    self.assertEqual(out_g[1].sharding, arr2.sharding)
+
+  @jtu.parameterized_filterable(
+    kwargs=[
+      dict(in_shardings=in_shardings, out_shardings=out_shardings)
       for in_shardings in ("missing", None, "P")
       for out_shardings in ("missing", None, "P")
-      for with_mesh_context in (True, False)
   ])
-  def test_grad_with_sharding(self, in_shardings="P", out_shardings=None,
-                              with_mesh_context=False):
+  def test_grad_with_sharding(self, in_shardings="P", out_shardings=None):
     if len(jax.devices()) < 2:
       self.skipTest("Test requires at least 2 devices")
     x_shape = (10, 20)
@@ -1473,28 +1660,21 @@ class JaxExportTest(jtu.JaxTestCase):
       return jnp.sin(x.T)
 
     mesh = Mesh(jax.devices()[:2], "d")
-    pjit_kwargs = {}
-    # Use NamedShardings if we don't have a mesh_context
-    if with_mesh_context:
-      sharding_None_d = P(None, "d")
-      sharding_d_None = P("d", None)
-    else:
-      sharding_None_d = NamedSharding(mesh, P(None, "d"))
-      sharding_d_None = NamedSharding(mesh, P("d", None))
+    jit_kwargs = {}
+    sharding_None_d = NamedSharding(mesh, P(None, "d"))
+    sharding_d_None = NamedSharding(mesh, P("d", None))
 
     if in_shardings != "missing":
-      pjit_kwargs["in_shardings"] = (
+      jit_kwargs["in_shardings"] = (
         sharding_None_d if in_shardings == "P" else None)
     if out_shardings != "missing":
-      pjit_kwargs["out_shardings"] = (
+      jit_kwargs["out_shardings"] = (
         sharding_d_None if out_shardings == "P" else None)
-    f_jax_pjit = pjit.pjit(f_jax, **pjit_kwargs)
+    f_jax_jit = jax.jit(f_jax, **jit_kwargs)
 
     with contextlib.ExitStack() as stack:
-      if with_mesh_context:
-        stack.enter_context(mesh)
       # Serialize higher-order gradiends
-      exp = get_exported(f_jax_pjit, vjp_order=2)(x)
+      exp = get_exported(f_jax_jit, vjp_order=2)(x)
       exp_vjp = exp.vjp()
       # Try 2nd order grad as well
       exp_vjp2 = exp_vjp.vjp()
@@ -1525,18 +1705,8 @@ class JaxExportTest(jtu.JaxTestCase):
       self.assertRegex(res_attrs, sharding)
     else:
       primal_in_sharding = "{replicated}"
-      if with_mesh_context:
-        if config.use_shardy_partitioner.value:
-          sharding = r'#sdy.sharding<@mesh, \[{}, {}\]>'
-        else:
-          sharding = re.escape("replicated")
-        self.assertRegex(arg0_attrs, sharding)
-        self.assertRegex(res_attrs, sharding)
-      else:
-        # If there is no mesh context, we have used NamedSharding(None)
-        # and then the sharding is unspecified!
-        self.assertNotIn(attr_name, arg0_attrs)
-        self.assertNotIn(attr_name, res_attrs)
+      self.assertNotIn(attr_name, arg0_attrs)
+      self.assertNotIn(attr_name, res_attrs)
 
     if out_shardings == "P":
       if config.use_shardy_partitioner.value:
@@ -1551,13 +1721,8 @@ class JaxExportTest(jtu.JaxTestCase):
         primal_out_sharding = '#sdy.sharding<@mesh, [{}, {}]>'
       else:
         primal_out_sharding = "{replicated}"
-      if with_mesh_context:
-        if config.use_shardy_partitioner.value:
-          self.assertRegex(arg1_attrs, re.escape('#sdy.sharding<@mesh, [{}, {}]>'))
-        else:
-          self.assertRegex(arg1_attrs, re.escape("replicated"))
-      else:
-        self.assertNotIn(attr_name, arg1_attrs)
+
+      self.assertNotIn(attr_name, arg1_attrs)
 
     # Sharding custom calls for the primal input shape all match primal_in_sharding
     primal_in_sharding_calls = re.findall(
@@ -1581,7 +1746,7 @@ class JaxExportTest(jtu.JaxTestCase):
     # we replicate the inputs. If we don't use a mesh context and there are
     # no shardings on inputs or outputs, then we have serialized for one
     # device.
-    if in_shardings != "P" and out_shardings != "P" and not with_mesh_context:
+    if in_shardings != "P" and out_shardings != "P":
       self.assertEqual(exp_vjp.nr_devices, 1)
       self.assertEqual(exp_vjp2.nr_devices, 1)
       call_mesh = Mesh(jax.devices()[:1], "e")
@@ -1590,17 +1755,17 @@ class JaxExportTest(jtu.JaxTestCase):
       self.assertEqual(exp_vjp2.nr_devices, 2)
       call_mesh = Mesh(jax.devices()[:2], "e")
 
-    g1 = pjit.pjit(exp_vjp.call,
-                   in_shardings=(NamedSharding(call_mesh, P()),
-                                 NamedSharding(call_mesh, P())))(x, x.T)
+    g1 = jax.jit(exp_vjp.call,
+                 in_shardings=(NamedSharding(call_mesh, P()),
+                              NamedSharding(call_mesh, P())))(x, x.T)
     _, f_jax_vjp = jax.vjp(f_jax, x)
     xbar = f_jax_vjp(x.T)
     self.assertAllClose(xbar, g1)
 
-    g2 = pjit.pjit(exp_vjp2.call,
-                   in_shardings=(NamedSharding(call_mesh, P()),
-                                 NamedSharding(call_mesh, P()),
-                                 NamedSharding(call_mesh, P())))(x, x.T, x)
+    g2 = jax.jit(exp_vjp2.call,
+                 in_shardings=(NamedSharding(call_mesh, P()),
+                               NamedSharding(call_mesh, P()),
+                               NamedSharding(call_mesh, P())))(x, x.T, x)
     _, f_jax_vjp2 = jax.vjp(f_jax_vjp, x.T)
     xbar2, = f_jax_vjp2((x,))
     self.assertAllClose(xbar2, g2[1])
@@ -1620,8 +1785,8 @@ class JaxExportTest(jtu.JaxTestCase):
     input = jnp.ones(shape=(jax.local_device_count(),), device=shardings)
     input_rev = jnp.ones(shape=(jax.local_device_count(),), device=shardings_rev)
 
-    exp = export.export(pjit.pjit(f, in_shardings=shardings))(input)
-    exp_rev = export.export(pjit.pjit(f, in_shardings=shardings_rev))(input_no_shards)
+    exp = export.export(jax.jit(f, in_shardings=shardings))(input)
+    exp_rev = export.export(jax.jit(f, in_shardings=shardings_rev))(input_no_shards)
 
     if CAN_SERIALIZE:
       _ = exp.serialize(vjp_order=1)
@@ -2111,6 +2276,7 @@ class JaxExportTest(jtu.JaxTestCase):
     self.assertAllClose(a + b, r)
 
   def test_lower_and_load_with_different_meshes_axis_names(self):
+    self.skipTest("TODO(necula): different axis names are not supported yet")
     mesh1 = jtu.create_mesh((8,), ("a",))
     mesh2 = jtu.create_mesh((8,), ("b",))
     mesh3 = jtu.create_mesh((8,), ("c",))
@@ -2121,7 +2287,7 @@ class JaxExportTest(jtu.JaxTestCase):
 
     @jax.jit
     def f(x, y):
-      return x + y
+      return x + lax.with_sharding_constraint(y, NamedSharding(mesh2, P(None, "b")))
 
     a_put = jax.device_put(a, NamedSharding(mesh1, P(None, "a")))
     b_put = jax.device_put(b, NamedSharding(mesh2, P(None, "b")))
@@ -2171,7 +2337,6 @@ class JaxExportTest(jtu.JaxTestCase):
             jax.jit(exp.call, out_shardings=NamedSharding(mesh, P("a")))(a, b)
         else:
           jax.jit(exp.call, out_shardings=NamedSharding(mesh, P("a")))(a, b)
-
 
 
 if __name__ == "__main__":

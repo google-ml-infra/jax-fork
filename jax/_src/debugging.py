@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+import copy
 from functools import partial
 import importlib.util
 import logging
@@ -34,8 +35,9 @@ from jax._src import dispatch
 from jax._src import effects
 from jax._src import lax
 from jax._src import mesh as mesh_lib
-from jax._src import sharding_impls
 from jax._src import shard_map
+from jax._src import sharding_impls
+from jax._src import source_info_util
 from jax._src import tree_util
 from jax._src import util
 from jax._src import xla_bridge
@@ -93,7 +95,9 @@ def debug_callback_impl(*args, callback: Callable[..., Any],
         " JAX_PLATFORMS environment variable."
     ) from e
   args = api.device_put(args, cpu_device)
-  with config.default_device(cpu_device):
+  with (config.default_device(cpu_device),
+        sharding_impls._internal_use_concrete_mesh(mesh_lib.empty_concrete_mesh),
+        mesh_lib.use_abstract_mesh(mesh_lib.empty_abstract_mesh)):
     try:
       callback(*args)
     except BaseException:
@@ -206,12 +210,13 @@ def debug_callback_lowering(ctx, *args, effect, partitioned, callback, **params)
     token = ctx.tokens_in.get(effect)
     result, token, _ = cb.emit_python_callback(
         ctx, _callback, token, list(args), ctx.avals_in, ctx.avals_out,
-        has_side_effect=True, partitioned=partitioned)
+        has_side_effect=True, returns_token=True, partitioned=partitioned)
     ctx.set_tokens_out(mlir.TokenSet({effect: token}))
   else:
     result, _, _ = cb.emit_python_callback(
         ctx, _callback, None, list(args), ctx.avals_in, ctx.avals_out,
-        has_side_effect=True, partitioned=partitioned, sharding=sharding)
+        has_side_effect=True, returns_token=True, partitioned=partitioned,
+        sharding=sharding)
   return result
 mlir.register_lowering(debug_callback_p, debug_callback_lowering,
                        platform="cpu")
@@ -301,11 +306,6 @@ def _make_flat_callback(in_tree, callback, static_args):
   return _flat_callback
 
 
-def _check_format(fmt, in_tree, dyn_args, static_args):
-  args, kwargs = merge_callback_args(in_tree, dyn_args, static_args)
-  formatter.format(fmt, *args, **kwargs)
-
-
 debug_print_p = core.Primitive("debug_print")
 debug_print_p.multiple_results = True
 
@@ -320,9 +320,11 @@ def debug_print_impl(
     static_args,
     np_printoptions,
     has_placeholders,
+    logging_record,
 ):
   callback = partial(
-      _format_print_callback, fmt, dict(np_printoptions), has_placeholders
+      _format_print_callback, fmt, dict(np_printoptions), has_placeholders,
+      logging_record,
   )
   callback = _make_flat_callback(in_tree, callback, static_args)
   effect = ordered_debug_effect if ordered else debug_effect
@@ -369,9 +371,14 @@ def debug_print_lowering_rule(
     static_args,
     np_printoptions,
     has_placeholders,
+    logging_record,
 ):
   callback = partial(
-      _format_print_callback, fmt, dict(np_printoptions), has_placeholders
+      _format_print_callback,
+      fmt,
+      dict(np_printoptions),
+      has_placeholders,
+      logging_record,
   )
   callback = _make_flat_callback(in_tree, callback, static_args)
   effect = ordered_debug_effect if ordered else debug_effect
@@ -488,14 +495,35 @@ formatter = _DebugPrintFormatChecker()
 
 
 def _format_print_callback(
-    fmt: str, np_printoptions, has_placeholders, *args, **kwargs
+    fmt: str, np_printoptions, has_placeholders, logging_record, *args, **kwargs
 ):
   if has_placeholders:
     with np.printoptions(**np_printoptions):
-      sys.stdout.write(fmt.format(*args, **kwargs) + "\n")
+      msg = fmt.format(*args, **kwargs)
   else:
     assert not kwargs, "Format without placeholders should not have kwargs."
-    sys.stdout.write(" ".join((fmt, *(str(a) for a in args))) + "\n")
+    msg = " ".join((fmt, *(str(a) for a in args)))
+  if logging_record:
+    logging_record = copy.copy(logging_record)
+    logging_record.msg = msg
+    logger.handle(logging_record)
+  else:
+    sys.stdout.write(msg + "\n")
+
+
+def _make_logging_record(level):
+  si = source_info_util.current()
+  user_frame = source_info_util.user_frame(si.traceback)
+
+  file_name = "(unknown file)"
+  line_no = 0
+  if user_frame:
+    file_name = user_frame.file_name
+    line_no = user_frame.start_line
+  args = ()
+  return logger.makeRecord(
+      logger.name, level, file_name, line_no, "", args, None
+  )
 
 
 def debug_print(
@@ -504,6 +532,7 @@ def debug_print(
     ordered: bool = False,
     partitioned: bool = False,
     skip_format_check: bool = False,
+    _use_logging: bool = False,
     **kwargs,
 ) -> None:
   """Prints values and works in staged out JAX functions.
@@ -564,8 +593,12 @@ def debug_print(
       static_args=static_args,
       np_printoptions=np_printoptions,
       has_placeholders=has_placeholders,
+      logging_record=(_make_logging_record(logging.INFO) if _use_logging
+                      else None),
   )
 
+
+debug_log = partial(debug_print, _use_logging=True)
 
 # Sharding visualization
 
@@ -826,7 +859,7 @@ def inspect_array_sharding(value, *, callback: Callable[[Sharding], None]):
   """Enables inspecting array sharding inside JIT-ted functions.
 
   This function, when provided with a Pytree of arrays, calls back with each of
-  their shardings and works in ``pjit``-ted computations, enabling inspecting
+  their shardings and works in ``jax.jit``-ted computations, enabling inspecting
   the chosen intermediate shardings.
 
   The policy for when ``callback`` is called is *as early as possible* when the
@@ -835,9 +868,9 @@ def inspect_array_sharding(value, *, callback: Callable[[Sharding], None]):
   since we have the array and its sharding readily available. Inside of a
   ``jax.jit``, the callback will happen at lowering time, meaning you can
   trigger the callback using the AOT API (``jit(f).lower(...)``). When inside of
-  a ``pjit``, the callback happens *at compile time* since the sharding is
+  a ``jax.jit``, the callback happens *at compile time* since the sharding is
   determined by XLA. You can trigger the callback by using JAX's AOT API
-  (``pjit(f).lower(...).compile()``). In all cases, the callback will be
+  (``jax.jit(f).lower(...).compile()``). In all cases, the callback will be
   triggered by running the function, since running a function entails lowering
   and compiling it first. However, once the function is compiled and cached,
   the callback will no longer occur.
@@ -849,11 +882,10 @@ def inspect_array_sharding(value, *, callback: Callable[[Sharding], None]):
     callback: A callable that takes in a ``Sharding`` and doesn't return a value.
 
   In the following example, we print out the sharding of an intermediate value
-  in a ``pjit``-ted computation:
+  in a ``jax.jit``-ted computation:
 
   >>> import jax
   >>> import jax.numpy as jnp
-  >>> from jax.experimental.pjit import pjit
   >>> from jax.sharding import Mesh, PartitionSpec
   >>>
   >>> x = jnp.arange(8, dtype=jnp.float32)
@@ -861,9 +893,9 @@ def inspect_array_sharding(value, *, callback: Callable[[Sharding], None]):
   ...   x = jnp.sin(x)
   ...   jax.debug.inspect_array_sharding(x, callback=print)
   ...   return jnp.square(x)
-  >>> f = pjit(f_, in_shardings=PartitionSpec('dev'),
-  ...          out_shardings=PartitionSpec('dev'))
-  >>> with Mesh(jax.devices(), ('dev',)):
+  >>> f = jax.jit(f_, in_shardings=PartitionSpec('dev'),
+  ...             out_shardings=PartitionSpec('dev'))
+  >>> with jax.set_mesh(Mesh(jax.devices(), ('dev',))):
   ...   f.lower(x).compile()  # doctest: +SKIP
   ...
   NamedSharding(mesh={'dev': 8}, partition_spec=PartitionSpec(('dev',),))
@@ -906,10 +938,12 @@ def _debug_print_eager_rule(
     static_args,
     np_printoptions,
     has_placeholders,
+    logging_record,
 ):
   del ordered, partitioned
   callback = partial(
-      _format_print_callback, fmt, dict(np_printoptions), has_placeholders
+      _format_print_callback, fmt, dict(np_printoptions), has_placeholders,
+      logging_record,
   )
   callback = _make_flat_callback(in_tree, callback, static_args)
   with core.eval_context():

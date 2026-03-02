@@ -31,11 +31,19 @@ exports_files(
 )
 
 py_library(
+    name = "gpu_examples",
+    srcs = [
+        "__init__.py",
+    ],
+    visibility = ["//jax:internal"],
+)
+
+py_library(
     name = "matmul",
     srcs = ["matmul.py"],
     deps = [
         "//jax",
-        "//jax:mosaic_gpu",
+        "//jax/experimental:mosaic_gpu",
     ],
 )
 
@@ -44,7 +52,7 @@ py_library(
     srcs = ["matmul_blackwell.py"],
     deps = [
         "//jax",
-        "//jax:mosaic_gpu",
+        "//jax/experimental:mosaic_gpu",
     ],
 )
 
@@ -53,7 +61,7 @@ py_library(
     srcs = ["flash_attention.py"],
     deps = [
         "//jax",
-        "//jax:mosaic_gpu",
+        "//jax/experimental:mosaic_gpu",
     ],
 )
 
@@ -68,6 +76,6 @@ jax_multiplatform_test(
         "notap",
     ],
     deps = [
-        "//jax:mosaic_gpu",
+        "//jax/experimental:mosaic_gpu",
     ] + py_deps("numpy"),
 )

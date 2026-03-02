@@ -27,13 +27,17 @@ from jax import random
 import jax.numpy as jnp
 from jax._src import config
 import jax._src.test_util as jtu
-from jax._src.lib import jaxlib_extension_version
+
 
 jax.config.parse_flags_with_absl()
 
-# TODO(jakevdp): rewrite these tests in terms of jax.enable_x64.
+# TODO(jakevdp): remove this check for JAX v0.9.0 and test jax.enable_x64 directly.
 with jtu.ignore_warning(message=".* is deprecated", category=DeprecationWarning):
-  from jax.experimental import enable_x64, disable_x64
+  if hasattr(jax.experimental, "enable_x64"):
+    from jax.experimental import enable_x64, disable_x64
+  else:
+    enable_x64 = jax.enable_x64
+    disable_x64 = lambda: jax.enable_x64(False)
 
 
 class X64ContextTests(jtu.JaxTestCase):
@@ -218,9 +222,6 @@ class X64ContextTests(jtu.JaxTestCase):
     self.assertEqual(out_primal.dtype, jnp.float64)
     self.assertEqual(out_tangent.dtype, jnp.float64)
 
-    if jaxlib_extension_version < 374:
-      return
-
     with enable_x64(False):
       self.assertEqual(g(5.).dtype, jnp.float64)
       self.assertEqual(grad(g)(5.).dtype, jnp.float32)
@@ -250,9 +251,6 @@ class X64ContextTests(jtu.JaxTestCase):
       with enable_x64():
         x = jnp.array(x, jnp.float64)
         return f(x)
-
-    if jaxlib_extension_version < 374:
-      return
 
     with enable_x64(False):
       self.assertEqual(g(5.).dtype, jnp.float64)
