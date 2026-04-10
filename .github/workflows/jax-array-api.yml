@@ -29,7 +29,7 @@ env:
 
 jobs:
   build:
-    runs-on: linux-x86-ct4p-240-4tpu
+    runs-on: quoct-test-x86
     strategy:
       matrix:
         python-version: [3.12]
