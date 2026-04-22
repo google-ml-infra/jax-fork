@@ -30,6 +30,8 @@ env:
 jobs:
   build:
     runs-on: quoct-test-n2-16
+    container:
+      image: node:18
     strategy:
       matrix:
         python-version: [3.12]
