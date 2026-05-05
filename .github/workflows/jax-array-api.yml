@@ -29,7 +29,7 @@ env:
 
 jobs:
   build:
-    runs-on: quoct-test-n2-16
+    runs-on: quoct-test-ct5lp-hightpu-8t
     container:
       image: node:18
     strategy:
