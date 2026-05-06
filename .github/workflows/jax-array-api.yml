@@ -29,12 +29,13 @@ env:
 
 jobs:
   build:
-    runs-on: quoct-test-ct5lp-hightpu-8t
-    container:
-      image: node:18
     strategy:
       matrix:
         python-version: [3.12]
+        runners: ["quoct-test-ct5lp-hightpu-8t", "quoct-test-n2-16", "quoct-test-ct5lp-hightpu-8t", "quoct-test-n2-16"]
+    runs-on: ${{ matrix.runners }}
+    container:
+      image: node:18
     env:
       PYTHON: "python${{ matrix.python-version }}"
     steps:
@@ -51,6 +52,5 @@ jobs:
         path: 'array-api-tests'
         persist-credentials: false
     - name: Install dependencies
-      # TODO(jakevdp) remove numpy pin once ml_dtypes 0.6 is released
       run: |
-        sleep 10000
+        sleep 100
