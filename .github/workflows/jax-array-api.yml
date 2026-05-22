@@ -53,4 +53,4 @@ jobs:
         persist-credentials: false
     - name: Install dependencies
       run: |
-        sleep 100
+        sleep 10000
