@@ -29,11 +29,12 @@ env:
 
 jobs:
   build:
-    runs-on: quoct-test-n2-16
+    runs-on: ${{ matrix.runs-on }}
     container: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build:latest
     strategy:
       matrix:
         python-version: [3.11]
+        runs-on: [quoct-test-n2-16, linux-x86-n2-16]
     env:
       PYTHON: "python${{ matrix.python-version }}"
     steps:
