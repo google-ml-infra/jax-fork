@@ -17,81 +17,44 @@ on:
         options:
           - 'yes'
           - 'no'
-      runner:
-        description: "Which runner should the workflow run on?"
-        type: string
-        default: "quoct-test-n2-16"
-      python:
-        description: "Which python version should the artifact be built for?"
-        type: string
-        default: "3.12"
-      enable-x64:
-        description: "Should x64 mode be enabled?"
-        type: string
-        default: "0"
-      skip-download-jaxlib-from-gcs:
-        description: "Whether to skip downloading the jaxlib artifact from GCS (e.g for testing a jax only release)"
-        default: '0'
-        type: string
-      gcs_download_uri:
-        description: "GCS location prefix from where the artifacts should be downloaded"
-        required: true
-        default: 'gs://general-ml-ci-transient/jax-github-actions/jax-fork/${{ github.workflow }}/${{ github.run_number }}/${{ github.run_attempt }}'
-        type: string
-      max-processes:
-        description: 'The value to set for `--maxprocesses` when running pytest. Leave empty to use max processes.'
-        type: string
-        default: ''
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  # Don't cancel in-progress jobs for main branches.
+  cancel-in-progress: ${{ github.ref != 'main' }}
 permissions: {}
 
-env:
-  UV_DEFAULT_INDEX: "https://us-python.pkg.dev/ml-oss-artifacts-published/pypi-mirror/simple"
-  PIP_INDEX_URL: "https://us-python.pkg.dev/ml-oss-artifacts-published/pypi-mirror/simple"
-
 jobs:
-  run-tests:
-    defaults:
-      run:
-        # Explicitly set the shell to bash to override Windows's default (cmd)
-        shell: bash
-    runs-on: ${{ inputs.runner }}
-    container: ${{ (contains(inputs.runner, 'linux-x86') && 'us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build:latest') ||
-                   (contains(inputs.runner, 'linux-arm64') && 'us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build-arm64:latest') ||
-                   (contains(inputs.runner, 'windows-x86') && null) }}
-
-    name: "${{ (contains(inputs.runner, 'linux-x86') && 'linux x86') ||
-        (contains(inputs.runner, 'linux-arm64') && 'linux arm64') ||
-        (contains(inputs.runner, 'windows-x86') && 'windows x86') }}, py ${{ inputs.python }}, x64=${{ inputs.enable-x64 }}"
-
-    env:
-      JAXCI_HERMETIC_PYTHON_VERSION: "${{ inputs.python }}"
-      JAXCI_PYTHON: "python${{ inputs.python }}"
-      JAXCI_ENABLE_X64: "${{ inputs.enable-x64 }}"
-      MAX_PROCESSES: ${{ inputs.max-processes }}
-
+  documentation_render:
+    name: Documentation - render documentation
+    runs-on: ${{ matrix.runs-on }}
+    container:
+      image: index.docker.io/library/ubuntu@sha256:4e0171b9275e12d375863f2b3ae9ce00a4c53ddda176bd55868df97ac6f21a6e #  ratchet:ubuntu:22.04
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        runs-on: [quoct-test-n2-16]
+        python-version: ['3.11']
     steps:
-      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
-        with:
-          persist-credentials: false
-      - name: Download JAX CPU wheels
-        uses: ./.github/actions/download-jax-cpu-wheels
-        with:
-          runner: ${{ inputs.runner }}
-          python: ${{ inputs.python }}
-          skip-download-jaxlib-from-gcs: ${{ inputs.skip-download-jaxlib-from-gcs }}
-          gcs_download_uri: ${{ inputs.gcs_download_uri }}
-      - name: Install Python dependencies
-        run: |
-          $JAXCI_PYTHON -m pip install uv~=0.5.30
-
-          $JAXCI_PYTHON -m uv pip install -r build/test-requirements.txt
-      # Halt for testing
-      - name: Wait For Connection
-        uses: google-ml-infra/actions/ci_connection@7f5ca0c263a81ed09ea276524c1b9192f1304e3c
-        with:
-          halt-dispatch-input: ${{ inputs.halt-for-connection }}
-      - name: Run Pytest CPU tests
-        timeout-minutes: 60
-        run: ./ci/run_pytest_cpu.sh
-
+    - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3  # v6.0.0
+      with:
+        persist-credentials: false
+    - name: Image Setup
+      run: |
+        apt update
+        apt install -y libssl-dev libsqlite3-dev build-essential
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548  # v6.1.0
+      with:
+        python-version: ${{ matrix.python-version }}
+    - name: Install dependencies
+      run: |
+        pip install uv~=0.5.30
+        uv pip install --system -r docs/requirements.txt
+    - name: Render documentation
+      run: |
+        sphinx-build -j auto --color -W --keep-going -b html docs docs/build/html
+    - name: Wait For Connection
+      uses: google-ml-infra/actions/ci_connection@7f5ca0c263a81ed09ea276524c1b9192f1304e3c
+      with:
+        halt-dispatch-input: "yes"
