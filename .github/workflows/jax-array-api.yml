@@ -51,9 +51,6 @@ jobs:
       run: |
         pip install uv~=0.5.30
         uv pip install --system -r docs/requirements.txt
-    - name: Render documentation
-      run: |
-        sphinx-build -j auto --color -W --keep-going -b html docs docs/build/html
     - name: Wait For Connection
       uses: google-ml-infra/actions/ci_connection@7f5ca0c263a81ed09ea276524c1b9192f1304e3c
       with:
