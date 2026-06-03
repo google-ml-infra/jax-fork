@@ -25,7 +25,7 @@ jobs:
     defaults:
       run:
         shell: bash
-    runs-on: "linux-x86-n4-64"
+    runs-on: "quoct-test-n2-16"
     container: "us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build:latest"
 # Begin Presubmit Naming Check - name modification requires internal check to be updated
     name: "CI - Oldest Supported NumPy (Python 3.11, x64=0)"
