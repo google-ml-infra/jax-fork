@@ -33,7 +33,7 @@ jobs:
     timeout-minutes: 10
     strategy:
       matrix:
-        runs-on: [linux-x86-n2-16, test-linux-n2-16]
+        runs-on: [test-linux-tpu, test-linux-n2-16]
         python-version: ['3.11']
     steps:
     - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3  # v6.0.0
