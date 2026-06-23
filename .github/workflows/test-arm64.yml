@@ -1,0 +1,13 @@
+name: ARM64 Testing
+on: [workflow_dispatch, push]
+
+jobs:
+  test-arm:
+    runs-on: gke-c4a-arm64
+    steps:
+      - name: Verify ARM64 Arch
+        run: |
+          echo "Checking CPU Architecture:"
+          uname -m
+          lscpu
+
