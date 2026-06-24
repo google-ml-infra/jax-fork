@@ -7,7 +7,6 @@ jobs:
     steps:
       - name: Verify ARM64 Arch
         run: |
-          echo "Checking CPU Architecture:"
-          uname -m
-          lscpu
+          echo "CPU Architecture:" && uname -m
+          echo "Disk Storage Class check:" && df -Th /home/runner/_work
 
