@@ -73,11 +73,13 @@ test_strategy=""
 # need to be run on the host machine and because running the tests on a
 # single machine can take a long time, we skip running them on these
 # platforms in the presubmit jobs.
-if [[ $os == "darwin" ]] || ( [[ $os == "linux" ]] && [[ $arch == "aarch64" ]] ); then
+if [[ $os == "darwin" ]]; then
     rbe_config=rbe_cross_compile_${os}_${arch}
     if [[ "$JAXCI_BAZEL_CPU_RBE_MODE" == 'test' ]]; then
         test_strategy="--strategy=TestRunner=local"
     fi
+elif [[ $os == "linux" ]] && [[ $arch == "aarch64" ]]; then
+    rbe_config=posix
 else
     rbe_config=rbe_${os}_${arch}
 fi

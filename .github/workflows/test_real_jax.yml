@@ -1,15 +1,12 @@
-name: Kanglan Real JAX ARM64 Test
-on:
-  push:
-    branches: kanglan/test_arm64
+name: Kanglan Real JAX ARM64 Local Test
+on: [workflow_dispatch, push]
 
 jobs:
-  test-real-bazel:
+  test-local-arm64:
     uses: ./.github/workflows/bazel_cpu.yml
     with:
       runner: "gke-c4a-arm64"
       python: "3.12"
       build_jaxlib: "true"
       build_jax: "true"
-      bazel_command: "build"
-
+      bazel_command: "test"
