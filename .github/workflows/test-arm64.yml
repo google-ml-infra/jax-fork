@@ -10,5 +10,5 @@ jobs:
       - name: Verify ARM64 Arch
         run: |
           echo "CPU Architecture:" && uname -m
-          echo "Disk Storage Class check:" && df -Th /home/runner/_work
+          echo "Disk Storage check:" && df -Th .
 
