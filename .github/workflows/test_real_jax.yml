@@ -1,0 +1,13 @@
+name: Kanglan Real JAX ARM64 Test
+on: [workflow_dispatch]
+
+jobs:
+  test-real-bazel:
+    uses: ./.github/workflows/bazel_cpu.yml
+    with:
+      runner: "kanglan-linux-arm64-c4a"
+      python: "3.12"
+      build_jaxlib: "true"
+      build_jax: "true"
+      bazel_command: "build"
+
