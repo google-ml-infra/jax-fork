@@ -1,5 +1,7 @@
 name: Kanglan Real JAX ARM64 Test
-on: [workflow_dispatch]
+on:
+  push:
+    branches: kanglan/test_arm64
 
 jobs:
   test-real-bazel:
