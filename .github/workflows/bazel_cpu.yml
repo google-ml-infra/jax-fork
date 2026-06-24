@@ -60,7 +60,7 @@ jobs:
         shell: bash
     runs-on: ${{ inputs.runner }}
     container: ${{ (contains(inputs.runner, 'linux-x86') && 'us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build:latest') ||
-                   (contains(inputs.runner, 'linux-arm64') && 'us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build-arm64:latest') ||
+                   ((contains(inputs.runner, 'linux-arm64') || contains(inputs.runner, 'gke-c4a-arm64')) && 'us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build-arm64:latest') ||
                    (contains(inputs.runner, 'windows-x86') && null) }}
     env:
       JAXCI_HERMETIC_PYTHON_VERSION: ${{ inputs.python }}
@@ -71,7 +71,7 @@ jobs:
 
 # Begin Presubmit Naming Check - name modification requires internal check to be updated
     name: "${{ (contains(inputs.runner, 'linux-x86') && 'linux x86') ||
-        (contains(inputs.runner, 'linux-arm64') && 'linux arm64') ||
+        ((contains(inputs.runner, 'linux-arm64') || contains(inputs.runner, 'gke-c4a-arm64')) && 'linux arm64') ||
         (contains(inputs.runner, 'windows-x86') && 'windows x86') }}, Python=${{ inputs.python }}, x64=${{ inputs.enable-x64 }}, build_jax=${{ inputs.build_jax }}, build_jaxlib=${{ inputs.build_jaxlib }}"
 # End Presubmit Naming Check github-cpu-presubmits
 
