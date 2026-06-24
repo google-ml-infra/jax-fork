@@ -11,6 +11,4 @@ jobs:
         run: |
           echo "CPU Architecture:" && uname -m
           echo "Disk Storage check:" && df -Th .
-          cd /app/externals/node20_alpine/bin
-          ./node -v
 
