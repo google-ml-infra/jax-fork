@@ -4,6 +4,8 @@ on: [workflow_dispatch, push]
 jobs:
   test-arm:
     runs-on: gke-c4a-arm64
+    container:
+      image: ubuntu:24.04
     steps:
       - name: Verify ARM64 Arch
         run: |
