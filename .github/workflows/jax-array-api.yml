@@ -25,6 +25,17 @@ concurrency:
 permissions: {}
 
 jobs:
+  test-runner:
+    runs-on: gke-windows-n2
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # ratchet:actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Simulate running a job on ${{ matrix.runner }}
+        run: |
+          echo "Starting a job on windows"
+          sleep 30
+
   documentation_render:
     name: Documentation - render documentation
     runs-on: ${{ matrix.runs-on }}
