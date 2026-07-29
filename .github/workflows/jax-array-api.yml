@@ -29,7 +29,7 @@ jobs:
     name: Documentation - render documentation
     runs-on: ${{ matrix.runs-on }}
     container:
-      image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build-arm64:infrastructure-public-image-9dae183a9fae 
+      image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build-arm64:infrastructure-public-image-8f4da9c9607 
     timeout-minutes: 10
     strategy:
       matrix:
