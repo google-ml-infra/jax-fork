@@ -29,11 +29,11 @@ jobs:
     name: Documentation - render documentation
     runs-on: ${{ matrix.runs-on }}
     container:
-      image: index.docker.io/library/ubuntu@sha256:4e0171b9275e12d375863f2b3ae9ce00a4c53ddda176bd55868df97ac6f21a6e #  ratchet:ubuntu:22.04
+      image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build-arm64:infrastructure-public-image-9dae183a9fae 
     timeout-minutes: 10
     strategy:
       matrix:
-        runs-on: [test-linux-tpu, test-linux-n2-16, test-linux-c4a-16]
+        runs-on: [test-linux-c4a-16]
         python-version: ['3.11']
     steps:
     - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3  # v6.0.0
