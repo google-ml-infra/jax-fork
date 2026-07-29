@@ -36,9 +36,14 @@ jobs:
         runs-on: [test-linux-c4a-16]
         python-version: ['3.11']
     steps:
-    - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3  # v6.0.0
+    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # ratchet:actions/checkout@v4
       with:
         persist-credentials: false
+    - name: Simulate running a job on
+      run: |
+        echo "Starting a job on runner: "
+        sleep 30
+        echo "Job finished on runner."
     - name: Image Setup
       run: |
         apt update
