@@ -33,7 +33,7 @@ jobs:
     timeout-minutes: 10
     strategy:
       matrix:
-        runs-on: [test-linux-c4a-16]
+        runs-on: [linux-x86-n2-16, test-linux-n2-32]
         python-version: ['3.11']
     steps:
     - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # ratchet:actions/checkout@v4
@@ -44,6 +44,8 @@ jobs:
         echo "Starting a job on runner: "
         sleep 30
         echo "Job finished on runner."
+    - name: Run local composite action
+      uses: ./.github/actions/hello-composite # Will fail to load
     - name: Image Setup
       run: |
         apt update
@@ -65,7 +67,3 @@ jobs:
     - name: Run Protoc Compiler
       run: |
         protoc --version
-    - name: Wait For Connection
-      uses: google-ml-infra/actions/ci_connection@7f5ca0c263a81ed09ea276524c1b9192f1304e3c
-      with:
-        halt-dispatch-input: "yes"
