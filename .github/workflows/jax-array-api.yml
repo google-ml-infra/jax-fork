@@ -28,6 +28,7 @@ jobs:
   documentation_render:
     name: Documentation - render documentation
     runs-on:
+      group: ml-actions-platform
       labels: linux-x86-g2-48-l4-4gpu
     container:
       image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build:latest
