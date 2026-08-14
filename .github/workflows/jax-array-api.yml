@@ -31,11 +31,11 @@ jobs:
       group: ml-actions-platform
       labels: ${{ matrix.runs-on }}
     container:
-      image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build:latest
+      image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build${{ contains(matrix.runs-on, 'arm64') && '-arm64' || '' }}:latest
     timeout-minutes: 10
     strategy:
       matrix:
-        runs-on: [linux-x86-g2-48-l4-4gpu, linux-x86-n4-16]
+        runs-on: [linux-x86-g2-48-l4-4gpu, linux-x86-n4-16, linux-arm64-c4a-16]
         python-version: ['3.11']
     steps:
     - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # ratchet:actions/checkout@v4
