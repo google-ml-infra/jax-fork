@@ -28,13 +28,13 @@ jobs:
   documentation_render:
     name: Documentation - render documentation
     runs-on:
-      group: ml-actions-platform
-      labels: linux-x86-g2-48-l4-4gpu
+      labels: ${{ matrix.runs-on }}
     container:
       image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build:latest
     timeout-minutes: 10
     strategy:
       matrix:
+        runs-on: [linux-x86-g2-48-l4-4gpu, linux-x86-n4-16]
         python-version: ['3.11']
     steps:
     - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # ratchet:actions/checkout@v4
