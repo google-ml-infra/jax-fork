@@ -40,6 +40,11 @@ jobs:
     - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # ratchet:actions/checkout@v4
       with:
         persist-credentials: false
+    - name: Simulate running a job on
+      run: |
+        echo "Starting a job on runner: "
+        sleep 60
+        echo "Job finished on runner."
     - name: Verify Mount Point & GCS FUSE Filesystem
       run: |
         echo "=== 1. Checking Mount Status ==="
@@ -61,11 +66,6 @@ jobs:
         else
           echo "SUCCESS: Write rejected as expected on read-only mount."
         fi
-    - name: Simulate running a job on
-      run: |
-        echo "Starting a job on runner: "
-        sleep 30
-        echo "Job finished on runner."
     - name: Run local composite action
       uses: ./.github/actions/hello-composite # Will fail to load
     - name: Image Setup
