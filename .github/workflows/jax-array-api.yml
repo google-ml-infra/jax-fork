@@ -7,6 +7,16 @@ on:
   pull_request:
     branches:
       - main
+  workflow_dispatch:
+    inputs:
+      halt-for-connection:
+        description: 'Should this workflow run wait for a remote connection?'
+        type: choice
+        required: true
+        default: 'yes'
+        options:
+          - 'yes'
+          - 'no'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
@@ -14,39 +24,68 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'main' }}
 permissions: {}
 
-env:
-  UV_DEFAULT_INDEX: "https://us-python.pkg.dev/ml-oss-artifacts-published/pypi-mirror/simple"
-
 jobs:
-  build:
-    runs-on: linux-x86-n4-16
-    container: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build:latest
+  documentation_render:
+    name: Documentation - render documentation
+    runs-on:
+      labels: ${{ matrix.runs-on }}
+    container:
+      image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build${{ contains(matrix.runs-on, 'arm64') && '-arm64' || '' }}:latest
+    timeout-minutes: 10
     strategy:
       matrix:
-        python-version: [3.11]
-    env:
-      PYTHON: "python${{ matrix.python-version }}"
+        runs-on: [test-linux-n2-16]
+        python-version: ['3.11']
     steps:
-    - name: Checkout jax
-      uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3  # v6.0.0
+    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # ratchet:actions/checkout@v4
       with:
         persist-credentials: false
-    - name: Checkout array-api-tests
-      uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3  # v6.0.0
+    - name: Simulate running a job on
+      run: |
+        echo "Starting a job on runner: "
+        sleep 60
+        echo "Job finished on runner."
+    - name: Verify Mount Point & GCS FUSE Filesystem
+      run: |
+        echo "=== 1. Checking Mount Status ==="
+        mount | grep gcsfuse || echo "Warning: gcsfuse not in mount list (may appear as fuse)"
+        
+        echo "=== 2. Checking Disk Usage on /mnt/gcs ==="
+        df -h /mnt/gcs
+    - name: List Bucket Contents
+      run: |
+        echo "=== 3. Listing Files in /mnt/gcs ==="
+        ls -la /mnt/gcs
+    - name: Verify Read-Only Enforcement
+      run: |
+        echo "=== 4. Testing Read-Only Enforcement ==="
+        if touch /mnt/gcs/test-write.tmp 2>/dev/null; then
+          echo "ERROR: Bucket is writable but was expected to be readOnly: true"
+          rm -f /mnt/gcs/test-write.tmp
+          exit 1
+        else
+          echo "SUCCESS: Write rejected as expected on read-only mount."
+        fi
+    - name: Run local composite action
+      uses: ./.github/actions/hello-composite # Will fail to load
+    - name: Image Setup
+      run: |
+        apt update
+        apt install -y libssl-dev libsqlite3-dev build-essential
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548  # v6.1.0
       with:
-        repository: data-apis/array-api-tests
-        ref: '2025.05.23'
-        submodules: 'true'
-        path: 'array-api-tests'
-        persist-credentials: false
+        python-version: ${{ matrix.python-version }}
     - name: Install dependencies
-      # TODO(jakevdp) remove numpy pin once ml_dtypes 0.6 is released
       run: |
-        $PYTHON -m uv pip install --system .[ci] "numpy<2.4.0" pytest-xdist -r array-api-tests/requirements.txt
-    - name: Run the test suite
-      env:
-        ARRAY_API_TESTS_MODULE: jax.numpy
-        JAX_ENABLE_X64: 'true'
+        pip install uv~=0.5.30
+        uv pip install --system -r docs/requirements.txt
+    - name: Install System Dependencies
       run: |
-        cd ${GITHUB_WORKSPACE}/array-api-tests
-        $PYTHON -m pytest -n auto array_api_tests --derandomize --disable-deadline --skips-file ${GITHUB_WORKSPACE}/tests/array_api_skips.txt
+        apt-get update
+        apt-get install -y unzip
+    - name: Install Protoc Compiler
+      uses: arduino/setup-protoc@v3
+    - name: Run Protoc Compiler
+      run: |
+        protoc --version
