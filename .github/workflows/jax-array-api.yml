@@ -28,7 +28,6 @@ jobs:
   documentation_render:
     name: Documentation - render documentation
     runs-on:
-      group: ml-actions-platform
       labels: ${{ matrix.runs-on }}
     container:
       image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build${{ contains(matrix.runs-on, 'arm64') && '-arm64' || '' }}:latest
