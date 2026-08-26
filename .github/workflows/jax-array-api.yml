@@ -35,12 +35,33 @@ jobs:
     timeout-minutes: 10
     strategy:
       matrix:
-        runs-on: [linux-x86-g2-48-l4-4gpu, linux-x86-n4-16, linux-arm64-c4a-16]
+        runs-on: [test-linux-n2-16]
         python-version: ['3.11']
     steps:
     - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # ratchet:actions/checkout@v4
       with:
         persist-credentials: false
+    - name: Verify Mount Point & GCS FUSE Filesystem
+      run: |
+        echo "=== 1. Checking Mount Status ==="
+        mount | grep gcsfuse || echo "Warning: gcsfuse not in mount list (may appear as fuse)"
+        
+        echo "=== 2. Checking Disk Usage on /mnt/gcs ==="
+        df -h /mnt/gcs
+    - name: List Bucket Contents
+      run: |
+        echo "=== 3. Listing Files in /mnt/gcs ==="
+        ls -la /mnt/gcs
+    - name: Verify Read-Only Enforcement
+      run: |
+        echo "=== 4. Testing Read-Only Enforcement ==="
+        if touch /mnt/gcs/test-write.tmp 2>/dev/null; then
+          echo "ERROR: Bucket is writable but was expected to be readOnly: true"
+          rm -f /mnt/gcs/test-write.tmp
+          exit 1
+        else
+          echo "SUCCESS: Write rejected as expected on read-only mount."
+        fi
     - name: Simulate running a job on
       run: |
         echo "Starting a job on runner: "
