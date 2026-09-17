@@ -19,7 +19,6 @@ env:
 
 jobs:
   test-oldest-supported-numpy:
-    if: ${{ github.event.repository.fork == false && !startsWith(github.head_ref, 'release/') }}
     defaults:
       run:
         shell: bash
