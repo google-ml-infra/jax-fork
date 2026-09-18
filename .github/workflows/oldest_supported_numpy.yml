@@ -40,7 +40,7 @@ jobs:
       JAXCI_PYTHON: "python3.11"
       JAXCI_ENABLE_X64: 0
       JAX_NUM_GENERATED_CASES: 5
-      MAX_PROCESSES: "16"
+      MAX_PROCESSES: "8"
       PYTEST_ADDOPTS: "-W ignore::DeprecationWarning"
     steps:
       - name: Verify Kernel / Runtime Environment
