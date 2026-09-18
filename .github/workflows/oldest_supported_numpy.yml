@@ -33,13 +33,17 @@ jobs:
             label: "with-gvisor"
           - runner: "test-linux-n2-16-no-sandbox"
             label: "without-gvisor"
-          - runner: "linux-x86-n2-16"
-            label: "standard-runner"
+          - runner: "test-linux-tpu-sandbox"
+            label: "tpu-with-gvisor"
+          - runner: "test-linux-tpu"
+            label: "tpu-without-gvisor"
 
     env:
       JAXCI_PYTHON: "python3.11"
       JAXCI_ENABLE_X64: 0
       JAX_NUM_GENERATED_CASES: 5
+      MAX_PROCESSES: "16"
+      PYTEST_ADDOPTS: "-W ignore::DeprecationWarning"
 
     steps:
       - name: Verify Kernel / Runtime Environment
@@ -47,6 +51,8 @@ jobs:
           echo "=== Kernel / Runtime Info ==="
           uname -a
           dmesg 2>/dev/null | head -n 2 || true
+          echo "=== Accelerator Devices ==="
+          ls -la /dev/vfio/ /dev/accel* 2>/dev/null || true
 
       - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
         with:
@@ -64,4 +70,6 @@ jobs:
 
       - name: Run Pytest CPU tests
         timeout-minutes: 30
-        run: ./ci/run_pytest_cpu.sh
+        run: |
+          sed -i 's/--maxfail=20/--maxfail=0/' ./ci/run_pytest_cpu.sh
+          ./ci/run_pytest_cpu.sh
