@@ -1,22 +1,17 @@
 # CI - Oldest Supported NumPy (presubmit)
 # This workflow tests the oldest supported NumPy and jaxlib versions.
-
 name: CI - Oldest Supported NumPy (presubmit)
-
 on:
   pull_request:
     branches:
       - main
   workflow_dispatch:
-
 permissions: {}
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: ${{ !contains(github.ref, 'release/') && github.ref != 'main' }}
-
 env:
   UV_DEFAULT_INDEX: "https://us-python.pkg.dev/ml-oss-artifacts-published/pypi-mirror/simple"
-
 jobs:
   test-oldest-supported-numpy:
     defaults:
@@ -30,21 +25,23 @@ jobs:
       matrix:
         include:
           - runner: "test-linux-n2-16"
-            label: "with-gvisor"
+            label: "n2-16-with-gvisor"
+          - runner: "test-linux-n2-32"
+            label: "n2-32-with-gvisor"
+          - runner: "test-linux-n2-32-no-sandbox"
+            label: "n2-32-without-gvisor"
           - runner: "test-linux-n2-16-no-sandbox"
-            label: "without-gvisor"
+            label: "n2-16-without-gvisor"
           - runner: "test-linux-tpu-sandbox"
             label: "tpu-with-gvisor"
           - runner: "test-linux-tpu"
             label: "tpu-without-gvisor"
-
     env:
       JAXCI_PYTHON: "python3.11"
       JAXCI_ENABLE_X64: 0
       JAX_NUM_GENERATED_CASES: 5
       MAX_PROCESSES: "16"
       PYTEST_ADDOPTS: "-W ignore::DeprecationWarning"
-
     steps:
       - name: Verify Kernel / Runtime Environment
         run: |
@@ -53,21 +50,16 @@ jobs:
           dmesg 2>/dev/null | head -n 2 || true
           echo "=== Accelerator Devices ==="
           ls -la /dev/vfio/ /dev/accel* 2>/dev/null || true
-
       - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
         with:
           persist-credentials: false
-
       - name: Install Python dependencies
         run: |
           $JAXCI_PYTHON -m uv pip install -r build/test-requirements.txt
-
           # Install NumPy and SciPy with the oldest supported versions
           $JAXCI_PYTHON -m uv pip install numpy==2.0.0 scipy==1.13.0
-
           # Install JAX using the changes in the PR
           $JAXCI_PYTHON -m uv pip install -e .[minimum-jaxlib]
-
       - name: Run Pytest CPU tests
         timeout-minutes: 60
         run: |
