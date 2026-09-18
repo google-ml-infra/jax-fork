@@ -33,6 +33,8 @@ jobs:
             label: "with-gvisor"
           - runner: "test-linux-n2-16-no-sandbox"
             label: "without-gvisor"
+          - runner: "linux-x86-n2-16"
+            label: "standard-runner"
 
     env:
       JAXCI_PYTHON: "python3.11"
