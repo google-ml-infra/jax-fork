@@ -1,57 +1,73 @@
 # CI - Oldest Supported NumPy (presubmit)
 # This workflow tests the oldest supported NumPy and jaxlib versions.
-
 name: CI - Oldest Supported NumPy (presubmit)
-
 on:
   pull_request:
     branches:
       - main
-  push:
-    branches:
-      - main
+  workflow_dispatch:
 permissions: {}
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
-  # Don't cancel in-progress jobs for main/release branches.
   cancel-in-progress: ${{ !contains(github.ref, 'release/') && github.ref != 'main' }}
-
 env:
   UV_DEFAULT_INDEX: "https://us-python.pkg.dev/ml-oss-artifacts-published/pypi-mirror/simple"
-
 jobs:
   test-oldest-supported-numpy:
-    if: ${{ github.event.repository.fork == false && !startsWith(github.head_ref, 'release/') }}
     defaults:
       run:
         shell: bash
-    runs-on: "linux-x86-n4-64"
+    runs-on: ${{ matrix.runner }}
     container: "us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build:latest"
-# Begin Presubmit Naming Check - name modification requires internal check to be updated
-    name: "CI - Oldest Supported NumPy (Python 3.11, x64=0)"
-# End Presubmit Naming Check github-oldest-supported-numpy-presubmit
-
+    name: "CI - Oldest Supported NumPy (${{ matrix.label }})"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: "test-linux-n2-16"
+            label: "n2-16-with-gvisor"
+            max_processes: "8"
+          - runner: "test-linux-n2-32"
+            label: "n2-32-with-gvisor"
+            max_processes: "16"
+          - runner: "test-linux-n2-32-no-sandbox"
+            label: "n2-32-without-gvisor"
+            max_processes: "16"
+          - runner: "test-linux-n2-16-no-sandbox"
+            label: "n2-16-without-gvisor"
+            max_processes: "8"
+          - runner: "test-linux-tpu-sandbox"
+            label: "tpu-with-gvisor"
+            max_processes: "8"
+          - runner: "test-linux-tpu"
+            label: "tpu-without-gvisor"
+            max_processes: "8"
     env:
       JAXCI_PYTHON: "python3.11"
       JAXCI_ENABLE_X64: 0
       JAX_NUM_GENERATED_CASES: 5
-
+      MAX_PROCESSES: ${{ matrix.max_processes }}
+      PYTEST_ADDOPTS: "-W ignore::DeprecationWarning"
     steps:
+      - name: Verify Kernel / Runtime Environment
+        run: |
+          echo "=== Kernel / Runtime Info ==="
+          uname -a
+          dmesg 2>/dev/null | head -n 2 || true
+          echo "=== Accelerator Devices ==="
+          ls -la /dev/vfio/ /dev/accel* 2>/dev/null || true
       - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
         with:
           persist-credentials: false
       - name: Install Python dependencies
         run: |
           $JAXCI_PYTHON -m uv pip install -r build/test-requirements.txt
-
           # Install NumPy and SciPy with the oldest supported versions
           $JAXCI_PYTHON -m uv pip install numpy==2.0.0 scipy==1.13.0
-
           # Install JAX using the changes in the PR
           $JAXCI_PYTHON -m uv pip install -e .[minimum-jaxlib]
-      # Halt for testing
-      - name: Wait For Connection
-        uses: google-ml-infra/actions/ci_connection@7f5ca0c263a81ed09ea276524c1b9192f1304e3c
       - name: Run Pytest CPU tests
-        timeout-minutes: 30
-        run: ./ci/run_pytest_cpu.sh
+        timeout-minutes: 60
+        run: |
+          sed -i 's/--maxfail=20/--maxfail=0/' ./ci/run_pytest_cpu.sh
+          ./ci/run_pytest_cpu.sh

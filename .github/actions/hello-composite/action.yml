@@ -1,0 +1,7 @@
+name: Hello Composite
+description: A local composite action to test nosharedvolume support
+runs:
+  using: composite
+  steps:
+    - run: echo "Hello World from local composite action!"
+      shell: bash
