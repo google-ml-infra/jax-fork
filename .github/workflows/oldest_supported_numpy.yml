@@ -26,21 +26,27 @@ jobs:
         include:
           - runner: "test-linux-n2-16"
             label: "n2-16-with-gvisor"
+            max_processes: "8"
           - runner: "test-linux-n2-32"
             label: "n2-32-with-gvisor"
+            max_processes: "16"
           - runner: "test-linux-n2-32-no-sandbox"
             label: "n2-32-without-gvisor"
+            max_processes: "16"
           - runner: "test-linux-n2-16-no-sandbox"
             label: "n2-16-without-gvisor"
+            max_processes: "8"
           - runner: "test-linux-tpu-sandbox"
             label: "tpu-with-gvisor"
+            max_processes: "8"
           - runner: "test-linux-tpu"
             label: "tpu-without-gvisor"
+            max_processes: "8"
     env:
       JAXCI_PYTHON: "python3.11"
       JAXCI_ENABLE_X64: 0
       JAX_NUM_GENERATED_CASES: 5
-      MAX_PROCESSES: "8"
+      MAX_PROCESSES: ${{ matrix.max_processes }}
       PYTEST_ADDOPTS: "-W ignore::DeprecationWarning"
     steps:
       - name: Verify Kernel / Runtime Environment
